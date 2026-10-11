@@ -12,7 +12,8 @@ const PREAMBLE =
 // sections: [{ label, url, content, bytes? }] in priority order. content is null
 // for files too large to include; the agent gets the link instead.
 export function buildPackage({ site, pageUrl, sections, relatedLinks = [], budget = DEFAULT_BUDGET, now = new Date() }) {
-  const head = [
+  // The Sources list counts against the budget too: it takes at most half.
+  let head = [
     `# ${site} documentation (via scoop.md)`,
     '',
     `Retrieved ${now.toISOString().slice(0, 10)} while viewing ${pageUrl}`,
@@ -20,9 +21,18 @@ export function buildPackage({ site, pageUrl, sections, relatedLinks = [], budge
     PREAMBLE,
     '',
     '## Sources',
-    ...sections.map((s) => `- ${s.label}: ${s.url}`),
     '',
   ].join('\n');
+  for (const [i, s] of sections.entries()) {
+    const line = `- ${s.label}: ${s.url}\n`;
+    const rest = sections.length - i - 1;
+    const more = rest ? `- …and ${rest} more\n`.length : 0;
+    if (head.length + line.length + more > budget / 2) {
+      head += `- …and ${sections.length - i} more\n`;
+      break;
+    }
+    head += line;
+  }
 
   // Related links go last but are budgeted first: they are small and tell the
   // agent where to look when a section was cut.

@@ -103,3 +103,15 @@ test('the budget holds exactly with a long section, many related links and the t
     assert.match(out, /Truncated\. The full text is at https:\/\/ex\.com\/llms-full\.txt\]/);
   }
 });
+
+test('the Sources list counts against the budget (50 long sections at 10,000 came out at 16,380)', () => {
+  const sections = Array.from({ length: 50 }, (_, i) => ({
+    label: `This page: ${'Long title '.repeat(15)}${i}`,
+    url: `https://ex.com/docs/${'segment/'.repeat(10)}${i}.md`,
+    content: 'x'.repeat(2000),
+  }));
+  const out = buildPackage({ site: 'ex.com', pageUrl: 'https://ex.com/', now, budget: 10_000, sections });
+  assert.ok(out.length <= 10_000, `length ${out.length}`);
+  assert.match(out, /^- …and \d+ more$/m);
+  assert.match(out, /- This page: Long title.* 0: https:\/\/ex\.com\/docs\/.*\/0\.md/);
+});
