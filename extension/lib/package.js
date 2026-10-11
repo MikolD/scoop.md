@@ -69,7 +69,13 @@ function tooLarge(s) {
 }
 
 // A page and its Markdown twin (<page>.md, <page>/index.md, or /#/page's /page.md) count as the same page.
-const pageKey = (u) => u.replace(/\/?#\//, '/').replace(/#.*$/, '').replace(/(\/index)?\.md$/, '').replace(/\/$/, '');
+// Compares origin and path only: ?utm_source=… and #anchors don't make another page.
+function pageKey(u) {
+  const url = new URL(u);
+  const route = url.hash.startsWith('#/') ? url.hash.slice(1).split(/[?#]/)[0] : '';
+  const path = route ? url.pathname.replace(/\/$/, '') + route : url.pathname;
+  return url.origin + path.replace(/(\/index)?\.md$/, '').replace(/\/$/, '');
+}
 
 // Puts the page the user is on right now first, unless the shared skill
 // already covers it, so a site-level skill still answers "this page". The

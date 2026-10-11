@@ -70,6 +70,16 @@ test('the shared skill\'s page is not called "This page" when the user is on ano
   const twin = (url) => [{ kind: 'page-md', label: 'This page: d1', url, content: 'd' }];
   assert.equal(withCurrentPage(twin('https://ex.com/d1/index.md'), null, 'https://ex.com/d1/').length, 1);
   assert.equal(withCurrentPage(twin('https://ex.com/quickstart.md'), null, 'https://ex.com/#/quickstart')[0].label, 'This page: d1');
+  assert.equal(withCurrentPage(twin('https://ex.com/repo/quickstart.md'), null, 'https://ex.com/repo/#/quickstart')[0].label, 'This page: d1');
+});
+
+test('query strings do not make the current page a different page', () => {
+  const shared = [{ kind: 'page-md', label: 'This page: foo', url: 'https://ex.com/docs/foo.md', content: 'f' }];
+  // The skill already covers the tab's page: keep it as "This page".
+  assert.equal(withCurrentPage(shared, null, 'https://ex.com/docs/foo?utm_source=x'), shared);
+  // The scooped page keeps its query in its URL; it must still be put first.
+  const page = { kind: 'page-html', label: 'This page: bar', url: 'https://ex.com/docs/bar?tab=js', content: 'b' };
+  assert.deepEqual(withCurrentPage(shared, page, 'https://ex.com/docs/bar?tab=js&utm_source=x').map((s) => s.label), ['This page: bar', 'Another page: foo']);
 });
 
 test('the budget holds exactly with a long section, many related links and the truncation note', () => {
