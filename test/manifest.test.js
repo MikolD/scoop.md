@@ -40,3 +40,12 @@ test('the library URL is not a user setting', () => {
   assert.deepEqual(js.match(/.*libraryUrl.*/g), ["chrome.storage.sync.remove('libraryUrl');"], 'options.js only deletes the old setting');
   assert.ok(!manifest.permissions.includes('management'), 'management.getSelf needs no permission');
 });
+
+test('the privacy page matches what the extension does (no library off switch)', () => {
+  const privacy = readFileSync(new URL('../site/src/pages/privacy.astro', import.meta.url), 'utf8');
+  for (const gone of ['library can be turned off', 'Clear the library address', 'no network calls', 'Only when the library is on']) {
+    assert.ok(!privacy.includes(gone), gone);
+  }
+  assert.match(privacy, /api\.scoop\.md\/v1\/skills\/best/);
+  assert.match(privacy, /theme stays on this device/);
+});

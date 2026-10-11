@@ -23,7 +23,7 @@ const updated = '2026-09-30';
     <ul>
       <li>The extension reads only the tab you're on, and only when you click the button or press its shortcut.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Sharing can be turned off. The library can be turned off entirely.</li>
+      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
       <li>No accounts. No browsing history. No ads, no trackers, and we don't sell data.</li>
       <li>IP addresses are used for rate limiting and not stored.</li>
     </ul>
@@ -45,19 +45,19 @@ const updated = '2026-09-30';
     <ul>
       <li>The package on your clipboard.</li>
       <li>
-        Your settings (sharing on or off, theme), stored in Chrome's extension storage. If you use Chrome sync,
-        Chrome syncs them with your Google account.
+        Your settings, stored in Chrome's extension storage. Sharing on or off syncs with your Google account if you use
+        Chrome sync; the theme stays on this device.
       </li>
       <li>A random install ID the extension creates on first run. It identifies an installation, not a person.</li>
       <li>Anything from a page that only rendered because you're signed in. It reaches your clipboard and nowhere else.</li>
     </ul>
 
     <h2>What leaves your device</h2>
-    <p>Only when the library is on (it is by default, at <code>api.scoop.md</code>):</p>
-    <h3>Every click</h3>
+    <h3>Every scoop</h3>
     <p>
-      The site's hostname (for example <code>docs.stripe.com</code>), so the library can return a scoop for it. Not the
-      page address, not the page content.
+      Each time you scoop a web page, the extension sends the site's hostname (for example <code>docs.stripe.com</code>)
+      to <code>api.scoop.md/v1/skills/best</code> to look for a shared version. Not the page address, not the page
+      content. This happens whether or not sharing is on.
     </p>
     <h3>When sharing is on and the material was fetched without cookies</h3>
     <ul>
@@ -112,7 +112,6 @@ const updated = '2026-09-30';
     <h2>Your choices</h2>
     <ul>
       <li>Turn sharing off in the extension's options. Scooping still works; nothing is uploaded.</li>
-      <li>Clear the library address in the options to use the extension with no network calls to us at all.</li>
       <li>Uninstalling the extension deletes its settings and install ID from your browser.</li>
       <li>
         To have data linked to your install ID deleted, email us. We don't know who you are, so we may need the install
