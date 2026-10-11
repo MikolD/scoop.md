@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "wrangler dev",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production"
