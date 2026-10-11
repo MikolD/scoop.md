@@ -71,23 +71,48 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   `(last_worked_at, site)` if the list grows large.
 - **Caching:** `/best` sends `public, max-age=30, s-maxage=60` (spec). `/sites`
   and `/sites/:site` send `public, max-age=60, s-maxage=60` ("cacheable for
-  60 s"); the reference uses the `/best` header for those too.
+  60 s"); the reference uses the `/best` header for those too. Every other
+  response (`/v1/skills/:id`, health, admin, all writes, preflights and every
+  error) sends `cache-control: no-store`.
+- **No Workers Cache API yet.** The `s-maxage` headers only matter to shared
+  caches in front of the Worker; a Custom Domain Worker is the origin, so
+  responses are not cached at Cloudflare's edge today. Adding
+  `caches.default` for `/best` and `/sites` (with purge on vote and takedown)
+  is a later decision, once read volume justifies it.
 - **`sizeBytes`** is the sum of section `content.length` (UTF-16 code units), as
   in the spec's wording and the reference, not a byte count.
-- **Markdown stripping for shingles** (§6) removes links/images to their text,
-  bare URLs, heading/list/quote markers and `# * _ \` | ~`. Word splitting on
-  letters and digits already drops all other punctuation, so this matches the
-  reference's results.
+- **Markdown stripping for shingles** (§6) removes link and image targets
+  (keeping their text) and bare URLs. Heading, emphasis, code, list, quote and
+  table markers get no pass of their own: shingling splits on letters and
+  digits, which drops them anyway.
+- **Blocked sites:** `scoop.md` and anything under it can't be shared (400).
+- **`ALLOW_LOCALHOST`** is honoured only when the `ENVIRONMENT` var is `dev`
+  (set at the top level of `wrangler.jsonc`; `staging`/`production` set their
+  own), so a stray secret or var can't open localhost fetching in a deployed
+  Worker.
+- **Takedown races:** if a skill's R2 object is missing when it is served, the
+  row is re-read: removed → 410 (`/v1/skills/:id`) or `skill: null`
+  (`/best`); not removed → 500 (a real inconsistency).
+- **Failed inserts:** when the D1 insert of a new skill throws, the R2 object is
+  deleted only if a re-read confirms the row doesn't exist. An orphaned object
+  is harmless; a row pointing at nothing is not.
 
 ## Rate limiting (§8)
 
 - Cloudflare's rate limiting binding only supports 10 s and 60 s periods, so it
-  is used for **reads** only (600/min per IP, key = `CF-Connecting-IP`).
+  is used for **reads** only (600/min per IP, key = `CF-Connecting-IP`). Admin
+  routes skip it, so bad admin auth is always a plain 404.
 - **Hourly write limits** are fixed one-hour windows in a D1 table
-  `rate_counters(key, hour, count)`. `key` is `sha256(bucket:hour:subject)`, so
-  raw IPs are never stored, and every check deletes rows from past hours, so
-  nothing outlives the window (§3, §10). Increments use `INSERT ... ON CONFLICT
-  DO UPDATE ... RETURNING count` in one batch with the prune.
+  `rate_counters(key, hour, count)`. `key` is
+  `HMAC-SHA256(RATE_KEY, bucket:hour:subject)` with a Workers secret
+  `RATE_KEY`: a plain hash of an IPv4 address can be reversed by trying all
+  2^32, an HMAC can't without the key. Every check deletes rows from past
+  hours, so nothing outlives the window (§3, §10). Increments use
+  `INSERT ... ON CONFLICT DO UPDATE ... RETURNING count` in one batch with the
+  prune. Without `RATE_KEY`, writes fail with 500 rather than run unlimited.
+- **IP subject:** IPv4 as is (IPv4-mapped IPv6 too); IPv6 by its /64, one
+  subscriber's usual allocation, so cycling addresses within it doesn't reset
+  the count.
 - Limits, each by install ID **and** by IP:
   - `POST /v1/skills`: 20/hour per install, 60/hour per IP (spec).
   - Feedback and reports share one bucket: 120/hour per install (spec) and
@@ -123,10 +148,40 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   hostname rules in §6 are the first line, not the only one.
 - Worst case per share: 6 sections × 6 hops = 36 subrequests, under the
   Workers Free limit of 50.
+- **One 10 s timeout per section** covers every redirect hop and reading the
+  body (the reference timed each hop separately).
+- **Redirect targets** are checked against the site first, then the SSRF rules.
+  A redirect is the source's doing, so a bad target is a 422: `site_mismatch`
+  when it leaves the site (including to an IP literal or internal host), else
+  `source_unreachable` (for example `http:` or a non-443 port on the same
+  host). The client's own URLs that break the SSRF rules are still 400.
+- **Linear-time text processing.** `htmlToText`, `markdownToPlain` and
+  `normalizeText` are hand-written scans, not regexes: the regex versions were
+  quadratic on crafted input (`'<script ' × n` took 6 s at 160 KB). Markdown
+  link targets longer than 2,048 characters are not treated as links. Unit
+  tests run 2 MB adversarial inputs against a 200 ms budget; the reference
+  server has the same code and a matching test.
+- **Shingles are hashed** to 32-bit numbers (FNV-1a over word hashes) instead of
+  kept as joined strings: one 2.3 MB page took about 68 MB as strings. A
+  collision can only make an injected shingle look present by chance: with
+  ~300k shingles on a 2 MB page that is about 0.007% per section shingle,
+  negligible next to the 15% the threshold already allows.
+- **page-html sections are verified one at a time**, text sections
+  concurrently, so at most one page and its shingle set is in memory.
+
+## Known limitations
+
+- **IDN hostnames** are compared in the punycode form `new URL()` produces
+  (`xn--…`). A site sent as Unicode and its URLs normalise the same way, so
+  matching works, but there is no confusable/homograph check and the punycode
+  form is what's stored and shown. Revisit when non-ASCII docs hosts appear.
 
 ## Logging (§11)
 
-One JSON line per request: `method`, `route` (pattern such as
+Workers Logs is enabled with **invocation logs and traces off** in every
+environment: invocation logs record the request URL and headers (install ID,
+`CF-Connecting-IP`, the admin `Authorization` header), which §3 and §10 rule
+out. What remains is one JSON line per request from the Worker: `method`, `route` (pattern such as
 `/v1/skills/:id`, never the path or query), `status`, `ms`, `client`. Unexpected
 errors additionally log `{ route, error }` with the message only. No IPs,
 install IDs, URLs or content.

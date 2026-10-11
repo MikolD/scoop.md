@@ -9,6 +9,9 @@ on:
     tags: ['backend-v*']
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   WRANGLER_SEND_METRICS: 'false'
 
@@ -46,6 +49,9 @@ jobs:
     if: vars.BACKEND_DEPLOY == '1' && github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment: staging
+    concurrency:
+      group: backend-deploy-staging
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: backend
@@ -66,7 +72,12 @@ jobs:
     needs: test
     if: vars.BACKEND_DEPLOY == '1' && startsWith(github.ref, 'refs/tags/backend-v')
     runs-on: ubuntu-latest
+    # Protect this environment in the repo settings (required reviewers) so a
+    # tag alone can't ship to production.
     environment: production
+    concurrency:
+      group: backend-deploy-production
+      cancel-in-progress: false
     defaults:
       run:
         working-directory: backend

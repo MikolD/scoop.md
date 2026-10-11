@@ -35,7 +35,7 @@ Node 22.18+ (unit tests run TypeScript directly and use `node:sqlite`).
 ```sh
 cd backend
 npm install
-cp .dev.vars.example .dev.vars        # ADMIN_TOKEN, ALLOW_LOCALHOST=1, ALLOW_ANY_EXTENSION=1
+cp .dev.vars.example .dev.vars        # ADMIN_TOKEN, RATE_KEY, ALLOW_LOCALHOST=1, ALLOW_ANY_EXTENSION=1
 npm run db:migrate:local              # creates the local D1 in .wrangler/state
 npm run dev                           # wrangler dev on http://localhost:8787
 ```
@@ -73,10 +73,13 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    npx wrangler r2 bucket create scoop-skills-staging
    npx wrangler r2 bucket create scoop-skills-production
    ```
-3. Admin token secret, per environment:
+3. Secrets, per environment: `ADMIN_TOKEN` (admin routes) and `RATE_KEY`
+   (HMAC key for the rate-limit counters; writes fail with 500 without it):
    ```sh
-   openssl rand -base64 32 | npx wrangler secret put ADMIN_TOKEN --env staging
-   openssl rand -base64 32 | npx wrangler secret put ADMIN_TOKEN --env production
+   for env in staging production; do
+     openssl rand -base64 32 | npx wrangler secret put ADMIN_TOKEN --env $env
+     openssl rand -base64 32 | npx wrangler secret put RATE_KEY --env $env
+   done
    ```
 4. Rate limiting namespaces need no creation, but `namespace_id` must be unique
    on the account: `4100` (dev), `4101` (staging), `4102` (production). Change
@@ -108,7 +111,10 @@ development only.
 
 ## Logs
 
-Workers Logs is on (`observability.enabled`). Each request logs one JSON line:
+Workers Logs is on (`observability.enabled`) with **invocation logs off**
+(`logs.invocation_logs: false`) and traces off: Cloudflare's automatic
+per-request log records the URL and headers, including install IDs, client IPs
+and the admin `Authorization` header. Each request logs one JSON line instead:
 `method`, `route` (the pattern, not the path), `status`, `ms`, `client`
 (`X-Scoop-Client`). No IPs, install IDs or content. Unexpected errors log
 `{ route, error }` with the message only.
