@@ -20,6 +20,7 @@ test('POSTs carry the install ID and client; GETs only the client', async () => 
   assert.equal(calls[1].init.headers['x-scoop-install'], ID);
   assert.equal(calls[1].init.headers['x-scoop-client'], 'extension/0.2.0');
   assert.equal(calls[1].init.credentials, 'omit');
+  assert.equal(calls[0].init.cache, 'no-cache', 'a vote shows up on the next scoop, not 30 s later');
   assert.deepEqual(res, { ok: true, status: 201, data: { id: 'sk_1', status: 'verified', duplicate: false } });
 });
 

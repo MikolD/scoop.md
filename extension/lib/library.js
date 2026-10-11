@@ -22,6 +22,9 @@ export function createLibrary({ baseUrl, installId, client, fetchImpl = fetch })
         method,
         headers,
         credentials: 'omit',
+        // /skills/best is cacheable for 30 s; without revalidating, a scoop
+        // right after "It worked" would still get the cached "no skill yet".
+        cache: 'no-cache',
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       });
