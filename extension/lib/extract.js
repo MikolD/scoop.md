@@ -74,8 +74,8 @@ function walk(node, baseUrl) {
   const inner = () => Array.from(node.childNodes).map((c) => walk(c, baseUrl)).join('');
 
   if (/^h[1-6]$/.test(tag)) {
-    // Drop permalink markers ("#", "¶") that many doc generators append.
-    const text = inner().replace(/\s+/g, ' ').trim().replace(/\s*[#¶§]$/u, '');
+    // Drop permalink markers ("#", "¶") that doc generators append, or prepend (VuePress).
+    const text = inner().replace(/\s+/g, ' ').trim().replace(/\s*[#¶§]$/u, '').replace(/^[#¶§]\s*/u, '');
     return text ? `\n\n${'#'.repeat(+tag[1])} ${text}\n\n` : '';
   }
   if (tag === 'pre') {

@@ -26,6 +26,11 @@ test('pages without <main>/<article> do not leak the top bar, sidebar or footer'
   assert.match(md, /## Configure it/);
 });
 
+test('leading permalink markers are dropped too (VuePress: chartjs.org)', () => {
+  const doc = parse('<main><h1>T</h1><h2 id="why"><a href="#why" class="header-anchor">#</a> Why Chart.js</h2><p>Body text.</p></main>');
+  assert.match(htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page'), /^## Why Chart\.js$/m);
+});
+
 test('data: and javascript: links keep their text but not their target', () => {
   const doc = parse('<main><h1>T</h1><p><a href="data:text/plain,<!doctype html>%0A<html>">Download Template</a> and <a href="mailto:a@ex.com">mail</a> and <a href="/x">x</a></p></main>');
   const md = htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page');
