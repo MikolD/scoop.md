@@ -12,15 +12,18 @@ export function candidateUrls(pageUrl) {
   const out = [];
 
   // Many docs platforms (Mintlify, Fern, GitBook, Docusaurus plugins) serve a
-  // Markdown twin of each page at <path>.md.
+  // Markdown twin of each page at <path>.md; Starlight-style sites (Cloudflare)
+  // at <path>/index.md.
   const hasExtension = /\.[a-z0-9]{1,5}$/i.test(u.pathname);
   if (segs.length && !hasExtension) {
     out.push({ kind: 'page-md', url: `${u.origin}/${segs.join('/')}.md` });
+    out.push({ kind: 'page-md', url: `${u.origin}/${segs.join('/')}/index.md` });
   }
 
-  // llms.txt convention: at the origin root, or under a docs prefix like /docs.
+  // llms.txt convention: under a docs prefix like /docs or /d1/ (more specific,
+  // so it wins), or at the origin root.
   const bases = [u.origin];
-  if (segs.length > 1) bases.push(`${u.origin}/${segs[0]}`);
+  if (segs.length > 1 || (segs.length && u.pathname.endsWith('/'))) bases.unshift(`${u.origin}/${segs[0]}`);
   for (const base of bases) {
     out.push({ kind: 'llms-full', url: `${base}/llms-full.txt` });
     out.push({ kind: 'llms', url: `${base}/llms.txt` });

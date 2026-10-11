@@ -7,15 +7,30 @@ test('siteKey strips www', () => {
   assert.equal(siteKey('https://api.jquery.com/ajax/'), 'api.jquery.com');
 });
 
-test('candidateUrls covers page .md and llms files at root and docs prefix', () => {
+test('candidateUrls covers page .md twins and llms files at docs prefix and root', () => {
   const urls = candidateUrls('https://ex.com/docs/guides/webhooks/').map((c) => c.url);
   assert.deepEqual(urls, [
     'https://ex.com/docs/guides/webhooks.md',
-    'https://ex.com/llms-full.txt',
-    'https://ex.com/llms.txt',
+    'https://ex.com/docs/guides/webhooks/index.md',
     'https://ex.com/docs/llms-full.txt',
     'https://ex.com/docs/llms.txt',
+    'https://ex.com/llms-full.txt',
+    'https://ex.com/llms.txt',
   ]);
+});
+
+test('candidateUrls treats a one-segment directory as a docs prefix (developers.cloudflare.com/d1/)', () => {
+  const urls = candidateUrls('https://ex.com/d1/').map((c) => c.url);
+  assert.ok(urls.includes('https://ex.com/d1/index.md'));
+  assert.ok(urls.indexOf('https://ex.com/d1/llms.txt') < urls.indexOf('https://ex.com/llms.txt'));
+  assert.ok(!candidateUrls('https://ex.com/webhooks').some((c) => c.url === 'https://ex.com/webhooks/llms.txt'));
+});
+
+test('discover prefers the docs prefix llms.txt over the site root one', async () => {
+  const fakeFetch = async () => ({ ok: true, headers: new Headers({ 'content-type': 'text/plain' }), text: async () => '# Docs\n\n' + 'x'.repeat(100) });
+  const found = await discover('https://ex.com/d1/', fakeFetch);
+  assert.equal(found.llms.url, 'https://ex.com/d1/llms.txt');
+  assert.equal(found['page-md'].url, 'https://ex.com/d1.md');
 });
 
 test('candidateUrls skips .md twin for root and files with extensions', () => {
