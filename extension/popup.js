@@ -43,8 +43,7 @@ async function writeClipboard(text) {
     await navigator.clipboard.writeText(text);
     return true;
   } catch {
-    const area = Object.assign(document.createElement('textarea'), { value: text });
-    area.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+    const area = Object.assign(document.createElement('textarea'), { value: text, className: 'offscreen' });
     document.body.append(area);
     area.select();
     let ok = false;

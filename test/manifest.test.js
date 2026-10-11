@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
 
 const ext = (p) => new URL(`../extension/${p}`, import.meta.url);
 const manifest = JSON.parse(readFileSync(ext('manifest.json'), 'utf8'));
@@ -22,4 +22,14 @@ test('only the permissions STORE.md justifies', () => {
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   const store = readFileSync(ext('STORE.md'), 'utf8');
   for (const p of [...manifest.permissions, '<all_urls>']) assert.ok(store.includes(`\`${p}\``), p);
+});
+
+test('pages keep styling in their stylesheets, so a restyle is CSS-only', () => {
+  for (const f of readdirSync(ext('')).filter((n) => n.endsWith('.html'))) {
+    const html = readFileSync(ext(f), 'utf8');
+    assert.ok(!/\sstyle=|<style/i.test(html), `${f} has inline styles`);
+  }
+  for (const f of readdirSync(ext('')).filter((n) => n.endsWith('.js'))) {
+    assert.ok(!/\.style\b/.test(readFileSync(ext(f), 'utf8')), `${f} sets styles from script`);
+  }
 });

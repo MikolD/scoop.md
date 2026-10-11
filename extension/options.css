@@ -1,0 +1,10 @@
+:root {
+  --fg-muted: #6b7280;
+  --font: system-ui, sans-serif; --text: 14px; --leading: 1.5;
+  --width: 520px; --pad: 16px; --gap: 14px; --gap-sm: 4px; --field-pad: 6px;
+  color-scheme: light dark;
+}
+body { font: var(--text)/var(--leading) var(--font); max-width: var(--width); margin: 32px auto; padding: 0 var(--pad); }
+label { display: block; margin: var(--gap) 0 var(--gap-sm); }
+input[type=url] { width: 100%; padding: var(--field-pad); font: inherit; }
+small { color: var(--fg-muted); display: block; }
