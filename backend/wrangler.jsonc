@@ -8,11 +8,19 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "workers_dev": false,
-  "observability": { "enabled": true },
+  "observability": {
+    "enabled": true,
+    // Invocation logs record the URL and request headers (install ID, client IP,
+    // the admin Authorization header), so only our own one-line logs are kept.
+    "logs": { "enabled": true, "invocation_logs": false },
+    "traces": { "enabled": false }
+  },
 
   "vars": {
+    "ENVIRONMENT": "dev",
     "EXTENSION_IDS": ""
-    // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION and ADMIN_TOKEN come from .dev.vars locally.
+    // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
+    // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
@@ -29,7 +37,15 @@
     "staging": {
       "name": "scoop-api-staging",
       "routes": [{ "pattern": "api-staging.scoop.md", "custom_domain": true }],
+      "observability": {
+        "enabled": true,
+        // Invocation logs record the URL and request headers (install ID, client IP,
+        // the admin Authorization header), so only our own one-line logs are kept.
+        "logs": { "enabled": true, "invocation_logs": false },
+        "traces": { "enabled": false }
+      },
       "vars": {
+        "ENVIRONMENT": "staging",
         "EXTENSION_IDS": "",
         "ALLOW_ANY_EXTENSION": "1"
       },
@@ -46,7 +62,15 @@
     "production": {
       "name": "scoop-api",
       "routes": [{ "pattern": "api.scoop.md", "custom_domain": true }],
+      "observability": {
+        "enabled": true,
+        // Invocation logs record the URL and request headers (install ID, client IP,
+        // the admin Authorization header), so only our own one-line logs are kept.
+        "logs": { "enabled": true, "invocation_logs": false },
+        "traces": { "enabled": false }
+      },
       "vars": {
+        "ENVIRONMENT": "production",
         "EXTENSION_IDS": ""
       },
       "d1_databases": [
