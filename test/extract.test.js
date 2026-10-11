@@ -26,6 +26,13 @@ test('pages without <main>/<article> do not leak the top bar, sidebar or footer'
   assert.match(md, /## Configure it/);
 });
 
+test('data: and javascript: links keep their text but not their target', () => {
+  const doc = parse('<main><h1>T</h1><p><a href="data:text/plain,<!doctype html>%0A<html>">Download Template</a> and <a href="mailto:a@ex.com">mail</a> and <a href="/x">x</a></p></main>');
+  const md = htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page');
+  assert.match(md, /^Download Template and \[mail\]\(mailto:a@ex\.com\) and \[x\]\(https:\/\/ex\.com\/x\)$/m);
+  assert.ok(!md.includes('data:'));
+});
+
 test('heading permalink markers are dropped', () => {
   const { md } = extract('nav-leak.html');
   assert.match(md, /^# Get started with Widgets$/m);

@@ -99,7 +99,11 @@ function walk(node, baseUrl) {
     const href = node.getAttribute('href');
     const text = inner().trim();
     if (!href || href.startsWith('#') || href.startsWith('javascript:') || !text || /\n/.test(text)) return inner();
-    try { return `[${text}](${new URL(href, baseUrl).href})`; } catch { return text; }
+    try {
+      const abs = new URL(href, baseUrl);
+      // data: and blob: links can be megabytes of inline content.
+      return /^(https?|mailto):$/.test(abs.protocol) ? `[${text}](${abs.href})` : text;
+    } catch { return text; }
   }
   return inner();
 }
