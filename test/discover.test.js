@@ -33,6 +33,12 @@ test('discover prefers the docs prefix llms.txt over the site root one', async (
   assert.equal(found['page-md'].url, 'https://ex.com/d1.md');
 });
 
+test('candidateUrls follows hash routes (docsify.js.org/#/quickstart loads /quickstart.md)', () => {
+  const urls = candidateUrls('https://ex.com/#/quickstart').map((c) => c.url);
+  assert.equal(urls[0], 'https://ex.com/quickstart.md');
+  assert.equal(candidateUrls('https://ex.com/docs/a#install')[0].url, 'https://ex.com/docs/a.md', 'plain anchors are not routes');
+});
+
 test('candidateUrls skips .md twin for root and files with extensions', () => {
   assert.ok(!candidateUrls('https://ex.com/').some((c) => c.kind === 'page-md'));
   assert.ok(!candidateUrls('https://ex.com/a/page.html').some((c) => c.kind === 'page-md'));
@@ -86,4 +92,10 @@ test('streams without Content-Length stop at the cap instead of downloading ever
   const out = await fetchPublicText('https://ex.com/llms-full.txt', async () => res);
   assert.deepEqual(out, { content: null, bytes: 2_000_000 });
   assert.ok(pulled <= 6, `pulled ${pulled} chunks`);
+});
+
+test('pageUrlOf drops anchors but keeps hash routes', async () => {
+  const { pageUrlOf } = await import('../extension/lib/scoop.js');
+  assert.equal(pageUrlOf('https://ex.com/docs/a#install'), 'https://ex.com/docs/a');
+  assert.equal(pageUrlOf('https://ex.com/#/quickstart'), 'https://ex.com/#/quickstart');
 });

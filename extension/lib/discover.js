@@ -8,6 +8,8 @@ export function siteKey(pageUrl) {
 
 export function candidateUrls(pageUrl) {
   const u = new URL(pageUrl);
+  // Hash-routed sites (docsify: /#/quickstart) load /quickstart.md themselves.
+  if (u.hash.startsWith('#/')) u.pathname = u.hash.slice(1).split(/[?#]/)[0];
   const segs = u.pathname.split('/').filter(Boolean);
   const out = [];
 

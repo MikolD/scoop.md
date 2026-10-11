@@ -8,9 +8,10 @@ import { pickMain, htmlToMarkdown, relatedLinks } from './extract.js';
 const MIN_PAGE_CHARS = 200;
 const label = (s) => s.slice(0, 200);
 
+// Drops the fragment, unless it is the route of a hash-routed site (/#/guide).
 export function pageUrlOf(url) {
   const u = new URL(url);
-  u.hash = '';
+  if (!u.hash.startsWith('#/')) u.hash = '';
   return u.href;
 }
 
