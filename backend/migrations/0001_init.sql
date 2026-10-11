@@ -39,7 +39,7 @@ CREATE TABLE reports (
 CREATE INDEX reports_open ON reports (resolved_at, created_at DESC);
 
 -- Fixed-window counters for the hourly write limits (docs/BACKEND.md §8).
--- `key` is a SHA-256 of bucket + hour + install ID or IP, never the raw IP;
+-- `key` is HMAC-SHA256(RATE_KEY, bucket:hour:subject), never the raw IP;
 -- rows are deleted once their window has passed.
 CREATE TABLE rate_counters (
   key    TEXT NOT NULL,

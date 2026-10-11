@@ -22,7 +22,9 @@ export default {
       } else if (!matched) {
         throw notFound();
       } else {
-        if (req.method === 'GET' && !(await env.READ_LIMITER.limit({ key: ip })).success) {
+        // Admin routes answer 404 on bad auth before any limiting.
+        const limited = req.method === 'GET' && !matched.name.startsWith('/v1/admin/');
+        if (limited && !(await env.READ_LIMITER.limit({ key: ip })).success) {
           const err = new ApiError('rate_limited', 'Too many requests; try again later', 429);
           err.retryAfter = 60;
           throw err;
@@ -38,6 +40,9 @@ export default {
         res = json(500, { error: { code: 'internal', message: 'Internal error' } });
       }
     }
+
+    // Only the read endpoints that set their own cache-control are cacheable.
+    if (!res.headers.has('cache-control')) res.headers.set('cache-control', 'no-store');
 
     console.log(JSON.stringify({
       method: req.method,

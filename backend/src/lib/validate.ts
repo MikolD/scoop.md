@@ -31,6 +31,7 @@ function str(v: unknown, name: string, max: number): string {
 export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill {
   if (!isObject(body)) throw bad('Body must be a JSON object');
   const site = normalizeSite(str(body.site, 'site', 253));
+  if (site === 'scoop.md' || site.endsWith('.scoop.md')) throw bad('scoop.md itself cannot be shared');
   const pageUrl = str(body.pageUrl, 'pageUrl', 2048);
   assertFetchable(pageUrl, { allowLocalhost });
   if (siteOf(pageUrl) !== site) throw new ApiError('site_mismatch', `pageUrl is not on ${site}`);

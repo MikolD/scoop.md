@@ -1,7 +1,8 @@
 // The v1 API (docs/BACKEND.md §5). Each route names its pattern for the request log.
 
-import { checkHourly } from '../db/ratelimit.ts';
+import { checkHourly, ipSubject } from '../db/ratelimit.ts';
 import { Store, summary } from '../db/store.ts';
+import type { SkillRow } from '../db/store.ts';
 import { ApiError, notFound } from '../lib/errors.ts';
 import { safeEqual } from '../lib/ids.ts';
 import { normalizeSite } from '../lib/ssrf.ts';
@@ -38,13 +39,23 @@ interface Route {
   handler: Handler;
 }
 
-const allowLocalhost = (env: Env) => env.ALLOW_LOCALHOST === '1';
+// Only ever honoured in local dev, whatever else is set.
+const allowLocalhost = (env: Env) => env.ENVIRONMENT === 'dev' && env.ALLOW_LOCALHOST === '1';
 
 async function liveRow(store: Store, id: string) {
   const row = await store.getRow(id);
   if (!row) throw notFound('No such skill');
   if (row.removed_at) throw new ApiError('removed', 'This skill was removed', 410);
   return row;
+}
+
+// Content for a row that was live when read. If the R2 object has gone since,
+// a takedown won the race: 410 for that skill rather than a 500.
+async function loadLive(store: Store, row: SkillRow) {
+  const skill = await store.load(row);
+  if (skill) return skill;
+  if ((await store.getRow(row.id))?.removed_at) throw new ApiError('removed', 'This skill was removed', 410);
+  throw new Error(`R2 object missing for ${row.id}`);
 }
 
 async function requireAdmin(c: Ctx): Promise<void> {
@@ -67,14 +78,20 @@ const routes: Route[] = [
     name: '/v1/skills/best',
     handler: async ({ url, store }) => {
       const row = await store.bestRow(normalizeSite(url.searchParams.get('site')));
-      return json(200, { skill: row && (await store.load(row)) }, { 'cache-control': CACHE_BEST });
+      let skill = null;
+      try {
+        skill = row && (await loadLive(store, row));
+      } catch (e) {
+        if (!(e instanceof ApiError && e.code === 'removed')) throw e;
+      }
+      return json(200, { skill }, { 'cache-control': CACHE_BEST });
     },
   },
   {
     method: 'GET',
     pattern: /^\/v1\/skills\/([\w-]+)$/,
     name: '/v1/skills/:id',
-    handler: async ({ params, store }) => json(200, { skill: await store.load(await liveRow(store, params[0])) }),
+    handler: async ({ params, store }) => json(200, { skill: await loadLive(store, await liveRow(store, params[0])) }),
   },
   {
     method: 'POST',
@@ -84,9 +101,9 @@ const routes: Route[] = [
       const install = installId(req.headers.get('x-scoop-install'));
       const skill = validateSkill(await readJson(req), allowLocalhost(env));
       // Limit before the expensive part: outbound verification fetches.
-      await checkHourly(env.DB, [
+      await checkHourly(env.DB, env.RATE_KEY, [
         { bucket: 'share:install', subject: install, limit: LIMITS.shareInstall },
-        { bucket: 'share:ip', subject: ip, limit: LIMITS.shareIp },
+        { bucket: 'share:ip', subject: ipSubject(ip), limit: LIMITS.shareIp },
       ]);
       await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
       const { id, duplicate } = await store.add(skill, install);
@@ -100,9 +117,9 @@ const routes: Route[] = [
     handler: async ({ req, env, params, store, ip }) => {
       const install = installId(req.headers.get('x-scoop-install'));
       const worked = validateFeedback(await readJson(req));
-      await checkHourly(env.DB, [
+      await checkHourly(env.DB, env.RATE_KEY, [
         { bucket: 'vote:install', subject: install, limit: LIMITS.voteInstall },
-        { bucket: 'vote:ip', subject: ip, limit: LIMITS.voteIp },
+        { bucket: 'vote:ip', subject: ipSubject(ip), limit: LIMITS.voteIp },
       ]);
       await liveRow(store, params[0]);
       return json(200, await store.vote(params[0], install, worked));
@@ -143,9 +160,9 @@ const routes: Route[] = [
     handler: async ({ req, env, store, ip }) => {
       const install = installId(req.headers.get('x-scoop-install'));
       const report = validateReport(await readJson(req));
-      await checkHourly(env.DB, [
+      await checkHourly(env.DB, env.RATE_KEY, [
         { bucket: 'vote:install', subject: install, limit: LIMITS.voteInstall },
-        { bucket: 'vote:ip', subject: ip, limit: LIMITS.voteIp },
+        { bucket: 'vote:ip', subject: ipSubject(ip), limit: LIMITS.voteIp },
       ]);
       if (!(await store.getRow(report.skillId))) throw notFound('No such skill');
       await store.report(report, install);

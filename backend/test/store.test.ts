@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { Store } from '../src/db/store.ts';
-import { checkHourly } from '../src/db/ratelimit.ts';
+import { checkHourly, ipSubject } from '../src/db/ratelimit.ts';
 import { best } from '../src/lib/ranking.ts';
 import { fingerprint } from '../src/lib/ids.ts';
 import type { NewSkill } from '../src/lib/types.ts';
@@ -25,6 +25,7 @@ const skill = (content: string, site = 'ex.com'): NewSkill => ({
   relatedLinks: [{ url: `https://${site}/b`, text: 'B' }],
 });
 const at = (iso: string) => new Date(iso);
+const KEY = 'test-rate-key';
 
 test('fingerprint depends on kind, url and content, and matches the reference encoding', async () => {
   const a = [{ kind: 'llms', url: 'https://ex.com/llms.txt', content: 'x' }];
@@ -44,7 +45,7 @@ test('add stores metadata in D1 and content in R2; summaries come from D1 alone'
   assert.equal(duplicate, false);
   assert.ok(objects.has(`skills/${id}.json`));
   const row = (await store.getRow(id))!;
-  const full = await store.load(row);
+  const full = (await store.load(row))!;
   assert.equal(full.sections[0].content, 'hello');
   assert.deepEqual(full.relatedLinks, [{ url: 'https://ex.com/b', text: 'B' }]);
   assert.equal(full.worked, 0);
@@ -154,20 +155,56 @@ test('hourly rate limits count per subject, reset each hour and never store the 
   const { d1, raw } = fakeD1();
   const now = Date.UTC(2026, 9, 1, 10, 15);
   const limits = [{ bucket: 'share:install', subject: 'inst', limit: 2 }, { bucket: 'share:ip', subject: '203.0.113.9', limit: 3 }];
-  await checkHourly(d1, limits, now);
-  await checkHourly(d1, limits, now);
-  await assert.rejects(checkHourly(d1, limits, now), (e: { code: string; status: number; retryAfter: number }) => {
+  await checkHourly(d1, KEY, limits, now);
+  await checkHourly(d1, KEY, limits, now);
+  await assert.rejects(checkHourly(d1, KEY, limits, now), (e: { code: string; status: number; retryAfter: number }) => {
     assert.equal(e.code, 'rate_limited');
     assert.equal(e.status, 429);
     assert.equal(e.retryAfter, 45 * 60);
     return true;
   });
   // A different install from the same IP is still capped by the IP limit.
-  await assert.rejects(checkHourly(d1, [{ bucket: 'share:install', subject: 'other', limit: 2 }, limits[1]], now), { code: 'rate_limited' });
+  await assert.rejects(checkHourly(d1, KEY, [{ bucket: 'share:install', subject: 'other', limit: 2 }, limits[1]], now), { code: 'rate_limited' });
   assert.ok(!JSON.stringify(raw.prepare('SELECT * FROM rate_counters').all()).includes('203.0.113.9'));
 
   const nextHour = now + 3_600_000;
-  await checkHourly(d1, limits, nextHour);
+  await checkHourly(d1, KEY, limits, nextHour);
   const hours = raw.prepare('SELECT DISTINCT hour FROM rate_counters').all() as { hour: number }[];
   assert.deepEqual(hours.map((h) => h.hour), [Math.floor(nextHour / 3_600_000)], 'past windows are pruned');
+});
+
+test('rate limits key IPv6 by /64 and refuse to run without RATE_KEY', async () => {
+  assert.equal(ipSubject('203.0.113.9'), '203.0.113.9');
+  assert.equal(ipSubject('::ffff:203.0.113.9'), '203.0.113.9');
+  assert.equal(ipSubject('2001:db8:1:2:aaaa:bbbb:cccc:dddd'), '2001:db8:1:2::/64');
+  assert.equal(ipSubject('2001:DB8:1:2::1'), '2001:db8:1:2::/64');
+  assert.equal(ipSubject('2001:db8::1'), '2001:db8:0:0::/64');
+  assert.equal(ipSubject('fe80::1%eth0'), 'fe80:0:0:0::/64');
+  const { d1 } = fakeD1();
+  await assert.rejects(checkHourly(d1, undefined, [{ bucket: 'b', subject: 's', limit: 1 }]), /RATE_KEY/);
+});
+
+test('load returns null once the content is gone; add keeps the object if the insert outcome is unknown', async () => {
+  const { store, objects, d1 } = setup();
+  const { id } = await store.add(skill('race'), 'install');
+  const row = (await store.getRow(id))!;
+  await store.remove(id);
+  assert.equal(await store.load(row), null);
+
+  // D1 throws after the row was written: the object must stay.
+  const flaky = new Store(
+    { ...d1, prepare: (sql: string) => { const st = d1.prepare(sql); return sql.startsWith('INSERT OR IGNORE') ? { bind: (...a: unknown[]) => { const b = st.bind(...a); return { run: async () => { await b.run(); throw new Error('network'); } }; } } : st; } } as unknown as D1Database,
+    (store as unknown as { bucket: R2Bucket }).bucket,
+  );
+  const before = objects.size;
+  await assert.rejects(flaky.add(skill('flaky'), 'install'), /network/);
+  assert.equal(objects.size, before + 1, 'object kept: its row exists');
+
+  // D1 throws without writing: the object is cleaned up.
+  const failing = new Store(
+    { ...d1, prepare: (sql: string) => (sql.startsWith('INSERT OR IGNORE') ? { bind: () => ({ run: async () => { throw new Error('down'); } }) } : d1.prepare(sql)) } as unknown as D1Database,
+    (store as unknown as { bucket: R2Bucket }).bucket,
+  );
+  await assert.rejects(failing.add(skill('failing'), 'install'), /down/);
+  assert.equal(objects.size, before + 1, 'orphan removed');
 });

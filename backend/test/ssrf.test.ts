@@ -68,4 +68,8 @@ test('validateSkill: site checks, limits and shapes', () => {
   assert.ok(validateSkill({ ...base, sections: [{ ...base.sections[0], kind: 'llms-full', content: null, bytes: 3_000_000 }] }, false));
   assert.throws(() => validateSkill({ ...base, sections: [{ ...base.sections[0], label: '' }] }, false), { code: 'invalid_request' });
   assert.throws(() => validateSkill([], false), { code: 'invalid_request' });
+  for (const site of ['scoop.md', 'www.scoop.md', 'api.scoop.md']) {
+    const url = `https://${site}/llms.txt`;
+    assert.throws(() => validateSkill({ site, pageUrl: url, sections: [{ ...base.sections[0], url }] }, false), { code: 'invalid_request' }, site);
+  }
 });

@@ -65,10 +65,11 @@ export class Store {
     return this.db.prepare(`SELECT ${COLUMNS} FROM skills WHERE id = ?`).bind(id).first<SkillRow>();
   }
 
-  // Full skill with content from R2. Callers check removed_at first.
-  async load(row: SkillRow): Promise<Skill> {
+  // Full skill with content from R2, or null if the object is gone (a takedown
+  // that landed after `row` was read). Callers check removed_at first.
+  async load(row: SkillRow): Promise<Skill | null> {
     const obj = await this.bucket.get(objectKey(row.id));
-    if (!obj) throw new Error(`R2 object missing for ${row.id}`);
+    if (!obj) return null;
     const { sections, relatedLinks } = await obj.json<{ sections: Section[]; relatedLinks: RelatedLink[] }>();
     return { ...meta(row), sections, relatedLinks };
   }
@@ -129,23 +130,29 @@ export class Store {
     await this.bucket.put(objectKey(id), JSON.stringify({ sections: skill.sections, relatedLinks: skill.relatedLinks }), {
       httpMetadata: { contentType: 'application/json' },
     });
+    const insert = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO skills (id, site, page_url, title, fingerprint, sources_json, size_bytes, created_at, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(id, skill.site, skill.pageUrl, skill.title, fp, JSON.stringify(sources), sizeBytes, now.toISOString(), installId);
+    let changes: number;
     try {
-      const res = await this.db
-        .prepare(
-          `INSERT OR IGNORE INTO skills (id, site, page_url, title, fingerprint, sources_json, size_bytes, created_at, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .bind(id, skill.site, skill.pageUrl, skill.title, fp, JSON.stringify(sources), sizeBytes, now.toISOString(), installId)
-        .run();
-      if (res.meta.changes === 0) {
-        await this.bucket.delete(objectKey(id));
-        const dup = await this.findDuplicate(skill.site, fp);
-        if (dup) return { id: dup, duplicate: true };
-        throw new Error('skill insert ignored without a duplicate');
-      }
+      changes = (await insert.run()).meta.changes;
     } catch (e) {
-      await this.bucket.delete(objectKey(id));
+      // The insert may have committed even though the call failed. An orphaned
+      // R2 object is harmless; a row without its object is not, so delete only
+      // when the row certainly doesn't exist.
+      const row = await this.getRow(id).catch(() => undefined);
+      if (row === null) await this.bucket.delete(objectKey(id)).catch(() => {});
       throw e;
+    }
+    if (changes === 0) {
+      // Ignored by the unique index: a concurrent identical share won, and `id` has no row.
+      await this.bucket.delete(objectKey(id));
+      const dup = await this.findDuplicate(skill.site, fp);
+      if (dup) return { id: dup, duplicate: true };
+      throw new Error('skill insert ignored without a duplicate');
     }
     return { id, duplicate: false };
   }
