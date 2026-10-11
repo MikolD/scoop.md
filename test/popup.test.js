@@ -151,3 +151,17 @@ test('pages that only render when signed in are copied but never shared', async 
   assert.match($('share').textContent, /only loads in your browser/);
   assert.equal(store.skills.length, before);
 });
+
+test('store installs never share pages on localhost, even if a library would take them', async () => {
+  const realFetch = globalThis.fetch;
+  const posts = [];
+  globalThis.fetch = (url, init) => { if (init?.method === 'POST') posts.push(String(url)); return realFetch(url, init); };
+  try {
+    const { $, clipboard } = await openPopup(`${docsUrl}/docs/guide`, { installType: 'normal' });
+    assert.match(clipboard.text, /# Get started with Widgets/);
+    assert.equal($('share').textContent, 'Not shared: this page is on your computer or a private network.');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(posts, []);
+});

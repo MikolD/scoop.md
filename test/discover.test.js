@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { siteKey, candidateUrls, looksLikeText, discover, fetchPublicText } from '../extension/lib/discover.js';
+import { DOMParser } from 'linkedom';
 
 test('siteKey strips www', () => {
   assert.equal(siteKey('https://www.example.com/docs/a'), 'example.com');
@@ -100,4 +101,24 @@ test('pageUrlOf drops anchors but keeps hash routes', async () => {
   const { pageUrlOf } = await import('../extension/lib/scoop.js');
   assert.equal(pageUrlOf('https://ex.com/docs/a#install'), 'https://ex.com/docs/a');
   assert.equal(pageUrlOf('https://ex.com/#/quickstart'), 'https://ex.com/#/quickstart');
+});
+
+test('local, private and link-local hosts are never shared', async () => {
+  const { isPrivateHost, scoopPage } = await import('../extension/lib/scoop.js');
+  for (const h of ['localhost', 'app.localhost', 'intranet', 'wiki.local', 'docs.internal', 'nas.lan', 'printer.home.arpa',
+    '127.0.0.1', '10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.1.10', '169.254.169.254', '100.64.0.1', '0.0.0.0',
+    '[::1]', '[fd00::1]', '[fe80::1]', '[::ffff:7f00:1]', 'docs.internal.']) {
+    assert.equal(isPrivateHost(h), true, h);
+  }
+  for (const h of ['docs.stripe.com', '172.32.0.1', '8.8.8.8', '[2606:4700::1111]', 'local.example.com']) {
+    assert.equal(isPrivateHost(h), false, h);
+  }
+  const html = `<main><h1>Intranet</h1><p>${'Internal docs text. '.repeat(30)}</p></main>`;
+  const fetchImpl = async (url) => ({ ok: !url.endsWith('.md') && !url.endsWith('.txt'), headers: new Headers({ 'content-type': 'text/html' }), text: async () => html });
+  const parseHtml = (h) => new DOMParser().parseFromString(h, 'text/html');
+  const local = await scoopPage('http://wiki.local/docs/a', { fetchImpl, parseHtml });
+  assert.equal(local.sections[0].kind, 'page-html', 'still copied');
+  assert.equal(local.isPublic, false, 'never shared');
+  assert.equal((await scoopPage('http://wiki.local/docs/a', { fetchImpl, parseHtml, allowPrivateHosts: true })).isPublic, true);
+  assert.equal((await scoopPage('https://ex.com/docs/a', { fetchImpl, parseHtml })).isPublic, true);
 });

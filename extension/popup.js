@@ -1,13 +1,14 @@
 import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection } from './lib/scoop.js';
-import { libraryUrl, createLibrary, shareBody, notSharedReason } from './lib/library.js';
+import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason } from './lib/library.js';
 
 const DEFAULTS = { share: true };
 const $ = (id) => document.getElementById(id);
 
 let settings;
 let library;
+let devLibrary = false;
 let tab;
 let clipboardText = '';
 let skillId = null;
@@ -89,6 +90,7 @@ function scoopCurrentTab() {
     title: tab.title,
     parseHtml: (html) => new DOMParser().parseFromString(html, 'text/html'),
     tabHtml,
+    allowPrivateHosts: devLibrary, // a local library can verify local pages
   });
 }
 
@@ -130,7 +132,11 @@ async function run({ skipLibrary = false } = {}) {
 
 async function share(scoop) {
   if (!settings.share) return note('share', 'Not shared: sharing is off.');
-  if (!scoop.isPublic) return note('share', "Not shared: this page's text only loads in your browser.");
+  if (!scoop.isPublic) {
+    return note('share', scoop.privateHost && !devLibrary
+      ? 'Not shared: this page is on your computer or a private network.'
+      : "Not shared: this page's text only loads in your browser.");
+  }
 
   note('share', 'Sharing with the library…');
   const res = await library.share(shareBody(scoop));
@@ -200,8 +206,10 @@ $('report').onsubmit = (e) => { e.preventDefault(); return report($('reason').va
 async function main() {
   settings = await chrome.storage.sync.get(DEFAULTS);
   try { applyTheme((await chrome.storage.local.get('theme')).theme); } catch {}
+  const baseUrl = await libraryUrl(chrome);
+  devLibrary = baseUrl !== DEFAULT_LIBRARY;
   library = createLibrary({
-    baseUrl: await libraryUrl(chrome),
+    baseUrl,
     installId: await installId(),
     client: `extension/${chrome.runtime.getManifest().version}`,
   });

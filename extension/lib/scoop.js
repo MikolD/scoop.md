@@ -25,18 +25,34 @@ async function fetchPublicHtml(url, fetchImpl) {
   }
 }
 
-// Returns { site, pageUrl, title, sections, relatedLinks, isPublic }.
+// Pages on this machine or a private network are never shared: their addresses
+// shouldn't leave the machine, and the library couldn't fetch them anyway.
+export function isPrivateHost(hostname) {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (h.includes(':')) return h === '::1' || h === '::' || /^(f[cd]|fe[89ab])/.test(h) || h.startsWith('::ffff:');
+  const v4 = h.match(/^(\d+)\.(\d+)\.\d+\.\d+$/);
+  if (v4) {
+    const [a, b] = [+v4[1], +v4[2]];
+    return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+  }
+  return !h.includes('.') || /\.(localhost|local|internal|lan|home\.arpa)$/.test(h);
+}
+
+// Returns { site, pageUrl, title, sections, relatedLinks, isPublic, privateHost }.
 // sections are [{ kind, label, url, content, bytes }] in priority order.
 // isPublic is true only when every section came from a credential-less fetch;
 // tabHtml (optional) supplies the signed-in tab's HTML when the public fetch
 // yields nothing, and makes the result private.
-export async function scoopPage(url, { fetchImpl = fetch, parseHtml, title = '', tabHtml } = {}) {
+// allowPrivateHosts is for testing against a local library only.
+export async function scoopPage(url, { fetchImpl = fetch, parseHtml, title = '', tabHtml, allowPrivateHosts = false } = {}) {
   const pageUrl = pageUrlOf(url);
   const site = siteKey(pageUrl);
   const found = await discover(pageUrl, fetchImpl);
   const sections = [];
   let links = [];
-  let isPublic = true;
+  const privateHost = isPrivateHost(new URL(pageUrl).hostname);
+  let isPublic = !privateHost || allowPrivateHosts;
 
   if (found['page-md']?.content) {
     const { url: mdUrl, content } = found['page-md'];
@@ -74,7 +90,7 @@ export async function scoopPage(url, { fetchImpl = fetch, parseHtml, title = '',
     sections.push({ kind: 'llms-full', label: 'Full documentation (llms-full.txt)', url: full.url, content: full.content ?? null, bytes: full.content == null ? full.bytes : null });
   }
 
-  return { site, pageUrl, title: title.slice(0, 300), sections, relatedLinks: links, isPublic };
+  return { site, pageUrl, title: title.slice(0, 300), sections, relatedLinks: links, isPublic, privateHost };
 }
 
 // The page's own section (for putting it in front of a shared skill).
