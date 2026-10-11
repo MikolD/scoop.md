@@ -65,26 +65,27 @@ async function readCapped(res, cap) {
 }
 
 // Anonymous fetch: no cookies, no auth, manual redirects so each hop is
-// checked against the SSRF rules and the site.
+// checked against the site and the SSRF rules. One timeout covers every hop
+// and the body.
 export async function fetchSource(url, site, { fetchImpl = fetch, allowLocalhost = false } = {}) {
-  let current = url;
+  const signal = AbortSignal.timeout(TIMEOUT_MS);
+  let current = assertFetchable(url, { allowLocalhost });
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
-    const u = assertFetchable(current, { allowLocalhost });
-    if (siteOf(u.href) !== site) throw new VerifyError('site_mismatch', `${url} redirects off ${site} (to ${u.href})`);
+    if (siteOf(current.href) !== site) throw new VerifyError('site_mismatch', `${url} redirects off ${site} (to ${current.href})`);
     let res;
     try {
-      res = await fetchImpl(u.href, {
+      res = await fetchImpl(current.href, {
         redirect: 'manual',
         credentials: 'omit',
         headers: { 'user-agent': 'scoop.md-verifier/1 (+https://scoop.md)' },
-        signal: AbortSignal.timeout(TIMEOUT_MS),
+        signal,
       });
     } catch (e) {
       throw new VerifyError('source_unreachable', `Could not fetch ${url}: ${e.message}`);
     }
     if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
       await res.body?.cancel();
-      current = new URL(res.headers.get('location'), u).href;
+      current = redirectTarget(res.headers.get('location'), current, url, site, allowLocalhost);
       continue;
     }
     if (!res.ok) {
@@ -97,13 +98,42 @@ export async function fetchSource(url, site, { fetchImpl = fetch, allowLocalhost
       await res.body?.cancel();
       return { contentType, text: '', over: true };
     }
-    return { contentType, ...(await readCapped(res, FETCH_CAP)) };
+    try {
+      return { contentType, ...(await readCapped(res, FETCH_CAP)) };
+    } catch (e) {
+      throw new VerifyError('source_unreachable', `Could not read ${url}: ${e.message}`);
+    }
   }
   throw new VerifyError('source_unreachable', `${url} redirects too many times`);
 }
 
+// A redirect is the source's doing, not the client's, so a bad target is 422.
+function redirectTarget(location, from, url, site, allowLocalhost) {
+  let next;
+  try { next = new URL(location, from); } catch { throw new VerifyError('source_unreachable', `${url} redirects to an invalid URL`); }
+  try {
+    return assertFetchable(next.href, { allowLocalhost });
+  } catch (e) {
+    if (e instanceof VerifyError && e.code === 'invalid_request') {
+      // Off-site targets (private IPs included) are reported as such.
+      if (normalizeSite(next.hostname) !== site) throw new VerifyError('site_mismatch', `${url} redirects off ${site} (to ${next.origin})`);
+      throw new VerifyError('source_unreachable', `${url} redirects to a URL that may not be fetched (${next.origin})`);
+    }
+    throw e;
+  }
+}
+
+// CRLF → LF, trailing spaces/tabs off every line, whole text trimmed. Written
+// as a scan: /[ \t]+$/gm is quadratic on long runs of spaces mid-line.
 export function normalizeText(s) {
-  return s.replace(/\r\n?/g, '\n').replace(/[ \t]+$/gm, '').trim();
+  const lines = s.replace(/\r\n?/g, '\n').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let end = line.length;
+    while (end > 0 && (line.charCodeAt(end - 1) === 32 || line.charCodeAt(end - 1) === 9)) end--;
+    if (end !== line.length) lines[i] = line.slice(0, end);
+  }
+  return lines.join('\n').trim();
 }
 
 function isHtml(contentType, text) {
@@ -115,43 +145,130 @@ function isHtml(contentType, text) {
 // costs a few shingles but never a false match.
 const ENTITIES = {
   amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ',
-  rsquo: '\u2019', lsquo: '\u2018', rdquo: '\u201d', ldquo: '\u201c', mdash: '\u2014', ndash: '\u2013',
-  hellip: '\u2026', middot: '\u00b7', bull: '\u2022', copy: '\u00a9', reg: '\u00ae', trade: '\u2122',
-  times: '\u00d7', rarr: '\u2192', larr: '\u2190', laquo: '\u00ab', raquo: '\u00bb', deg: '\u00b0',
+  rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', mdash: '—', ndash: '–',
+  hellip: '…', middot: '·', bull: '•', copy: '©', reg: '®', trade: '™',
+  times: '×', rarr: '→', larr: '←', laquo: '«', raquo: '»', deg: '°',
 };
 
+function decodeEntities(text) {
+  return text.replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{1,32});/gi, (m, e) => {
+    if (e[0] !== '#') return ENTITIES[e.toLowerCase()] ?? m;
+    const cp = e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1);
+    return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : '�';
+  });
+}
+
+const DROPPED = new Set(['script', 'style', 'noscript', 'template']);
+
+const isAsciiLetter = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+
+// HTML → plain text: drop non-content elements, replace every tag with a space
+// so adjacent blocks don't glue words together, decode entities. A single
+// linear scan; regexes here go quadratic on input like '<script ' × n.
 export function htmlToText(html) {
-  return html
-    .replace(/<(script|style|noscript|template)\b[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
-      if (e[0] === '#') return String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : +e.slice(1));
-      return ENTITIES[e.toLowerCase()] ?? m;
-    });
-}
+  const lower = html.toLowerCase();
+  const n = html.length;
+  // Next closing tag per dropped element, so a missing one is searched for once.
+  const nextClose = new Map();
+  const closeAfter = (name, from) => {
+    const cached = nextClose.get(name);
+    if (cached !== undefined && (cached === -1 || cached >= from)) return cached;
+    let at = lower.indexOf(`</${name}`, from);
+    // `</script foo>` is not a closing tag; only whitespace may precede '>'.
+    while (at !== -1) {
+      let j = at + 2 + name.length;
+      while (j < n && /\s/.test(html[j])) j++;
+      if (html[j] === '>') break;
+      at = lower.indexOf(`</${name}`, at + 1);
+    }
+    nextClose.set(name, at);
+    return at;
+  };
 
-export function markdownToPlain(md) {
-  return md
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
-    .replace(/https?:\/\/\S+/g, ' ');
-}
-
-export function words(text) {
-  return text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-}
-
-function shingles(ws) {
   const out = [];
-  for (let i = 0; i + SHINGLE <= ws.length; i++) out.push(ws.slice(i, i + SHINGLE).join(' '));
+  let i = 0;
+  while (i < n) {
+    const lt = html.indexOf('<', i);
+    if (lt === -1) { out.push(html.slice(i)); break; }
+    if (lt > i) out.push(html.slice(i, lt));
+    if (lower.startsWith('<!--', lt)) {
+      const end = html.indexOf('-->', lt + 4);
+      if (end !== -1) { out.push(' '); i = end + 3; continue; }
+    }
+    const gt = html.indexOf('>', lt + 1);
+    if (gt === -1) { out.push(html.slice(lt)); break; } // no tag can start from here on
+    if (gt === lt + 1) { out.push('<>'); i = gt + 1; continue; }
+    let j = lt + 1;
+    while (j < gt && isAsciiLetter(html.charCodeAt(j))) j++;
+    const name = lower.slice(lt + 1, j);
+    if (DROPPED.has(name)) {
+      const close = closeAfter(name, gt + 1);
+      if (close !== -1) { out.push(' '); i = html.indexOf('>', close) + 1; continue; }
+    }
+    out.push(' ');
+    i = gt + 1;
+  }
+  // Collapse whitespace; single spaces (the common case) are left alone.
+  return decodeEntities(out.join('')).replace(/\s\s+|[^\S ]/g, ' ').trim();
+}
+
+const MAX_LINK_TARGET = 2048;
+
+// Markdown → plain text: links and images keep their text, link targets and
+// bare URLs go. The link target is found by scanning (capped at
+// MAX_LINK_TARGET), not by regex.
+export function markdownToPlain(md) {
+  const out = [];
+  let kept = 0; // start of the text not yet copied to `out`
+  let from = 0; // where to look for the next ']('
+  let nextParen = -2; // cached index of the next ')' after the current '](' (-1: none left)
+  for (;;) {
+    const open = md.indexOf('](', from);
+    if (open === -1) break;
+    from = open + 2;
+    if (nextParen !== -1 && nextParen < from) nextParen = md.indexOf(')', from);
+    if (nextParen === -1) break;
+    if (nextParen - from > MAX_LINK_TARGET) continue;
+    out.push(md.slice(kept, open), ' ');
+    kept = from = nextParen + 1;
+  }
+  out.push(md.slice(kept));
+  // Heading, emphasis, code, list, quote and table markers need no pass of
+  // their own: shingling splits on letters and digits, which drops them.
+  return out.join('').replace(/https?:\/\/\S+/g, ' ');
+}
+
+// 32-bit FNV-1a of one word.
+function hashWord(w) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+// 5-word shingles of the lowercased words in `text`, each hashed to 32 bits.
+// Numbers instead of joined strings keep a 2 MB page's shingle set small; a
+// hash collision can only add a match by chance (about 1 in 4 billion per lookup
+// per shingle of the page), never remove one.
+export function shingleHashes(text) {
+  const out = [];
+  const ring = new Array(SHINGLE).fill(0);
+  let count = 0;
+  for (const m of text.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
+    ring[count % SHINGLE] = hashWord(m[0]);
+    count++;
+    if (count < SHINGLE) continue;
+    let h = 0x811c9dc5;
+    for (let k = count - SHINGLE; k < count; k++) h = Math.imul(h ^ ring[k % SHINGLE], 0x01000193);
+    out.push(h >>> 0);
+  }
   return out;
 }
 
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown, pageHtml) {
-  const mine = shingles(words(markdownToPlain(sectionMarkdown)));
+  const mine = shingleHashes(markdownToPlain(sectionMarkdown));
   if (!mine.length) return { ratio: 0, count: 0 };
-  const theirs = new Set(shingles(words(htmlToText(pageHtml))));
+  const theirs = new Set(shingleHashes(htmlToText(pageHtml)));
   const hits = mine.filter((s) => theirs.has(s)).length;
   return { ratio: hits / mine.length, count: mine.length };
 }

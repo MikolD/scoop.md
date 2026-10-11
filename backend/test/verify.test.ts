@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { containment, htmlToText, verifySection } from '../src/lib/verify.ts';
+import { containment, htmlToText, markdownToPlain, normalizeText, verifySection, verifyAll } from '../src/lib/verify.ts';
 import type { Section } from '../src/lib/types.ts';
 import { fakeFetch } from './helpers.ts';
 
@@ -40,6 +40,7 @@ const routes = {
   [`${BASE}/www.md`]: () => new Response(null, { status: 302, headers: { location: `https://www.${SITE}/guide.md` } }),
   [`https://www.${SITE}/guide.md`]: text(MD),
   [`${BASE}/internal.md`]: () => new Response(null, { status: 302, headers: { location: 'https://169.254.169.254/latest' } }),
+  [`${BASE}/plain-http.md`]: () => new Response(null, { status: 302, headers: { location: `http://${SITE}/guide.md` } }),
   [`${BASE}/loop.md`]: () => new Response(null, { status: 302, headers: { location: '/loop.md' } }),
 };
 
@@ -121,12 +122,12 @@ test('htmlToText drops scripts and styles, splits tags and decodes all entities'
   assert.equal(t, 'a b ≂̸A& z');
 });
 
-test('redirects: followed on-site (www counts as the site), rejected off-site or to private hosts', async () => {
+test('redirects: followed on-site (www counts as the site), rejected (422) off-site or to private hosts', async () => {
   const calls = await check(section('page-md', '/moved.md', MD));
   assert.deepEqual(calls.map((c) => c.url), [`${BASE}/moved.md`, `${BASE}/guide.md`]);
   await check(section('page-md', '/www.md', MD));
   await rejects(section('page-md', '/away.md', MD), 'site_mismatch');
-  await rejects(section('page-md', '/internal.md', MD), 'invalid_request');
+  await rejects(section('page-md', '/internal.md', MD), 'site_mismatch');
   await rejects(section('page-md', '/loop.md', MD), 'source_unreachable');
 });
 
@@ -141,4 +142,68 @@ test('outbound fetches are anonymous and handle redirects manually', async () =>
   assert.equal(call.init.redirect, 'manual');
   assert.deepEqual(Object.keys(call.init.headers as Record<string, string>), ['user-agent']);
   assert.equal((call.init as { credentials?: string }).credentials, undefined);
+});
+
+test('redirects to a disallowed URL on the same site are 422, and one timeout covers all hops', async () => {
+  await rejects(section('page-md', '/plain-http.md', MD), 'source_unreachable');
+  const { impl, calls } = fakeFetch(routes);
+  await verifySection(section('page-md', '/moved.md', MD), SITE, 0, { fetchImpl: impl });
+  assert.equal(calls[0].init.signal, calls[1].init.signal);
+});
+
+test('verifyAll checks page-html sections one at a time', async () => {
+  let active = 0;
+  let peak = 0;
+  const slow = async (url: string, init: RequestInit) => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((r) => setTimeout(r, 5));
+    active--;
+    return fakeFetch(routes).impl(url, init);
+  };
+  await verifyAll([section('page-html', '/guide', HTML_AS_MD), section('page-html', '/guide', HTML_AS_MD), section('page-html', '/guide', HTML_AS_MD)], SITE, { fetchImpl: slow });
+  assert.equal(peak, 1);
+});
+
+// Worst cases for the text scanners: 2 MB of input built to make naive regexes
+// backtrack quadratically ('<script ' × n took 6 s at 160 KB before).
+const TWO_MB = 2_000_000;
+const fill = (unit: string, tail = '') => unit.repeat(Math.ceil(TWO_MB / unit.length)).slice(0, TWO_MB) + tail;
+const within = (label: string, budgetMs: number, fn: () => unknown) => {
+  const t = performance.now();
+  fn();
+  const ms = performance.now() - t;
+  assert.ok(ms < budgetMs, `${label}: ${ms.toFixed(0)} ms (budget ${budgetMs} ms)`);
+};
+
+test('htmlToText is linear on adversarial HTML', () => {
+  for (const [label, input] of [
+    ['<script ×n', fill('<script ')],
+    ['<style>×n', fill('<style>')],
+    ['<!--×n', fill('<!--')],
+    ['<×n', fill('<')],
+    ['<a ×n', fill('<a ')],
+    ['</script ×n', fill('<script></script ')],
+    ['&×n', fill('&amp')],
+  ] as const) within(label, 200, () => htmlToText(input));
+});
+
+test('markdownToPlain and normalizeText are linear on adversarial Markdown', () => {
+  for (const [label, input] of [
+    ['[×n', fill('[')],
+    ['](×n', fill('](')],
+    ['[a](×n', fill('[a](')],
+    ['![×n', fill('![')],
+    ['1×n', fill('1')],
+    ['spaces', fill(' ', 'x')],
+    ['- ×n lines', fill('-\n')],
+  ] as const) {
+    within(`markdownToPlain ${label}`, 200, () => markdownToPlain(input));
+    within(`normalizeText ${label}`, 200, () => normalizeText(input));
+  }
+});
+
+test('containment of a 2 MB section against a 2 MB page stays fast', () => {
+  const prose = fill('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ');
+  within('containment', 1500, () => containment(prose, `<p>${prose}</p>`));
 });
