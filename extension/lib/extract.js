@@ -75,7 +75,7 @@ function walk(node, baseUrl) {
 
   if (/^h[1-6]$/.test(tag)) {
     // Drop permalink markers ("#", "¶") that doc generators append, or prepend (VuePress).
-    const text = inner().replace(/\s+/g, ' ').trim().replace(/\s*[#¶§]$/u, '').replace(/^[#¶§]\s*/u, '');
+    const text = inner().replace(/\s+/g, ' ').trim().replace(/\s*[#¶§]$/u, '').replace(/^[#¶§](\s+|$)/u, '');
     return text ? `\n\n${'#'.repeat(+tag[1])} ${text}\n\n` : '';
   }
   if (tag === 'pre') {

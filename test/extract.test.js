@@ -31,6 +31,12 @@ test('leading permalink markers are dropped too (VuePress: chartjs.org)', () => 
   assert.match(htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page'), /^## Why Chart\.js$/m);
 });
 
+test('a heading that starts with # but is not a marker keeps it (#include)', () => {
+  const doc = parse('<main><h1>T</h1><h2>#include directives</h2><h3>#</h3><p>Body text.</p></main>');
+  const md = htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page');
+  assert.match(md, /^## #include directives$/m);
+});
+
 test('related link text keeps block children apart (bbc.com "4 hrs agoChildren…")', () => {
   const doc = parse('<nav><a href="/news/a"><span>4 hrs ago</span><h3>Children rescued</h3><p>Summary</p></a><a href="/news/b">Get<b>ting</b> started</a></nav>');
   assert.deepEqual(relatedLinks(doc, 'https://ex.com/news/x').map((l) => l.text), ['4 hrs ago Children rescued Summary', 'Getting started']);

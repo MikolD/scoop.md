@@ -13,6 +13,7 @@ $('share').onchange = () => chrome.storage.sync.set({ share: $('share').checked 
 
 // Same key the popup's theme button uses; no key means follow the system.
 chrome.storage.local.get('theme').then(({ theme }) => {
+  if (theme !== 'light' && theme !== 'dark') theme = null;
   document.querySelector(`input[name=theme][value=${theme || 'system'}]`).checked = true;
   applyTheme(theme);
 });

@@ -22,8 +22,9 @@ export function createLibrary({ baseUrl, installId, client, fetchImpl = fetch })
         method,
         headers,
         credentials: 'omit',
-        // /skills/best is cacheable for 30 s; without revalidating, a scoop
-        // right after "It worked" would still get the cached "no skill yet".
+        // /skills/best is cacheable (max-age=30, s-maxage=60). Revalidating skips
+        // the browser's copy, so a scoop right after "It worked" doesn't get the
+        // cached "no skill yet"; a CDN may still serve its copy for up to 60 s.
         cache: 'no-cache',
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
