@@ -1,0 +1,83 @@
+# api.scoop.md: typecheck, unit tests, contract tests against wrangler dev
+# (docs/BACKEND.md §11). Deploy jobs run only when the repository variable
+# BACKEND_DEPLOY is "1" (see backend/README.md, "Before the first deploy").
+name: backend
+
+on:
+  push:
+    branches: [main]
+    tags: ['backend-v*']
+  pull_request:
+
+env:
+  WRANGLER_SEND_METRICS: 'false'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npm ci
+        working-directory: backend
+      - name: Typecheck
+        run: npx tsc --noEmit
+        working-directory: backend
+      - name: Unit tests
+        run: npm test
+        working-directory: backend
+      - name: Contract tests against wrangler dev
+        run: |
+          cd backend
+          cp .dev.vars.example .dev.vars
+          npx wrangler d1 migrations apply DB --local
+          npx wrangler dev --port 8787 > ../wrangler-dev.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/v1/health && break; sleep 1; done
+          cd ..
+          SCOOP_API=http://127.0.0.1:8787 SCOOP_ADMIN_TOKEN=local-admin-token npm run test:contract
+      - if: failure()
+        run: cat wrangler-dev.log || true
+
+  deploy-staging:
+    needs: test
+    if: vars.BACKEND_DEPLOY == '1' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx wrangler d1 migrations apply DB --env staging --remote
+      - run: npx wrangler deploy --env staging --var VERSION:${GITHUB_SHA::7}
+      - run: curl -sf https://api-staging.scoop.md/v1/health
+
+  deploy-production:
+    needs: test
+    if: vars.BACKEND_DEPLOY == '1' && startsWith(github.ref, 'refs/tags/backend-v')
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm ci
+      - run: npx wrangler d1 migrations apply DB --env production --remote
+      - run: npx wrangler deploy --env production --var VERSION:${GITHUB_REF_NAME#backend-v}
