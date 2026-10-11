@@ -81,7 +81,8 @@ function tooLarge(s) {
 // A page and its Markdown twin (<page>.md, <page>/index.md, or /#/page's /page.md) count as the same page.
 // Compares origin and path only: ?utm_source=… and #anchors don't make another page.
 function pageKey(u) {
-  const url = new URL(u);
+  let url;
+  try { url = new URL(u); } catch { return u; } // a bad URL from the library is just a different page
   const route = url.hash.startsWith('#/') ? url.hash.slice(1).split(/[?#]/)[0] : '';
   const path = route ? url.pathname.replace(/[^/]*$/, '') + route.slice(1) : url.pathname; // as discover.js resolves it
   return url.origin + path.replace(/(\/index)?\.md$/, '').replace(/\/$/, '');

@@ -74,6 +74,12 @@ test('the shared skill\'s page is not called "This page" when the user is on ano
   assert.equal(withCurrentPage(twin('https://ex.com/docs/guide/a.md'), null, 'https://ex.com/docs/index.html#/guide/a')[0].label, 'This page: d1');
 });
 
+test('a section with an invalid URL does not break matching', () => {
+  const shared = [{ kind: 'page-md', label: 'This page: odd', url: 'not a url', content: 'o' }, { label: 'Index', url: 'https://ex.com/llms.txt', content: 'i' }];
+  const page = { kind: 'page-html', label: 'This page: a', url: 'https://ex.com/a', content: 'a' };
+  assert.deepEqual(withCurrentPage(shared, page).map((s) => s.label), ['This page: a', 'Another page: odd', 'Index']);
+});
+
 test('query strings do not make the current page a different page', () => {
   const shared = [{ kind: 'page-md', label: 'This page: foo', url: 'https://ex.com/docs/foo.md', content: 'f' }];
   // The skill already covers the tab's page: keep it as "This page".
