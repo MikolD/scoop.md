@@ -71,6 +71,7 @@ test('the shared skill\'s page is not called "This page" when the user is on ano
   assert.equal(withCurrentPage(twin('https://ex.com/d1/index.md'), null, 'https://ex.com/d1/').length, 1);
   assert.equal(withCurrentPage(twin('https://ex.com/quickstart.md'), null, 'https://ex.com/#/quickstart')[0].label, 'This page: d1');
   assert.equal(withCurrentPage(twin('https://ex.com/repo/quickstart.md'), null, 'https://ex.com/repo/#/quickstart')[0].label, 'This page: d1');
+  assert.equal(withCurrentPage(twin('https://ex.com/docs/guide/a.md'), null, 'https://ex.com/docs/index.html#/guide/a')[0].label, 'This page: d1');
 });
 
 test('query strings do not make the current page a different page', () => {

@@ -37,6 +37,8 @@ test('candidateUrls follows hash routes (docsify.js.org/#/quickstart loads /quic
   const urls = candidateUrls('https://ex.com/#/quickstart').map((c) => c.url);
   assert.equal(urls[0], 'https://ex.com/quickstart.md');
   assert.equal(candidateUrls('https://ex.com/docs/a#install')[0].url, 'https://ex.com/docs/a.md', 'plain anchors are not routes');
+  assert.equal(candidateUrls('https://user.github.io/repo/#/quickstart')[0].url, 'https://user.github.io/repo/quickstart.md', 'under the current path');
+  assert.equal(candidateUrls('https://ex.com/docs/index.html#/guide/a')[0].url, 'https://ex.com/docs/guide/a.md');
 });
 
 test('candidateUrls skips .md twin for root and files with extensions', () => {

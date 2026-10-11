@@ -73,7 +73,7 @@ function tooLarge(s) {
 function pageKey(u) {
   const url = new URL(u);
   const route = url.hash.startsWith('#/') ? url.hash.slice(1).split(/[?#]/)[0] : '';
-  const path = route ? url.pathname.replace(/\/$/, '') + route : url.pathname;
+  const path = route ? url.pathname.replace(/[^/]*$/, '') + route.slice(1) : url.pathname; // as discover.js resolves it
   return url.origin + path.replace(/(\/index)?\.md$/, '').replace(/\/$/, '');
 }
 
