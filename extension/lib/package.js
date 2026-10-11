@@ -68,12 +68,15 @@ function tooLarge(s) {
     `Fetch ${s.url} and search it when the sections above are not enough.`;
 }
 
-// A page and its Markdown twin count as the same page.
-const pageKey = (u) => u.replace(/#.*$/, '').replace(/\.md$/, '').replace(/\/$/, '');
+// A page and its Markdown twin (<page>.md, <page>/index.md, or /#/page's /page.md) count as the same page.
+const pageKey = (u) => u.replace(/\/?#\//, '/').replace(/#.*$/, '').replace(/(\/index)?\.md$/, '').replace(/\/$/, '');
 
 // Puts the page the user is on right now first, unless the shared skill
-// already covers it, so a site-level skill still answers "this page".
-export function withCurrentPage(sections, currentPage) {
-  if (!currentPage || sections.some((s) => pageKey(s.url) === pageKey(currentPage.url))) return sections;
-  return [currentPage, ...sections];
+// already covers it, so a site-level skill still answers "this page". The
+// skill's own page, when it is a different one, stops calling itself "This page".
+export function withCurrentPage(sections, currentPage, pageUrl = currentPage?.url) {
+  const here = pageUrl && pageKey(pageUrl);
+  if (!here || sections.some((s) => pageKey(s.url) === here)) return sections;
+  const others = sections.map((s) => (s.label.startsWith('This page: ') ? { ...s, label: s.label.replace('This page: ', 'Another page: ') } : s));
+  return currentPage && pageKey(currentPage.url) === here ? [currentPage, ...others] : others;
 }

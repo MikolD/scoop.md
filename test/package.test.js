@@ -60,6 +60,18 @@ test('withCurrentPage puts the page first only when the shared skill lacks it', 
   assert.equal(withCurrentPage(shared, null), shared);
 });
 
+test('the shared skill\'s page is not called "This page" when the user is on another one', () => {
+  // docs.python.org: scooping pathlib after json worked listed two "This page" sections.
+  const shared = [{ kind: 'page-html', label: 'This page: json', url: 'https://ex.com/json.html', content: 'j' }];
+  const page = { kind: 'page-html', label: 'This page: pathlib', url: 'https://ex.com/pathlib.html', content: 'p' };
+  assert.deepEqual(withCurrentPage(shared, page).map((s) => s.label), ['This page: pathlib', 'Another page: json']);
+  assert.deepEqual(withCurrentPage(shared, null, 'https://ex.com/pathlib.html').map((s) => s.label), ['Another page: json']);
+  assert.equal(withCurrentPage(shared, null, 'https://ex.com/json.html#x'), shared);
+  const twin = (url) => [{ kind: 'page-md', label: 'This page: d1', url, content: 'd' }];
+  assert.equal(withCurrentPage(twin('https://ex.com/d1/index.md'), null, 'https://ex.com/d1/').length, 1);
+  assert.equal(withCurrentPage(twin('https://ex.com/quickstart.md'), null, 'https://ex.com/#/quickstart')[0].label, 'This page: d1');
+});
+
 test('the budget holds exactly with a long section, many related links and the truncation note', () => {
   // developers.cloudflare.com/d1/ in Chrome came out at 400,088 chars for a 400,000 budget.
   const relatedLinks = Array.from({ length: 60 }, (_, i) => ({ url: `https://ex.com/docs/page-${i}`, text: `Page ${i}` }));

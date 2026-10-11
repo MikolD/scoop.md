@@ -110,7 +110,7 @@ async function run({ skipLibrary = false } = {}) {
 
   if (shared?.sections?.length) {
     const current = currentPageSection(await local.catch(() => null));
-    const sections = withCurrentPage(shared.sections, current);
+    const sections = withCurrentPage(shared.sections, current, tab.url);
     const text = buildPackage({ site, pageUrl: tab.url, sections, relatedLinks: shared.relatedLinks ?? [] });
     const ok = await copy(text);
     copied(ok);
