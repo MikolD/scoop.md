@@ -128,6 +128,6 @@ test('pages that only render when signed in are copied but never shared', async 
   const before = store.skills.length;
   const { $, clipboard } = await openPopup(`${otherSite()}/docs/missing`);
   assert.match(clipboard.text, /# Private/);
-  assert.match($('share').textContent, /only loads with your login/);
+  assert.match($('share').textContent, /only loads in your browser/);
   assert.equal(store.skills.length, before);
 });

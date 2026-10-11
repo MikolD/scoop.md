@@ -132,7 +132,7 @@ async function run({ skipLibrary = false } = {}) {
 async function share(scoop) {
   if (!settings.libraryUrl) return;
   if (!settings.share) return note('share', 'Not shared: sharing is off.');
-  if (!scoop.isPublic) return note('share', 'Not shared: this page only loads with your login.');
+  if (!scoop.isPublic) return note('share', "Not shared: this page's text only loads in your browser.");
 
   note('share', 'Sharing with the library…');
   const res = await library.share(shareBody(scoop));
