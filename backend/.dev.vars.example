@@ -1,0 +1,5 @@
+# Copy to .dev.vars for `wrangler dev`. Never commit .dev.vars.
+ADMIN_TOKEN=local-admin-token
+# Local dev only: lets the Worker verify sources on http://localhost (the contract tests' fixture server).
+ALLOW_LOCALHOST=1
+ALLOW_ANY_EXTENSION=1

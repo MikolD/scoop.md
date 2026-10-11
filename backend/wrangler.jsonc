@@ -1,0 +1,63 @@
+// api.scoop.md Worker. The top level is the local-dev config (`wrangler dev`);
+// deploy only with `--env staging` or `--env production`.
+// Bindings and vars are non-inheritable, so each environment repeats them.
+// IDs marked REPLACE_ME are placeholders: see README.md, "Before the first deploy".
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "scoop-api-dev",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "observability": { "enabled": true },
+
+  "vars": {
+    "EXTENSION_IDS": ""
+    // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION and ADMIN_TOKEN come from .dev.vars locally.
+  },
+  "d1_databases": [
+    { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+  ],
+  "r2_buckets": [
+    { "binding": "SKILLS", "bucket_name": "scoop-skills-dev" }
+  ],
+  "ratelimits": [
+    // Reads: 600 per minute per IP (docs/BACKEND.md §8). Hourly write limits live in D1.
+    { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } }
+  ],
+
+  "env": {
+    "staging": {
+      "name": "scoop-api-staging",
+      "routes": [{ "pattern": "api-staging.scoop.md", "custom_domain": true }],
+      "vars": {
+        "EXTENSION_IDS": "",
+        "ALLOW_ANY_EXTENSION": "1"
+      },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "scoop-staging", "database_id": "REPLACE_ME_STAGING_D1_ID", "migrations_dir": "migrations" }
+      ],
+      "r2_buckets": [
+        { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" }
+      ],
+      "ratelimits": [
+        { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } }
+      ]
+    },
+    "production": {
+      "name": "scoop-api",
+      "routes": [{ "pattern": "api.scoop.md", "custom_domain": true }],
+      "vars": {
+        "EXTENSION_IDS": ""
+      },
+      "d1_databases": [
+        { "binding": "DB", "database_name": "scoop-production", "database_id": "REPLACE_ME_PRODUCTION_D1_ID", "migrations_dir": "migrations" }
+      ],
+      "r2_buckets": [
+        { "binding": "SKILLS", "bucket_name": "scoop-skills-production" }
+      ],
+      "ratelimits": [
+        { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } }
+      ]
+    }
+  }
+}
