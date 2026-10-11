@@ -139,7 +139,6 @@ test('store installs ignore devLibraryUrl and drop the old libraryUrl setting', 
   } finally {
     globalThis.fetch = realFetch;
   }
-  assert.ok(seen.some((u) => u.startsWith('https://api.scoop.md/v1/')), 'uses the fixed library');
   assert.ok(!seen.some((u) => u.startsWith(apiUrl)), 'never the override');
   assert.equal(sync.libraryUrl, undefined, 'old setting removed');
 });
@@ -155,7 +154,8 @@ test('pages that only render when signed in are copied but never shared', async 
 test('store installs never share pages on localhost, even if a library would take them', async () => {
   const realFetch = globalThis.fetch;
   const posts = [];
-  globalThis.fetch = (url, init) => { if (init?.method === 'POST') posts.push(String(url)); return realFetch(url, init); };
+  const gets = [];
+  globalThis.fetch = (url, init) => { (init?.method === 'POST' ? posts : gets).push(String(url)); return realFetch(url, init); };
   try {
     const { $, clipboard } = await openPopup(`${docsUrl}/docs/guide`, { installType: 'normal' });
     assert.match(clipboard.text, /# Get started with Widgets/);
@@ -164,4 +164,5 @@ test('store installs never share pages on localhost, even if a library would tak
     globalThis.fetch = realFetch;
   }
   assert.deepEqual(posts, []);
+  assert.ok(!gets.some((u) => u.includes('/skills/best')), 'a private hostname is never sent to the library');
 });

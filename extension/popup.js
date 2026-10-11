@@ -1,6 +1,6 @@
 import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
-import { scoopPage, currentPageSection } from './lib/scoop.js';
+import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason } from './lib/library.js';
 
 const DEFAULTS = { share: true };
@@ -106,7 +106,9 @@ async function run({ skipLibrary = false } = {}) {
   // library for more than its short timeout.
   const local = scoopCurrentTab();
   local.catch(() => {});
-  const best = skipLibrary ? null : await library.best(site);
+  // Private hostnames never reach the library, not even to ask.
+  const ask = !skipLibrary && (devLibrary || !isPrivateHost(new URL(tab.url).hostname));
+  const best = ask ? await library.best(site) : null;
   const shared = best?.ok ? best.data?.skill : null;
 
   if (shared?.sections?.length) {
