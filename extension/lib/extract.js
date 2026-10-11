@@ -142,6 +142,20 @@ function plain(el) {
   return s;
 }
 
+// textContent, but with block children kept apart: "4 hrs ago</span><h3>Title"
+// is "4 hrs ago Title", not "4 hrs agoTitle".
+function linkText(el) {
+  let s = '';
+  for (const c of el.childNodes) {
+    if (c.nodeType === 3) s += c.textContent;
+    else if (c.nodeType === 1) {
+      const tag = c.tagName.toLowerCase();
+      s += BLOCK.has(tag) || /^(h[1-6]|li|br)$/.test(tag) ? ` ${linkText(c)} ` : linkText(c);
+    }
+  }
+  return s;
+}
+
 // Links in the site's navigation that stay within the same docs section, so the
 // agent knows what else exists without us crawling it all up front.
 export function relatedLinks(doc, pageUrl, limit = 60) {
@@ -155,7 +169,7 @@ export function relatedLinks(doc, pageUrl, limit = 60) {
     const key = u.origin + u.pathname;
     if (u.origin !== page.origin || !u.pathname.startsWith(prefix) || seen.has(key)) continue;
     seen.add(key);
-    links.push({ url: key, text: a.textContent.trim().replace(/\s+/g, ' ').slice(0, 80) });
+    links.push({ url: key, text: linkText(a).trim().replace(/\s+/g, ' ').slice(0, 80) });
     if (links.length >= limit) break;
   }
   return links;

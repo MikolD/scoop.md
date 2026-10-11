@@ -31,6 +31,11 @@ test('leading permalink markers are dropped too (VuePress: chartjs.org)', () => 
   assert.match(htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page'), /^## Why Chart\.js$/m);
 });
 
+test('related link text keeps block children apart (bbc.com "4 hrs agoChildren…")', () => {
+  const doc = parse('<nav><a href="/news/a"><span>4 hrs ago</span><h3>Children rescued</h3><p>Summary</p></a><a href="/news/b">Get<b>ting</b> started</a></nav>');
+  assert.deepEqual(relatedLinks(doc, 'https://ex.com/news/x').map((l) => l.text), ['4 hrs ago Children rescued Summary', 'Getting started']);
+});
+
 test('data: and javascript: links keep their text but not their target', () => {
   const doc = parse('<main><h1>T</h1><p><a href="data:text/plain,<!doctype html>%0A<html>">Download Template</a> and <a href="mailto:a@ex.com">mail</a> and <a href="/x">x</a></p></main>');
   const md = htmlToMarkdown(pickMain(doc), 'https://ex.com/docs/page');
