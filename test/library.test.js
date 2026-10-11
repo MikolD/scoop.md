@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DOMParser } from 'linkedom';
-import { createLibrary, shareBody, notSharedReason } from '../extension/lib/library.js';
+import { createLibrary, shareBody, notSharedReason, libraryUrl, DEFAULT_LIBRARY } from '../extension/lib/library.js';
 import { scoopPage } from '../extension/lib/scoop.js';
 
 const ID = '3b1f2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -77,4 +77,17 @@ test('scoopPage prefers the .md twin and keeps oversized llms-full as a link', a
     ['llms-full', 'https://ex.com/llms-full.txt', 9_000_000],
   ]);
   assert.equal(scoop.sections[0].label, 'This page: A');
+});
+
+test('the library URL is fixed; only unpacked installs honour devLibraryUrl', async () => {
+  const fake = (installType, local = {}) => ({
+    management: { getSelf: async () => { if (!installType) throw new Error('no management'); return { installType }; } },
+    storage: { local: { get: async () => local }, sync: { remove: async () => {} } },
+  });
+  const dev = { devLibraryUrl: 'http://localhost:8787/v1' };
+  assert.equal(await libraryUrl(fake('development', dev)), 'http://localhost:8787/v1');
+  assert.equal(await libraryUrl(fake('development')), DEFAULT_LIBRARY);
+  for (const store of ['normal', 'admin', 'sideload', 'other', null]) {
+    assert.equal(await libraryUrl(fake(store, dev)), DEFAULT_LIBRARY, String(store));
+  }
 });

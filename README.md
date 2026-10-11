@@ -29,7 +29,15 @@ npm run icons            # redraw extension/icons (needs python3 + Pillow)
 
 Load the extension in Chrome: `chrome://extensions` → Developer mode → **Load unpacked** → pick the `extension/` folder. Click the toolbar icon on any docs page, or press Alt+Shift+C.
 
-Settings (library URL, sharing on or off) are on the extension's options page. The library defaults to `https://api.scoop.md/v1`; use `http://localhost:8787/v1` with `npm run server`. Leave it empty to work without a library.
+The library is always `https://api.scoop.md/v1`; users can't change it. The options page has sharing on or off, the theme and the keyboard shortcut. If the library can't be reached, the extension builds from the page as usual and says nothing about it.
+
+To test against `npm run server`, load the extension unpacked and set a local override from the popup's DevTools console (right-click the popup → Inspect):
+
+```js
+chrome.storage.local.set({ devLibraryUrl: 'http://localhost:8787/v1' })  // undo: chrome.storage.local.remove('devLibraryUrl')
+```
+
+Only unpacked installs (`chrome.management.getSelf()` → `installType: "development"`) read `devLibraryUrl`; Web Store installs ignore it.
 
 ## Layout
 

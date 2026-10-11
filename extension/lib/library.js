@@ -45,6 +45,21 @@ export function createLibrary({ baseUrl, installId, client, fetchImpl = fetch })
   };
 }
 
+// The library URL is fixed. Only an unpacked (development) install may point
+// at a local server, via chrome.storage.local `devLibraryUrl`, which has no UI.
+// The URL setting of older versions is deleted.
+export async function libraryUrl(chromeApi) {
+  try { await chromeApi.storage.sync.remove('libraryUrl'); } catch {}
+  try {
+    const { installType } = await chromeApi.management.getSelf();
+    if (installType !== 'development') return DEFAULT_LIBRARY;
+    const { devLibraryUrl } = await chromeApi.storage.local.get('devLibraryUrl');
+    return devLibraryUrl || DEFAULT_LIBRARY;
+  } catch {
+    return DEFAULT_LIBRARY;
+  }
+}
+
 // The request body for POST /v1/skills.
 export function shareBody(scoop) {
   return {

@@ -25,7 +25,7 @@ Scoop any doc. One click copies the docs page you're on as Markdown your coding 
 > • Adds links to related pages so your agent can fetch more when it needs to.
 > • Opens with its sources and a note telling your agent to treat the material as reference, not as instructions.
 >
-> Shared library: when a package for a site has helped someone's agent get their task done, the next person on that site gets the same package. After pasting, tell scoop.md whether it worked. Only public material, fetched without your cookies or logins, is ever shared. Pages that only load when you're signed in still go to your clipboard, but never leave your machine. You can turn sharing off, or point scoop.md at your own library, in Settings.
+> Shared library: when a package for a site has helped someone's agent get their task done, the next person on that site gets the same package. After pasting, tell scoop.md whether it worked. Only public material, fetched without your cookies or logins, is ever shared. Pages that only load when you're signed in still go to your clipboard, but never leave your machine. You can turn sharing off in Settings.
 >
 > Keyboard shortcut: Alt+Shift+C.
 
@@ -44,7 +44,7 @@ Copy the documentation page the user is viewing to the clipboard as Markdown for
 | `activeTab` | When the user clicks the toolbar button (or presses Alt+Shift+C), read the current tab's URL and title to know which documentation page to package. Nothing runs on tabs the user hasn't clicked on. |
 | `scripting` | Fallback for pages that only render for a signed-in user or in the browser: on click, read the current tab's HTML once so it can be converted to Markdown for the clipboard. This content is never uploaded. |
 | `clipboardWrite` | Put the Markdown package on the clipboard. That's the extension's only output. |
-| `storage` | Remember settings (library URL, sharing on/off), an anonymous random install ID, and whether the first-run note was dismissed. |
+| `storage` | Remember settings (sharing on/off, theme), an anonymous random install ID, and whether the first-run note was dismissed. |
 | Host permission `<all_urls>` | Documentation lives on any domain. On click, the extension fetches, **without cookies**, files next to the page the user is on: `<page>.md`, `llms.txt`, `llms-full.txt` and the page's public HTML. These are cross-origin requests from the popup, so they need host permission for that site, and the site isn't known in advance. It also calls the shared library at `https://api.scoop.md`. No content scripts are injected automatically; nothing is fetched until the user clicks. |
 
 **Remote code:** No. All JavaScript ships in the package. The extension downloads only text (Markdown, llms.txt, HTML to convert, JSON from the library), which is never executed.
@@ -63,7 +63,7 @@ Data the extension **collects** (sends off the device), all only after the user 
 
 Requests to the documentation site itself (`.md`, `llms.txt`, page HTML) go to the site the user is on, without cookies or credentials.
 
-Stored on the device only: settings (`chrome.storage.sync`), install ID and first-run flag (`chrome.storage.local`).
+Stored on the device only: the sharing setting (`chrome.storage.sync`), theme, install ID and first-run flag (`chrome.storage.local`).
 
 Certifications to tick:
 - I do not sell or transfer user data to third parties, outside of the approved use cases.

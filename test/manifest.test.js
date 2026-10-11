@@ -33,3 +33,10 @@ test('pages keep styling in their stylesheets, so a restyle is CSS-only', () => 
     assert.ok(!/\.style\b/.test(readFileSync(ext(f), 'utf8')), `${f} sets styles from script`);
   }
 });
+
+test('the library URL is not a user setting', () => {
+  assert.ok(!readFileSync(ext('options.html'), 'utf8').includes('libraryUrl'), 'no library URL field');
+  const js = readFileSync(ext('options.js'), 'utf8');
+  assert.deepEqual(js.match(/.*libraryUrl.*/g), ["chrome.storage.sync.remove('libraryUrl');"], 'options.js only deletes the old setting');
+  assert.ok(!manifest.permissions.includes('management'), 'management.getSelf needs no permission');
+});

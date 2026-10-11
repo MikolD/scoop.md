@@ -3,18 +3,55 @@
 <head>
   <meta charset="utf-8">
   <title>scoop.md settings</title>
+  <link rel="stylesheet" href="theme.css">
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
-  <h1>scoop.md</h1>
-  <label for="libraryUrl">Shared library URL</label>
-  <input id="libraryUrl" type="url" placeholder="https://api.scoop.md/v1">
-  <small>Default: https://api.scoop.md/v1. For local development use http://localhost:8787/v1 (<code>npm run server</code>). Leave empty to work fully offline, with no shared library.</small>
+  <header class="bar">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="" width="24" height="24">
+      <span>scoop.md</span>
+    </div>
+  </header>
 
-  <label><input id="share" type="checkbox"> Share packages I build with the library</label>
-  <small>Shared: the public sources of the page you scoop (its .md file, llms.txt files, or the page text as anyone would see it without logging in), the page URL and title, and an anonymous install ID. Only material fetched without your cookies or logins is ever shared. Votes and reports are sent with the same install ID.</small>
+  <main>
+    <section class="card">
+      <label class="row" for="share">
+        <span class="text">
+          <span class="title">Share with the library</span>
+          <span class="meta">Public docs you scoop help the next person on that site. Pages behind a login are never shared.</span>
+        </span>
+        <input id="share" type="checkbox" class="toggle" role="switch">
+      </label>
+    </section>
 
-  <p><button id="save">Save</button> <span id="saved"></span></p>
+    <section class="card">
+      <div class="row">
+        <span class="title" id="theme-label">Theme</span>
+        <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
+          <label><input type="radio" name="theme" value="system"><span>System</span></label>
+          <label><input type="radio" name="theme" value="light"><span>Light</span></label>
+          <label><input type="radio" name="theme" value="dark"><span>Dark</span></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <span class="text">
+          <span class="title">Keyboard shortcut</span>
+          <span id="shortcut" class="meta">…</span>
+        </span>
+        <button id="shortcuts" class="button" type="button">Change</button>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <a href="https://scoop.md/privacy" target="_blank" rel="noopener">Privacy</a>
+    <a href="https://scoop.md/terms" target="_blank" rel="noopener">Terms</a>
+    <span id="version"></span>
+  </footer>
   <script src="options.js"></script>
 </body>
 </html>

@@ -1,9 +1,9 @@
 import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection } from './lib/scoop.js';
-import { DEFAULT_LIBRARY, createLibrary, shareBody, notSharedReason } from './lib/library.js';
+import { libraryUrl, createLibrary, shareBody, notSharedReason } from './lib/library.js';
 
-const DEFAULTS = { libraryUrl: DEFAULT_LIBRARY, share: true };
+const DEFAULTS = { share: true };
 const $ = (id) => document.getElementById(id);
 
 let settings;
@@ -129,12 +129,13 @@ async function run({ skipLibrary = false } = {}) {
 }
 
 async function share(scoop) {
-  if (!settings.libraryUrl) return;
   if (!settings.share) return note('share', 'Not shared: sharing is off.');
   if (!scoop.isPublic) return note('share', "Not shared: this page's text only loads in your browser.");
 
   note('share', 'Sharing with the library…');
   const res = await library.share(shareBody(scoop));
+  // An unreachable library is not the user's problem: the copy already worked.
+  if (res.error?.code === 'offline' || res.error?.code === 'timeout') return note('share', '');
   if (!res.ok) return note('share', `Not shared: ${notSharedReason(res.error, scoop.sections)}`, 'warn');
   note('share', res.data.duplicate ? 'Already in the library.' : 'Shared with the library.');
   showFeedback(res.data.id);
@@ -164,7 +165,7 @@ async function installId() {
 
 async function intro() {
   const { introSeen } = await chrome.storage.local.get('introSeen');
-  if (introSeen || !settings.share || !settings.libraryUrl) return;
+  if (introSeen || !settings.share) return;
   $('intro').hidden = false;
   $('intro-ok').onclick = () => {
     $('intro').hidden = true;
@@ -199,10 +200,8 @@ $('report').onsubmit = (e) => { e.preventDefault(); return report($('reason').va
 async function main() {
   settings = await chrome.storage.sync.get(DEFAULTS);
   try { applyTheme((await chrome.storage.local.get('theme')).theme); } catch {}
-  // The prototype's default had no API version in the path.
-  if (settings.libraryUrl === 'http://localhost:8787') settings.libraryUrl += '/v1';
   library = createLibrary({
-    baseUrl: settings.libraryUrl,
+    baseUrl: await libraryUrl(chrome),
     installId: await installId(),
     client: `extension/${chrome.runtime.getManifest().version}`,
   });

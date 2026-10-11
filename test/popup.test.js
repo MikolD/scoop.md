@@ -41,7 +41,7 @@ after(() => { docs.close(); api.close(); });
 const local = {};
 
 // Opens a fresh popup on `url` and waits for its first run to finish.
-async function openPopup(url, { libraryUrl = apiUrl, share = true } = {}) {
+async function openPopup(url, { libraryUrl = apiUrl, share = true, installType = 'development', sync = {} } = {}) {
   const { document } = parseHTML(read('../extension/popup.html'));
   const clipboard = { text: null, writeText: async (t) => { clipboard.text = t; } };
   globalThis.document = document;
@@ -49,7 +49,10 @@ async function openPopup(url, { libraryUrl = apiUrl, share = true } = {}) {
   Object.defineProperty(globalThis, 'navigator', { value: { clipboard }, configurable: true });
   globalThis.chrome = {
     storage: {
-      sync: { get: async (defaults) => ({ ...defaults, libraryUrl, share }) },
+      sync: {
+        get: async (defaults) => ({ ...defaults, share, ...sync }),
+        remove: async (key) => { delete sync[key]; },
+      },
       local: {
         get: async (key) => (key in local ? { [key]: local[key] } : {}),
         set: async (obj) => { Object.assign(local, obj); },
@@ -59,6 +62,8 @@ async function openPopup(url, { libraryUrl = apiUrl, share = true } = {}) {
     scripting: { executeScript: async () => [{ result: '<html><body><main><h1>Private</h1></main></body></html>' }] },
     runtime: { getManifest: () => MANIFEST, openOptionsPage() {} },
   };
+  local.devLibraryUrl = libraryUrl;
+  globalThis.chrome.management = { getSelf: async () => ({ installType }) };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   await popup.ready;
   const $ = (id) => document.getElementById(id);
@@ -121,7 +126,22 @@ test('the copy works when the library is down', async () => {
   const { $, clipboard } = await openPopup(`${docsUrl}/docs/guide`, { libraryUrl: 'http://localhost:9/v1' });
   assert.match(clipboard.text, /# Get started with Widgets/);
   assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
-  assert.equal($('share').textContent, "Not shared: the library couldn't be reached.");
+  assert.equal($('share').hidden, true, 'no error noise while the library is unreachable');
+});
+
+test('store installs ignore devLibraryUrl and drop the old libraryUrl setting', async () => {
+  const sync = { libraryUrl: apiUrl };
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => { seen.push(String(url)); return realFetch(url, init); };
+  try {
+    await openPopup(`${docsUrl}/docs/guide`, { installType: 'normal', sync });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(seen.some((u) => u.startsWith('https://api.scoop.md/v1/')), 'uses the fixed library');
+  assert.ok(!seen.some((u) => u.startsWith(apiUrl)), 'never the override');
+  assert.equal(sync.libraryUrl, undefined, 'old setting removed');
 });
 
 test('pages that only render when signed in are copied but never shared', async () => {
