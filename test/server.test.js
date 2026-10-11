@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { best, fingerprint } from '../server/store.js';
-import { assertFetchable, containment, htmlToText, markdownToPlain, normalizeSite, normalizeText } from '../server/verify.js';
+import { assertFetchable, containment, htmlToText, markdownToPlain, normalizeSite, normalizeText, shingleHashes } from '../server/verify.js';
 
 const skill = (o) => ({ site: 'ex.com', worked: 0, failed: 0, lastWorkedAt: null, createdAt: '2026-01-01T00:00:00Z', removedAt: null, ...o });
 
@@ -54,7 +54,16 @@ test('text scanners stay linear on 2 MB of adversarial input', () => {
     const ms = performance.now() - t;
     assert.ok(ms < 200, `${label}: ${ms.toFixed(0)} ms`);
   };
-  for (const u of ['<script ', '<style>', '<!--', '<', '<a ', '<script></script ', '&amp', '&#99999999;']) within(`htmlToText ${u}`, () => htmlToText(fill(u)));
+  for (const u of ['<script ', '<style>', '<!--', '<!--a>', '<!-- ', '<', '<a ', '<script></script ', '&amp', '&#99999999;']) within(`htmlToText ${u}`, () => htmlToText(fill(u)));
   for (const u of ['[', '](', '[a](', '![', '-\n']) within(`markdownToPlain ${u}`, () => markdownToPlain(fill(u)));
   within('normalizeText spaces', () => normalizeText(fill(' ', 'x')));
+});
+
+test('ordered-list numbers are not words, and shingle hashes are seeded', () => {
+  const steps = ['Install the command line tool with your package manager of choice', 'Log in to your account using the browser flow that opens', 'Create a new project from the dashboard and copy its identifier', 'Run the deploy command from the root of your repository folder'];
+  const page = `<ol>${steps.map((s) => `<li>${s}</li>`).join('')}</ol>`;
+  assert.equal(containment(steps.map((s, i) => `${i + 1}. ${s}`).join('\n'), page).ratio, 1);
+  const text = 'alpha beta gamma delta epsilon zeta';
+  assert.deepEqual(shingleHashes(text, 3), shingleHashes(text, 3));
+  assert.notDeepEqual(shingleHashes(text, 3), shingleHashes(text, 4));
 });

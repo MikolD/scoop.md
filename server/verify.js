@@ -185,6 +185,9 @@ export function htmlToText(html) {
     return at;
   };
 
+  // Next '-->' likewise, so a run of unclosed '<!--' doesn't rescan to the end.
+  let commentEnd = -2;
+
   const out = [];
   let i = 0;
   while (i < n) {
@@ -192,8 +195,8 @@ export function htmlToText(html) {
     if (lt === -1) { out.push(html.slice(i)); break; }
     if (lt > i) out.push(html.slice(i, lt));
     if (lower.startsWith('<!--', lt)) {
-      const end = html.indexOf('-->', lt + 4);
-      if (end !== -1) { out.push(' '); i = end + 3; continue; }
+      if (commentEnd !== -1 && commentEnd < lt + 4) commentEnd = html.indexOf('-->', lt + 4);
+      if (commentEnd !== -1) { out.push(' '); i = commentEnd + 3; continue; }
     }
     const gt = html.indexOf('>', lt + 1);
     if (gt === -1) { out.push(html.slice(lt)); break; } // no tag can start from here on
@@ -233,42 +236,56 @@ export function markdownToPlain(md) {
     kept = from = nextParen + 1;
   }
   out.push(md.slice(kept));
-  // Heading, emphasis, code, list, quote and table markers need no pass of
-  // their own: shingling splits on letters and digits, which drops them.
-  return out.join('').replace(/https?:\/\/\S+/g, ' ');
+  // Ordered-list numbers would count as words; the page's <ol> doesn't show
+  // them as text. Other markers (#, *, -, >, |, `) need no pass of their own:
+  // shingling splits on letters and digits, which drops them.
+  return out
+    .join('')
+    .replace(/https?:\/\/\S+/g, ' ')
+    .replace(/^[ \t]{0,3}\d{1,9}[.)][ \t]+/gm, ' ');
 }
 
-// 32-bit FNV-1a of one word.
-function hashWord(w) {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < w.length; i++) h = Math.imul(h ^ w.charCodeAt(i), 0x01000193);
-  return h >>> 0;
+// 53-bit hash (cyrb53) of one shingle: its words, space-separated, under `seed`.
+function shingleHash(ring, first, seed) {
+  let h1 = 0xdeadbeef ^ seed;
+  let h2 = 0x41c6ce57 ^ seed;
+  for (let k = 0; k < SHINGLE; k++) {
+    const w = ring[(first + k) % SHINGLE];
+    for (let i = 0; i <= w.length; i++) {
+      const c = i < w.length ? w.charCodeAt(i) : 32;
+      h1 = Math.imul(h1 ^ c, 2654435761);
+      h2 = Math.imul(h2 ^ c, 1597334677);
+    }
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
+  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
+  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return 4294967296 * (2097151 & h2) + (h1 >>> 0);
 }
 
-// 5-word shingles of the lowercased words in `text`, each hashed to 32 bits.
-// Numbers instead of joined strings keep a 2 MB page's shingle set small; a
-// hash collision can only add a match by chance (about 1 in 4 billion per lookup
-// per shingle of the page), never remove one.
-export function shingleHashes(text) {
+// 5-word shingles of the lowercased words in `text`, each a 53-bit hash under
+// `seed`. Numbers instead of joined strings keep a 2 MB page's shingle set
+// small. Both sides of one comparison must use the same seed; a fresh random
+// seed per comparison means colliding shingles can't be prepared offline.
+export function shingleHashes(text, seed) {
   const out = [];
-  const ring = new Array(SHINGLE).fill(0);
+  const ring = new Array(SHINGLE).fill('');
   let count = 0;
   for (const m of text.toLowerCase().matchAll(/[\p{L}\p{N}]+/gu)) {
-    ring[count % SHINGLE] = hashWord(m[0]);
+    ring[count % SHINGLE] = m[0];
     count++;
-    if (count < SHINGLE) continue;
-    let h = 0x811c9dc5;
-    for (let k = count - SHINGLE; k < count; k++) h = Math.imul(h ^ ring[k % SHINGLE], 0x01000193);
-    out.push(h >>> 0);
+    if (count >= SHINGLE) out.push(shingleHash(ring, count - SHINGLE, seed));
   }
   return out;
 }
 
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown, pageHtml) {
-  const mine = shingleHashes(markdownToPlain(sectionMarkdown));
+  const seed = crypto.getRandomValues(new Uint32Array(1))[0];
+  const mine = shingleHashes(markdownToPlain(sectionMarkdown), seed);
   if (!mine.length) return { ratio: 0, count: 0 };
-  const theirs = new Set(shingleHashes(htmlToText(pageHtml)));
+  const theirs = new Set(shingleHashes(htmlToText(pageHtml), seed));
   const hits = mine.filter((s) => theirs.has(s)).length;
   return { ratio: hits / mine.length, count: mine.length };
 }

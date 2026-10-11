@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { containment, htmlToText, markdownToPlain, normalizeText, verifySection, verifyAll } from '../src/lib/verify.ts';
+import { containment, htmlToText, markdownToPlain, normalizeText, shingleHashes, verifySection, verifyAll } from '../src/lib/verify.ts';
 import type { Section } from '../src/lib/types.ts';
 import { fakeFetch } from './helpers.ts';
 
@@ -181,6 +181,8 @@ test('htmlToText is linear on adversarial HTML', () => {
     ['<script ×n', fill('<script ')],
     ['<style>×n', fill('<style>')],
     ['<!--×n', fill('<!--')],
+    ['<!--a>×n', fill('<!--a>')],
+    ['<!-- ×n', fill('<!-- ')],
     ['<×n', fill('<')],
     ['<a ×n', fill('<a ')],
     ['</script ×n', fill('<script></script ')],
@@ -206,4 +208,26 @@ test('markdownToPlain and normalizeText are linear on adversarial Markdown', () 
 test('containment of a 2 MB section against a 2 MB page stays fast', () => {
   const prose = fill('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ');
   within('containment', 1500, () => containment(prose, `<p>${prose}</p>`));
+});
+
+test('ordered-list numbers are not counted as words', () => {
+  const steps = [
+    'Install the command line tool with your package manager of choice',
+    'Log in to your account using the browser flow that opens',
+    'Create a new project from the dashboard and copy its identifier',
+    'Run the deploy command from the root of your repository folder',
+  ];
+  const page = `<!doctype html><ol>${steps.map((s) => `<li>${s}</li>`).join('')}</ol>`;
+  assert.equal(containment(steps.map((s, i) => `${i + 1}. ${s}`).join('\n'), page).ratio, 1);
+  assert.equal(containment(steps.map((s, i) => `  ${i + 1}) ${s}`).join('\n'), page).ratio, 1);
+  assert.equal(markdownToPlain('Step 1) stays'), 'Step 1) stays', 'only at the start of a line');
+});
+
+test('shingle hashes are seeded per comparison; matching does not depend on the seed', () => {
+  const text = 'alpha beta gamma delta epsilon zeta eta theta';
+  assert.deepEqual(shingleHashes(text, 1), shingleHashes(text, 1));
+  assert.notDeepEqual(shingleHashes(text, 1), shingleHashes(text, 2));
+  assert.ok(shingleHashes(text, 7).every((h) => Number.isSafeInteger(h) && h >= 0 && h < 2 ** 53));
+  assert.ok(shingleHashes(text, 7).some((h) => h > 2 ** 32), 'wider than 32 bits');
+  for (let i = 0; i < 20; i++) assert.equal(containment(HTML_AS_MD, HTML).ratio, 1);
 });
