@@ -31,6 +31,9 @@ open, plus places where the spec and the reference server (`server/`) disagree.
 - **Version:** `/v1/health` returns the `VERSION` var if set (CI passes the git
   sha for staging and the tag version for production via `--var`), else
   `0.1.0`.
+- **Health reports secrets as booleans:** `secrets: { admin, rateKey }` says
+  whether `ADMIN_TOKEN` and `RATE_KEY` are set, never their values. The CI
+  smoke test after each deploy fails if either is false.
 
 ## API behaviour
 
@@ -82,9 +85,10 @@ open, plus places where the spec and the reference server (`server/`) disagree.
 - **`sizeBytes`** is the sum of section `content.length` (UTF-16 code units), as
   in the spec's wording and the reference, not a byte count.
 - **Markdown stripping for shingles** (§6) removes link and image targets
-  (keeping their text) and bare URLs. Heading, emphasis, code, list, quote and
-  table markers get no pass of their own: shingling splits on letters and
-  digits, which drops them anyway.
+  (keeping their text), bare URLs and ordered-list numbers at the start of a
+  line (`1.`, `2)`), which an `<ol>` doesn't render as text. Heading, emphasis,
+  code, bullet, quote and table markers get no pass of their own: shingling
+  splits on letters and digits, which drops them anyway.
 - **Blocked sites:** `scoop.md` and anything under it can't be shared (400).
 - **`ALLOW_LOCALHOST`** is honoured only when the `ENVIRONMENT` var is `dev`
   (set at the top level of `wrangler.jsonc`; `staging`/`production` set their
@@ -100,7 +104,8 @@ open, plus places where the spec and the reference server (`server/`) disagree.
 ## Rate limiting (§8)
 
 - Cloudflare's rate limiting binding only supports 10 s and 60 s periods, so it
-  is used for **reads** only (600/min per IP, key = `CF-Connecting-IP`). Admin
+  is used for **reads** only (600/min per IP, keyed on the same IP subject as
+  the write limits: IPv4 as is, IPv6 by /64). Admin
   routes skip it, so bad admin auth is always a plain 404.
 - **Hourly write limits** are fixed one-hour windows in a D1 table
   `rate_counters(key, hour, count)`. `key` is
@@ -161,11 +166,12 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   link targets longer than 2,048 characters are not treated as links. Unit
   tests run 2 MB adversarial inputs against a 200 ms budget; the reference
   server has the same code and a matching test.
-- **Shingles are hashed** to 32-bit numbers (FNV-1a over word hashes) instead of
-  kept as joined strings: one 2.3 MB page took about 68 MB as strings. A
-  collision can only make an injected shingle look present by chance: with
-  ~300k shingles on a 2 MB page that is about 0.007% per section shingle,
-  negligible next to the 15% the threshold already allows.
+- **Shingles are hashed** to 53-bit numbers (cyrb53) with a fresh random seed
+  per comparison, instead of kept as joined strings: one 2.3 MB page took
+  about 68 MB as strings, about 31 MB as a Set of hashes for 300k shingles.
+  The random seed means colliding shingles can't be precomputed offline, and
+  at 53 bits a chance collision is about 3 × 10⁻¹¹ per section shingle against
+  a 2 MB page.
 - **page-html sections are verified one at a time**, text sections
   concurrently, so at most one page and its shingle set is in memory.
 

@@ -66,7 +66,8 @@ jobs:
       - run: npm ci
       - run: npx wrangler d1 migrations apply DB --env staging --remote
       - run: npx wrangler deploy --env staging --var VERSION:${GITHUB_SHA::7}
-      - run: curl -sf https://api-staging.scoop.md/v1/health
+      - name: Smoke test (fails if a secret is missing)
+        run: curl -sf https://api-staging.scoop.md/v1/health | jq -e '.ok == true and .secrets.admin == true and .secrets.rateKey == true'
 
   deploy-production:
     needs: test
@@ -92,3 +93,5 @@ jobs:
       - run: npm ci
       - run: npx wrangler d1 migrations apply DB --env production --remote
       - run: npx wrangler deploy --env production --var VERSION:${GITHUB_REF_NAME#backend-v}
+      - name: Smoke test (fails if a secret is missing)
+        run: curl -sf https://api.scoop.md/v1/health | jq -e '.ok == true and .secrets.admin == true and .secrets.rateKey == true'

@@ -3,6 +3,7 @@
 
 import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
+import { ipSubject } from './db/ratelimit.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import type { Env } from './env.ts';
 
@@ -24,7 +25,7 @@ export default {
       } else {
         // Admin routes answer 404 on bad auth before any limiting.
         const limited = req.method === 'GET' && !matched.name.startsWith('/v1/admin/');
-        if (limited && !(await env.READ_LIMITER.limit({ key: ip })).success) {
+        if (limited && !(await env.READ_LIMITER.limit({ key: ipSubject(ip) })).success) {
           const err = new ApiError('rate_limited', 'Too many requests; try again later', 429);
           err.retryAfter = 60;
           throw err;

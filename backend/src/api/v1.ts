@@ -70,7 +70,9 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/health$/,
     name: '/v1/health',
-    handler: async ({ env }) => json(200, { ok: true, version: env.VERSION || VERSION }),
+    // Whether the secrets are set (never their values), so a deploy smoke test can catch a missing one.
+    handler: async ({ env }) =>
+      json(200, { ok: true, version: env.VERSION || VERSION, secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY) } }),
   },
   {
     method: 'GET',
