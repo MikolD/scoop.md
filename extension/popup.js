@@ -182,10 +182,6 @@ $('theme').onclick = async () => {
   applyTheme(theme);
   try { await chrome.storage.local.set({ theme }); } catch {}
 };
-$('share-toggle').onchange = async (e) => {
-  settings.share = e.target.checked;
-  try { await chrome.storage.sync.set({ share: settings.share }); } catch {}
-};
 $('copy').onclick = async () => {
   if (!(await writeClipboard(clipboardText))) return status("Couldn't copy. Try again.", 'err');
   status('Copied again.');
@@ -203,7 +199,6 @@ $('report').onsubmit = (e) => { e.preventDefault(); return report($('reason').va
 async function main() {
   settings = await chrome.storage.sync.get(DEFAULTS);
   try { applyTheme((await chrome.storage.local.get('theme')).theme); } catch {}
-  $('share-toggle').checked = !!settings.share;
   // The prototype's default had no API version in the path.
   if (settings.libraryUrl === 'http://localhost:8787') settings.libraryUrl += '/v1';
   library = createLibrary({
