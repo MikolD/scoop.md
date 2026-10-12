@@ -5,12 +5,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   createTelemetry, envelopes, errorText, pagePath, setTelemetry, uninstallUrl,
-  MAX_QUEUE, MAX_BATCH, QUEUE_KEY, RETRY_KEY, FLUSH_ALARM, HOURLY_ALARM,
+  MAX_QUEUE, MAX_BATCH, QUEUE_KEY, RETRY_KEY, FLUSH_ALARM, HOURLY_ALARM, NOTICE_KEY, docsLike,
 } from '../extension/lib/telemetry.js';
 
 const ID = '3b241101-e2bb-4255-8caf-4136c566a962';
 
-function fakeChrome({ telemetry, installType = 'normal', local = {} } = {}) {
+// notice: the popup's usage notice has been shown (otherwise events carry no site or path).
+function fakeChrome({ telemetry, installType = 'normal', local = {}, notice = true } = {}) {
+  if (notice) local[NOTICE_KEY] = true;
   const sync = telemetry === undefined ? {} : { telemetry };
   const alarms = [];
   const listeners = {};
@@ -122,7 +124,7 @@ test('switching off sends exactly one telemetry_opt_out; switching on sends tele
   assert.equal(sync.telemetry, true);
   assert.equal(f.calls.length, 2);
   assert.deepEqual(f.calls[1].body.events.map((e) => e.name), ['telemetry_opt_in', 'settings_change']);
-  assert.equal(chrome.uninstallUrl, `https://scoop.md/bye?i=${ID}&v=0.3.0`);
+  assert.equal(chrome.uninstallUrl, `https://scoop.md/bye#i=${ID}&v=0.3.0`);
 });
 
 test('the queue is capped at 500 and drops the oldest', async () => {
@@ -223,18 +225,44 @@ test('devLibraryUrl redirects events only on unpacked installs', async () => {
   assert.equal(g.calls[0].url, 'https://api.scoop.md/v1/events');
 });
 
-test('paths drop the query, fragment and tracking parameters; error text loses URLs and hosts', () => {
+test('paths drop the query, fragment and tracking parameters, cut hash routes and redact secrets; error text loses URLs, hosts, emails and tokens', () => {
   assert.equal(pagePath('https://docs.stripe.com/webhooks?utm_source=x&lang=node#verify'), '/webhooks');
-  assert.equal(pagePath('https://site.dev/#/guide/intro?x=1'), '/#/guide/intro?x=1');
+  assert.equal(pagePath('https://site.dev/#/guide/intro?x=1'), '/#/guide/intro');
+  assert.equal(pagePath('https://site.dev/#/guide&x=1#y'), '/#/guide');
+  assert.equal(pagePath('https://docs.google.com/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit'), '/document/d/:id/edit');
+  assert.equal(pagePath('https://x.dev/reset/3b241101-e2bb-4255-8caf-4136c566a962'), '/reset/:id');
+  assert.equal(pagePath('https://react.dev/learn/react-18-upgrade-guide'), '/learn/react-18-upgrade-guide');
   assert.equal(pagePath('not a url'), undefined);
   assert.equal(errorText(new Error('Failed to fetch https://docs.example.com/a?b=c from www.x.io')), 'Failed to fetch <url> from <url>');
   assert.equal(errorText('could not reach docs.example.com:8443/x today'), 'could not reach <host> today');
-  assert.equal(errorText('x'.repeat(500)).length, 200);
+  assert.equal(errorText('denied for jane.doe@acme.com with ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234'), 'denied for <email> with <token>');
+  assert.equal(errorText('word '.repeat(100)).length, 200);
+  assert.equal(errorText('x'.repeat(500)), '<token>');
+  assert.ok(docsLike('https://docs.stripe.com/payments') && docsLike('https://vitest.dev/guide/') && docsLike('https://example.com/docs'));
+  assert.ok(!docsLike('https://www.notion.so/My-Page-abc') && !docsLike('https://gist.github.com/u/abc'));
+});
+
+test('until the popup notice has been shown, events carry no site or path; afterwards they do', async () => {
+  const { chrome, local } = fakeChrome({ notice: false, local: { installId: ID } });
+  const f = fakeFetch();
+  const t = createTelemetry({ chromeApi: chrome, fetchImpl: f.impl, beacon: null, sessionId: 's' });
+  await t.track('scoop_result', { site: 'react.dev', path: '/learn', outcome: 'copied_ready' });
+  assert.deepEqual(local[QUEUE_KEY][0].props, { outcome: 'copied_ready' });
+  t.markNoticeShown();
+  await t.track('scoop_result', { site: 'react.dev', path: '/learn', outcome: 'copied_ready' });
+  assert.deepEqual(local[QUEUE_KEY][1].props, { site: 'react.dev', path: '/learn', outcome: 'copied_ready' });
+  assert.equal(local[NOTICE_KEY], true);
+  // Lifecycle events go either way.
+  const u = fakeChrome({ notice: false, local: { installId: ID } });
+  const w = createTelemetry({ chromeApi: u.chrome, fetchImpl: f.impl, beacon: null });
+  await w.track('install', { reason: 'install' });
+  await w.flush();
+  assert.deepEqual(f.calls.at(-1).body.events.map((e) => [e.name, e.props]), [['install', { reason: 'install' }]]);
 });
 
 test('the uninstall page gets the install ID and version only while telemetry is on', async () => {
   const { chrome } = fakeChrome({ local: { installId: ID } });
-  assert.equal(await uninstallUrl(chrome), `https://scoop.md/bye?i=${ID}&v=0.3.0`);
+  assert.equal(await uninstallUrl(chrome), `https://scoop.md/bye#i=${ID}&v=0.3.0`);
   const off = fakeChrome({ telemetry: false, local: { installId: ID } });
   assert.equal(await uninstallUrl(off.chrome), 'https://scoop.md/bye');
 });
@@ -259,8 +287,12 @@ test('service worker: install creates the ID, sets the uninstall URL, schedules 
   const w = await loadWorker();
   try {
     await w.fire('runtime.onInstalled', { reason: 'install' });
+    // Nothing goes out at once: a synced opt-out may still be arriving. The flush alarm sends it.
+    assert.equal(w.fetch.calls.length, 0);
+    assert.ok(w.alarms.some((a) => a.name === FLUSH_ALARM && a.delayInMinutes === 0.5));
+    await w.fire('alarms.onAlarm', { name: FLUSH_ALARM });
     assert.match(w.local.installId, /^[0-9a-f-]{36}$/);
-    assert.equal(w.chrome.uninstallUrl, `https://scoop.md/bye?i=${w.local.installId}&v=0.3.0`);
+    assert.equal(w.chrome.uninstallUrl, `https://scoop.md/bye#i=${w.local.installId}&v=0.3.0`);
     assert.ok(w.alarms.some((a) => a.name === HOURLY_ALARM && a.periodInMinutes === 60));
     const names = w.fetch.calls.flatMap((c) => c.body.events.map((e) => e.name));
     assert.deepEqual(names, ['install', 'active_daily']);
@@ -279,6 +311,7 @@ test('service worker: update and browser_update carry from/to; opted out sends n
   try {
     await w.fire('runtime.onInstalled', { reason: 'update', previousVersion: '0.2.0' });
     await w.fire('runtime.onInstalled', { reason: 'chrome_update' });
+    await w.fire('alarms.onAlarm', { name: FLUSH_ALARM });
     const events = w.fetch.calls.flatMap((c) => c.body.events);
     assert.deepEqual(events.map((e) => [e.name, e.props]), [['update', { from: '0.2.0', to: '0.3.0' }], ['browser_update', { from: '129' }]]);
   } finally {
@@ -293,5 +326,21 @@ test('service worker: update and browser_update carry from/to; opted out sends n
     assert.equal(off.chrome.uninstallUrl, 'https://scoop.md/bye');
   } finally {
     off.restore();
+  }
+});
+
+test('service worker: a synced opt-out landing after install drops the queue before anything is sent', async () => {
+  const w = await loadWorker();
+  try {
+    await w.fire('runtime.onInstalled', { reason: 'install' });
+    assert.ok(w.local[QUEUE_KEY].length >= 1);
+    w.sync.telemetry = false;
+    await w.fire('storage.onChanged', { telemetry: { newValue: false } }, 'sync');
+    await w.fire('alarms.onAlarm', { name: FLUSH_ALARM });
+    assert.equal(w.fetch.calls.length, 0);
+    assert.equal(w.local[QUEUE_KEY], undefined);
+    assert.equal(w.chrome.uninstallUrl, 'https://scoop.md/bye');
+  } finally {
+    w.restore();
   }
 });

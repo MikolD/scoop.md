@@ -53,15 +53,17 @@ async function openPopup(url, { libraryUrl = apiUrl, share = true, installType =
       sync: {
         get: async (defaults) => ({ ...defaults, share, ...sync }),
         remove: async (key) => { delete sync[key]; },
+        set: async (obj) => { Object.assign(sync, obj); },
       },
       local: {
         get: async (key) => (key in local ? { [key]: local[key] } : {}),
         set: async (obj) => { Object.assign(local, obj); },
+        remove: async (keys) => { for (const k of [keys].flat()) delete local[k]; },
       },
     },
     tabs: { query: async () => [{ id: 1, url, title: 'Guide' }] },
     scripting: { executeScript: async () => [{ result: '<html><body><main><h1>Private</h1></main></body></html>' }] },
-    runtime: { getManifest: () => MANIFEST, openOptionsPage() {} },
+    runtime: { getManifest: () => MANIFEST, openOptionsPage() {}, setUninstallURL: async () => {} },
   };
   local.devLibraryUrl = libraryUrl;
   globalThis.chrome.management = { getSelf: async () => ({ installType }) };
@@ -210,7 +212,7 @@ test('telemetry: a public scoop queues scoop_start, scoop_result with the path, 
   const events = local.telemetryQueue;
   assert.deepEqual(events.map((e) => e.name), ['popup_open', 'scoop_start', 'scoop_result', 'copy', 'share_result']);
   const byName = Object.fromEntries(events.map((e) => [e.name, e.props]));
-  assert.deepEqual(byName.scoop_start, { site: 'docs.example.com' });
+  assert.deepEqual(byName.scoop_start, {}, 'the site is named once it is known to be public');
   const r = byName.scoop_result;
   assert.equal(r.site, 'docs.example.com');
   assert.equal(r.path, '/docs/guide', 'no query, fragment or tracking parameters');
@@ -231,7 +233,7 @@ test('telemetry: a page that only renders signed in records the hostname, never 
   await withPublicHost(() => openPopup('https://docs.example.com/docs/missing', { share: false }));
   await new Promise((r) => setTimeout(r, 20));
   const result = local.telemetryQueue.find((e) => e.name === 'scoop_result').props;
-  assert.equal(result.site, 'docs.example.com');
+  assert.equal(result.site, 'example.com', 'only the registrable domain of a signed-in page');
   assert.equal(result.isPublic, false);
   assert.equal(result.path, undefined);
   assert.ok(local.telemetryQueue.every((e) => e.props.path === undefined), 'no event about it has a path');
@@ -250,4 +252,54 @@ test('telemetry: switched off, the popup queues nothing', async () => {
   await withPublicHost(() => openPopup('https://docs.example.com/docs/guide', { share: false, sync: { telemetry: false } }));
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(local.telemetryQueue, undefined);
+});
+
+test('telemetry notice: shown once whatever the sharing setting; until then no site or path; Turn off sends one opt-out and marks later calls', async () => {
+  for (const k of Object.keys(local)) delete local[k];
+  const realFetch = globalThis.fetch;
+  const seen = [];
+  globalThis.fetch = (url, init) => {
+    const u = String(url).replace('https://docs.example.com', docsUrl);
+    seen.push({ url: u, headers: init?.headers ?? {}, body: init?.body });
+    return realFetch(u, init);
+  };
+  try {
+    const { $ } = await openPopup('https://docs.example.com/docs/guide', { share: false });
+    assert.equal($('usage-notice').hidden, false);
+    assert.match($('usage-notice-text').textContent, /anonymous usage statistics, including the hostname and path of public docs pages you scoop/);
+    assert.equal(local.telemetryNoticeShown, true, 'shown is recorded at once');
+    assert.equal($('intro').hidden, true, 'the sharing note stays hidden with sharing off');
+    await $('usage-off').onclick();
+    assert.equal($('usage-off').hidden, true);
+    assert.match($('usage-notice-text').textContent, /off/);
+    assert.equal(local.telemetryQueue, undefined, 'nothing left to send');
+    const optOut = seen.filter((c) => c.url.endsWith('/events'));
+    assert.equal(optOut.length, 1);
+    assert.deepEqual(JSON.parse(optOut[0].body).events.map((e) => e.name), ['telemetry_opt_out']);
+
+    seen.length = 0;
+    const again = await openPopup('https://docs.example.com/docs/guide', { share: false, sync: { telemetry: false } });
+    assert.equal(again.$('usage-notice').hidden, true, 'once only');
+    const best = seen.find((c) => c.url.includes('/skills/best'));
+    assert.equal(best.headers['x-scoop-telemetry'], 'off', 'the library is told not to record it');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('telemetry: before the notice was ever shown, queued scoop events have no site or path', async () => {
+  for (const k of Object.keys(local)) delete local[k];
+  // A popup whose notice markup failed to show: the gate still holds.
+  const { createTelemetry } = await import('../extension/lib/telemetry.js');
+  globalThis.chrome = {
+    storage: {
+      sync: { get: async (d) => ({ ...d }), remove: async () => {} },
+      local: { get: async (k) => (k in local ? { [k]: local[k] } : {}), set: async (o) => { Object.assign(local, o); }, remove: async () => {} },
+    },
+    runtime: { getManifest: () => MANIFEST },
+    management: { getSelf: async () => ({ installType: 'normal' }) },
+  };
+  const t = createTelemetry({ beacon: null });
+  await t.track('scoop_result', { site: 'react.dev', path: '/learn', outcome: 'copied_ready' });
+  assert.deepEqual(local.telemetryQueue[0].props, { outcome: 'copied_ready' });
 });

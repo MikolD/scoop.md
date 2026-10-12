@@ -3,12 +3,15 @@
 // else fetch keepalive) and from the service worker (alarms). Nothing is sent
 // while "Send usage statistics" is off, except the one telemetry_opt_out event
 // at the moment it is switched off. Pages on private hosts are never recorded,
-// and a page's path is recorded only when its content was public.
+// and a page's path is recorded only for public docs pages, with secret-looking
+// segments redacted. Until the popup has shown its one-time notice, events
+// carry no site or path.
 //
 // Calls never throw: telemetry must never get in the way of a scoop.
 
 import { libraryUrl } from './library.js';
 import { isPrivateHost } from './hosts.js';
+import { redactPath, scrubText } from './privacy.js';
 import { stripTracking } from './extract.js';
 
 export const QUEUE_KEY = 'telemetryQueue';
@@ -22,6 +25,7 @@ export const HOURLY_ALARM = 'telemetry-hourly';
 export const MAX_BACKOFF_MINUTES = 360;
 export const SEND_TIMEOUT_MS = 10_000;
 export const BYE_URL = 'https://scoop.md/bye';
+export const NOTICE_KEY = 'telemetryNoticeShown';
 
 // Same storage as the sharing setting; on unless switched off.
 export async function telemetryEnabled(chromeApi) {
@@ -48,30 +52,42 @@ export async function eventsUrl(chromeApi) {
   return `${(await libraryUrl(chromeApi)).replace(/\/+$/, '')}/events`;
 }
 
-// What the uninstall page is told: the install ID and version, or nothing when telemetry is off.
+// What the uninstall page is told: the install ID and version, in the
+// fragment (never sent to a server or in a Referer), or nothing when telemetry is off.
 export async function uninstallUrl(chromeApi) {
   if (!(await telemetryEnabled(chromeApi))) return BYE_URL;
   const id = await getInstallId(chromeApi);
-  return `${BYE_URL}?i=${encodeURIComponent(id)}&v=${encodeURIComponent(chromeApi.runtime.getManifest().version)}`;
+  return `${BYE_URL}#i=${encodeURIComponent(id)}&v=${encodeURIComponent(chromeApi.runtime.getManifest().version)}`;
 }
 
-// The page's path without query or fragment (a hash route like #/guide is the
-// page, so it stays), after dropping tracking parameters.
+// The page's path without query or fragment, after dropping tracking
+// parameters. A hash route like #/guide is the page, so it stays, cut at its
+// own ?, & or a second #. Secret-looking segments become :id.
 export function pagePath(url) {
   try {
     const u = new URL(stripTracking(url));
-    return (u.pathname + (u.hash.startsWith('#/') ? u.hash : '')).slice(0, 300);
+    const route = u.hash.startsWith('#/') ? `#${u.hash.slice(1).split(/[?&#]/)[0]}` : '';
+    return redactPath(u.pathname + route).slice(0, 300);
   } catch {
     return undefined;
   }
 }
 
-// Error text without URLs or hostnames, capped.
+// Docs-like: a docs host (docs., developer., …) or a docs path (/docs/, /guide/, …).
+const DOCS_HOST = /^(docs?|developers?|dev|devdocs|learn|api|apidocs|help|support|guide|guides|manual|reference|wiki|kb)\./i;
+const DOCS_PATH = /^\/(docs?|documentation|guides?|reference|api|apis|learn|manual|tutorials?|handbook|developers?|sdk|sdks|help|kb|wiki|getting-started|quickstart|book)(\/|$)/i;
+export function docsLike(url) {
+  try {
+    const u = new URL(url);
+    return DOCS_HOST.test(u.hostname) || DOCS_PATH.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+// Error text without emails, URLs, hostnames or tokens, capped.
 export function errorText(e) {
-  return String(e?.message ?? e ?? '')
-    .replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)\S+/gi, '<url>')
-    .replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?(?:\/\S*)?/gi, '<host>')
-    .slice(0, 200);
+  return scrubText(e?.message ?? e ?? '').slice(0, 200);
 }
 
 export async function clientInfo(chromeApi, nav = globalThis.navigator) {
@@ -165,11 +181,14 @@ export function createTelemetry({
   let writes = Promise.resolve();
 
   let stopped = false;
+  // Until the popup's notice has been shown, no event carries a site or path.
+  let noticeShown = false;
   const ready = (async () => {
     const on = await telemetryEnabled(chromeApi);
     if (stopped) return;
     enabled = on;
     if (!enabled) return;
+    try { noticeShown = Boolean((await chromeApi.storage.local.get(NOTICE_KEY))[NOTICE_KEY]) || noticeShown; } catch {}
     try {
       [url, installId, client] = await Promise.all([eventsUrl(chromeApi), getInstallId(chromeApi), clientInfo(chromeApi)]);
     } catch {
@@ -177,6 +196,12 @@ export function createTelemetry({
     }
     if (stopped) enabled = false;
   })();
+
+  function browsingDataGate(event) {
+    if (noticeShown) return;
+    delete event.props.site;
+    delete event.props.path;
+  }
 
   function track(name, props = {}) {
     if (enabled === false) return writes;
@@ -191,6 +216,7 @@ export function createTelemetry({
         mine = [];
         return;
       }
+      browsingDataGate(event);
       await saveQueue(chromeApi, [...(await loadQueue(chromeApi)), event]);
     }).catch(() => {});
     return writes;
@@ -253,6 +279,7 @@ export function createTelemetry({
     if (!enabled || !mine.length || !url) return false;
     const events = mine;
     mine = [];
+    events.forEach(browsingDataGate);
     let beaconed = true;
     for (const { body, sent } of envelopes(events, installId, client)) {
       const text = JSON.stringify(body);
@@ -277,7 +304,13 @@ export function createTelemetry({
     mine = [];
   }
 
-  return { track, flush, flushOnClose, disable, ready, sessionId, get enabled() { return enabled; } };
+  // The popup showed the notice: site and path may be recorded from now on.
+  function markNoticeShown() {
+    noticeShown = true;
+    chromeApi.storage.local.set({ [NOTICE_KEY]: true }).catch?.(() => {});
+  }
+
+  return { track, flush, flushOnClose, disable, markNoticeShown, ready, sessionId, get enabled() { return enabled; } };
 }
 
 // Turns usage statistics on or off. Off: the queue is dropped and one

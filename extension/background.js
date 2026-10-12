@@ -3,7 +3,7 @@
 // (lib/telemetry.js). It never touches tabs or page content. Listeners are
 // registered synchronously, as MV3 requires.
 
-import { createTelemetry, FLUSH_ALARM, HOURLY_ALARM, uninstallUrl } from './lib/telemetry.js';
+import { createTelemetry, FLUSH_ALARM, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, uninstallUrl } from './lib/telemetry.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
 const BROWSER_KEY = 'telemetryBrowserVersion';
@@ -44,7 +44,10 @@ chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
     await ensureAlarms();
     await setUninstallUrl();
     await activePing(t);
-    await t.flush();
+    // Not sent yet: on a new device, a synced "usage statistics off" may still be
+    // on its way. The flush 30 s from now checks the setting again (and drops
+    // the queue if it is off).
+    chrome.alarms.create(FLUSH_ALARM, { delayInMinutes: 0.5 });
   })().catch(() => {});
 });
 
@@ -67,7 +70,10 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
   })().catch(() => {});
 });
 
-// Switching usage statistics off (or on) changes what the uninstall page gets.
+// Switching usage statistics off (here or synced from another device) drops
+// anything queued and changes what the uninstall page gets.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'sync' && 'telemetry' in changes) setUninstallUrl();
+  if (area !== 'sync' || !('telemetry' in changes)) return;
+  if (changes.telemetry.newValue === false) chrome.storage.local.remove([QUEUE_KEY, RETRY_KEY]).catch(() => {});
+  setUninstallUrl();
 });

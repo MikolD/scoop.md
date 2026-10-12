@@ -7,12 +7,15 @@ export const BEST_TIMEOUT_MS = 3_000;
 export const SHARE_TIMEOUT_MS = 25_000; // the server fetches every source to verify it
 export const VOTE_TIMEOUT_MS = 8_000;
 
-export function createLibrary({ baseUrl, installId, client, fetchImpl = fetch }) {
+// telemetry: false sends X-Scoop-Telemetry: off, so the library doesn't record
+// these requests in its usage statistics either.
+export function createLibrary({ baseUrl, installId, client, telemetry = true, fetchImpl = fetch }) {
   const base = (baseUrl || '').replace(/\/+$/, '');
 
   async function call(method, path, body, timeoutMs) {
     if (!base) return { ok: false, status: 0, error: { code: 'offline', message: 'No library configured' } };
     const headers = { 'x-scoop-client': client };
+    if (!telemetry) headers['x-scoop-telemetry'] = 'off';
     if (method === 'POST') {
       headers['content-type'] = 'application/json';
       headers['x-scoop-install'] = installId;

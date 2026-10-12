@@ -25,6 +25,11 @@ main { display: grid; gap: var(--gap); padding: 0 var(--pad) var(--pad); }
 .card:not(:has(> :not([hidden]))) { display: none; }
 
 .intro { display: flex; align-items: center; gap: var(--gap-sm); padding: var(--gap-sm) var(--gap); border-radius: var(--radius); background: var(--accent-soft); color: var(--muted); font-size: var(--text-sm); }
+.notice { display: grid; gap: var(--gap-sm); padding: var(--gap-sm) var(--gap); border-radius: var(--radius); background: var(--accent-soft); color: var(--fg); font-size: var(--text-sm); }
+.notice p { margin: 0; }
+.notice .actions { display: flex; justify-content: flex-end; gap: var(--gap-sm); }
+.notice .primary { border-color: var(--accent); background: var(--accent); color: var(--on-accent, #fff); }
+.notice button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .x { margin-left: auto; padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
 
 .meta { color: var(--muted); font-size: var(--text-sm); }

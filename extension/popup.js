@@ -2,7 +2,8 @@ import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason, withoutSectionQuery } from './lib/library.js';
-import { createTelemetry, getInstallId, pagePath, errorText } from './lib/telemetry.js';
+import { createTelemetry, docsLike, getInstallId, NOTICE_KEY, pagePath, errorText, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
+import { registrableDomain } from './lib/hosts.js';
 
 const DEFAULTS = { share: true };
 const $ = (id) => document.getElementById(id);
@@ -13,6 +14,7 @@ let devLibrary = false;
 let tab;
 let clipboardText = '';
 let skillId = null;
+let libraryOptions;
 // Usage statistics (lib/telemetry.js); `current` is the scoop in progress.
 const telemetry = createTelemetry();
 const openedAt = Date.now();
@@ -101,14 +103,22 @@ function scoopCurrentTab() {
   });
 }
 
-// One scoop_result per scoop. The page's path is recorded only when its
-// content was public; for a signed-in page only the hostname is.
+const DOCS_SOURCES = new Set(['page-md', 'llms', 'llms-full']);
+
+// One scoop_result per scoop, and what the events about it may say:
+// - the hostname when the page was public or the library has the site; for a
+//   signed-in page only its registrable domain (acme.atlassian.net → atlassian.net);
+// - the path only when the scoop found a docs source (.md, llms.txt) or the page
+//   is public HTML that looks like docs, with secret-looking segments redacted.
 function scoopResult(outcome, { scoop, text, sections = [], shared = null, clipboard } = {}) {
   if (!current || current.done) return;
   current.done = true;
   const isPublic = Boolean(scoop?.isPublic);
-  // Later events about this scoop (copy, share, vote) carry the same path.
-  current.path = isPublic ? pagePath(tab.url) : undefined;
+  const publicSite = isPublic || Boolean(shared);
+  const docsSource = (scoop?.sections ?? []).some((s) => DOCS_SOURCES.has(s.kind));
+  // Later events about this scoop (copy, share, vote) say the same.
+  current.site = publicSite ? current.siteKey : registrableDomain(current.siteKey);
+  current.path = publicSite && (docsSource || (isPublic && docsLike(tab.url))) ? pagePath(tab.url) : undefined;
   track('scoop_result', {
     site: current.site,
     path: current.path,
@@ -133,8 +143,10 @@ async function run({ skipLibrary = false } = {}) {
   showFeedback(null);
   $('rebuild').hidden = true;
   const site = siteKey(tab.url);
-  current = { site, started: Date.now(), done: false };
-  track('scoop_start', { site });
+  // The site is named on scoop_result, once it's known whether the page is public.
+  // Nothing at all about pages on private hosts.
+  current = { siteKey: site, started: Date.now(), done: false, private: isPrivateHost(new URL(tab.url).hostname) };
+  if (!current.private) track('scoop_start');
 
   // Build locally while asking the library; the copy never waits on the
   // library for more than its short timeout.
@@ -152,7 +164,7 @@ async function run({ skipLibrary = false } = {}) {
     const ok = await copy(text);
     copied(ok);
     scoopResult('copied_ready', { scoop, text, sections, shared, clipboard: ok });
-    if (ok) track('copy', { site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
+    if (ok) track('copy', { site: current.site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
     note('summary', `${kb(text)} · shared, worked for ${plural(shared.worked, 'person', 'people')}`);
     $('rebuild').hidden = false;
     showFeedback(shared.id);
@@ -165,7 +177,7 @@ async function run({ skipLibrary = false } = {}) {
   const ok = await copy(text);
   copied(ok);
   scoopResult('copied_ready', { scoop, text, sections: scoop.sections, clipboard: ok });
-  if (ok) track('copy', { site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
+  if (ok) track('copy', { site: current.site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
   note('summary', `${kb(text)} · ${plural(scoop.sections.length, 'source')} on ${site}`);
   await share(scoop);
 }
@@ -217,6 +229,24 @@ async function report(reason) {
   note('voted', res.ok ? 'Reported. Thanks, we will review it.' : "Couldn't send the report. Try again in a moment.");
 }
 
+// One-time notice about usage statistics, shown whatever the sharing setting.
+// Until it has been shown, events carry no site or path (lib/telemetry.js).
+async function usageNotice() {
+  if (!(await telemetryEnabled(chrome))) return;
+  if ((await chrome.storage.local.get(NOTICE_KEY))[NOTICE_KEY]) return;
+  $('usage-notice').hidden = false;
+  telemetry.markNoticeShown();
+  $('usage-ok').onclick = () => { $('usage-notice').hidden = true; };
+  $('usage-off').onclick = async () => {
+    telemetry.disable();
+    library = createLibrary({ ...libraryOptions, telemetry: false });
+    $('usage-notice-text').textContent = 'Usage statistics are off. You can turn them back on in Settings.';
+    $('usage-off').hidden = true;
+    $('usage-ok').onclick = () => { $('usage-notice').hidden = true; };
+    await setTelemetry(chrome, false);
+  };
+}
+
 async function intro() {
   const { introSeen } = await chrome.storage.local.get('introSeen');
   if (introSeen || !settings.share) return;
@@ -232,7 +262,7 @@ function fail(e) {
   if (current && !current.done) {
     const empty = e?.message === NO_TEXT;
     scoopResult(empty ? 'empty' : 'error');
-    if (!empty) track('error', { where: 'scoop', code: e?.name || 'Error', message: errorText(e) });
+    if (!empty && !current.private) track('error', { where: 'scoop', code: e?.name || 'Error', message: errorText(e) });
   } else {
     track('error', { where: 'popup', code: e?.name || 'Error', message: errorText(e) });
   }
@@ -270,11 +300,14 @@ async function main() {
   try { applyTheme((await chrome.storage.local.get('theme')).theme); } catch {}
   const baseUrl = await libraryUrl(chrome);
   devLibrary = baseUrl !== DEFAULT_LIBRARY;
-  library = createLibrary({
+  libraryOptions = {
     baseUrl,
     installId: await getInstallId(chrome),
     client: `extension/${chrome.runtime.getManifest().version}`,
-  });
+    telemetry: await telemetryEnabled(chrome),
+  };
+  library = createLibrary(libraryOptions);
+  await usageNotice();
   await intro();
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!/^https?:/.test(tab?.url || '')) {
