@@ -50,6 +50,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `uninstall` | website (`/bye#i=<installId>&v=<version>`) | `installId`, `version` |
 | `uninstall_reason` | website (`/bye`) | `installId`, `reason` (`too_noisy` / `didnt_work` / `privacy` / `other`) |
 | `api_search`, `api_packages`, `api_best`, `api_sites`, `api_site`, `api_profile`, `api_topics` | server | `route`, `status`, `latencyMs`, `q` (≤200), `topic`, `results`, `hit`, `client` (`X-Scoop-Client`) |
+| `api_crawl_request` | server (`POST /v1/crawl-requests`) | `route`, `status`, `latencyMs`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited`; also the row's `outcome`), `client`; `site` on the row. Not recorded with `X-Scoop-Telemetry: off`. |
 
 The catalog lives in `backend/src/telemetry/schema.ts`; the reference server (`server/app.js`) keeps the same names, checked by a test.
 

@@ -969,3 +969,75 @@ What a crawl costs, so the average per crawl and per page is known over time.
   path (markdown, html, browser, or rejected for runs the gate turned away).
   A message dropped as permanent (missing R2 object) keeps its run at "still
   indexing"; it shows up as indexed n/m.
+
+## Crawl requests (on-demand crawls from the extension)
+
+`src/crawl/requests.ts`, migration `0008_crawl_requests.sql`, spec in
+BACKEND.md §5 "Crawl requests".
+
+- **Only a request that would start a crawl uses quota.** Joining a queued or
+  running crawl, answering from a crawl in the last 7 days, and rejecting a
+  `not_devtool` site are cheap D1 reads, so the daily limits (5 per install, 15
+  per IP subject, `CRAWL_REQUESTS_DAILY_MAX` overall) count starts only.
+  Because every POST still writes a `crawl_requests` row, all of them are also
+  limited hourly (60 per install, 300 per IP) with the existing hourly
+  counters. Limited requests (429) are not recorded. All counters are bumped
+  before any is checked (as with the hourly limits), so a request refused by
+  the IP limit still spends one of its install's five.
+- **Daily windows get their own table** (`daily_counters`, keyed like
+  `rate_counters` with an HMAC of `bucket:day:subject`): `rate_counters`
+  prunes every past hour on each check, which would delete a day's counts.
+  The global limit is one counter with an empty subject. `Retry-After` runs to
+  00:00 UTC.
+- **Install IDs are stored as HMACs** (`RATE_KEY`, `crawl-request:` prefix),
+  so the admin view can group requests by install (first 8 hex characters
+  shown) without the ID itself being kept.
+- **Where a requested crawl starts.** The page's first path segment when the
+  page is deeper than one segment (`developers.cloudflare.com/d1/get-started`
+  → `/d1/`, `docs.python.org/3/library/os.html` → `/3/`), so a 100-page crawl
+  covers the product the user is reading rather than the whole host; else the
+  site root. The profile is still per host.
+- **"Recent" means a finished crawl in the last 7 days** with status `ready`,
+  `empty` or `blocked` (`last_crawled_at`, set only when a crawl finishes),
+  answered from the site's last `complete` run. A failed crawl doesn't count,
+  so a new request retries it.
+- **`not_devtool` is final for requests**: an admin can still force a crawl.
+- **State comes from the run, not the request row.** `crawl_requests.state`
+  records what the request did (`started`, `joined`, `recent`, `rejected`);
+  the live state is computed on every read: run `queued` → `queued`
+  (phase `gate`); `running` → `running` with the stored phase; `rejected` →
+  `rejected` with the gate's reason; `failed` → `failed` with the error;
+  `complete` → `indexing` (phase `index`) while the run's `pages_indexed` is
+  below the pages it stored, else `complete`. Two escape hatches: a run still
+  queued/running after 6 hours is `failed` ("crawl abandoned"), and a crawl
+  finished more than 30 minutes ago is `complete` even if a page never got
+  indexed (a dead-lettered message). A run from before cost tracking
+  (migration 0007) can't count indexed pages and is `complete`.
+- **Phase** is written by the Workflow at step boundaries (`start`: `gate`, or
+  `discover` when forced; the gate's verdict: `discover`, or `done` when
+  rejected; `profile`: `fetch`; `browser-budget`: `browser`; `finish`:
+  `done`). A failed run keeps the phase it failed in. `index` is never stored.
+- **`pagesIndexed` includes unchanged pages**, which an earlier crawl
+  indexed, so a re-crawl's progress reads naturally; it equals `pagesFound`
+  once complete.
+- **`etaSeconds` is a rough guide**: about 1.2 s a page to fetch and 8 s a page
+  to index (classification dominates; 10–12 s measured locally with one
+  consumer), assuming 60 pages until the count is known. The D1 docs (55
+  pages) took about 1 minute to fetch and about 10 minutes to index locally.
+- **Anchored packages** match the page by its normalised URL, without a
+  trailing slash, as its `.md` or `/index.md` twin, or the HTML page of a `.md`
+  URL (crawled pages are stored under whichever URL the crawl planned). The
+  related search uses the page title plus its section headings (≤ 200
+  characters) and leaves out the anchor's own chunks. A page that isn't indexed
+  gets a package from its URL's path words, so the popup still has something
+  useful. `not_indexed` (404) only when the site has no indexed page at all.
+- **Site status** reports `pages` as indexed pages (`page_index`) and
+  `indexed` = `ready` and `pages > 0`; private hosts are 400 (checked like a
+  fetch target) so the endpoint never confirms anything about internal names.
+- **Telemetry**: `api_crawl_request` through the existing API-usage path,
+  with the request's state as both `props.state` and the row's `outcome`
+  (`rate_limited` for 429s). The status and polling endpoints are not
+  recorded (the popup polls them).
+- **Reference server**: keeps the shapes in memory; it can't crawl, so a
+  request stays `queued`, and `?url=` packages are always `not_indexed`.
+  Rate limits are left to the Worker, as for the other writes.

@@ -65,17 +65,23 @@ export function startUrlFor(pageUrl: string): string {
   return `${u.origin}/`;
 }
 
-// A rough wait, for a progress message; never a promise. A requested crawl is
-// at most 100 pages at about 1 page/s, then indexing at a few seconds a page.
+// A rough wait, for a progress message; never a promise. Fetching runs at
+// about 1 page/s and indexing at about 8 s a page (classification dominates;
+// measured locally at 10-12 s with one consumer). Before the page count is
+// known, a requested crawl is assumed to find EXPECTED_PAGES (the D1 docs
+// gave 55).
+const FETCH_S = 1.2;
+const INDEX_S = 8;
+const EXPECTED_PAGES = 60;
 export function etaSeconds(state: RequestState, phase: Phase, found: number, stored: number, indexed: number): number {
   if (state === 'complete' || state === 'rejected' || state === 'failed') return 0;
-  const indexing = Math.max(0, stored - indexed) * 4;
+  const discover = 30 + Math.round(EXPECTED_PAGES * (FETCH_S + INDEX_S));
   switch (phase) {
-    case 'gate': return state === 'queued' ? 300 : 270;
-    case 'discover': return 240;
-    case 'fetch': return Math.round(Math.max(0, REQUEST_MAX_PAGES - found) * 1.2) + Math.max(indexing, 60);
-    case 'browser': return REQUEST_MAX_MINUTES * 60;
-    case 'index': return Math.max(10, indexing);
+    case 'gate': return 30 + discover;
+    case 'discover': return discover;
+    case 'fetch': return Math.round(Math.max(0, EXPECTED_PAGES - found) * FETCH_S + Math.max(0, Math.max(EXPECTED_PAGES, stored) - indexed) * INDEX_S);
+    case 'browser': return REQUEST_MAX_MINUTES * 60 + EXPECTED_PAGES * INDEX_S;
+    case 'index': return Math.max(10, Math.max(0, stored - indexed) * INDEX_S);
     default: return 0;
   }
 }
