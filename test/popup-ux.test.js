@@ -21,6 +21,8 @@ const SITE = 'docs.example.com';
 const PAGE = `https://${SITE}/docs/guide`;
 
 let docs; let docsUrl; let mock;
+let failPackages = false;
+let packageAttempts = 0;
 const realFetch = globalThis.fetch;
 
 before(async () => {
@@ -38,6 +40,8 @@ before(async () => {
     const s = String(url);
     if (s.startsWith(`https://${SITE}`)) return realFetch(s.replace(`https://${SITE}`, docsUrl), init);
     if (s.startsWith('https://api.scoop.md/v1')) return realFetch(s.replace('https://api.scoop.md/v1', mock.url), init);
+    if (s.includes('/v1/packages')) packageAttempts++;
+    if (failPackages && s.includes('/v1/packages')) return Promise.reject(new TypeError('Failed to fetch'));
     return realFetch(url, init);
   };
 });
@@ -45,6 +49,8 @@ before(async () => {
 after(() => { globalThis.fetch = realFetch; docs.close(); mock?.close(); });
 
 beforeEach(() => {
+  failPackages = false;
+  packageAttempts = 0;
   Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000, packageRetryMs: [10, 20, 40], stallMs: 60_000 });
   stageLog.length = 0;
 });
@@ -86,7 +92,11 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   globalThis.document = document;
   globalThis.DOMParser = DOMParser;
   globalThis.matchMedia = (q) => ({ matches: q.includes('reduced-motion') ? reduced : false });
-  Object.defineProperty(globalThis, 'navigator', { value: { clipboard }, configurable: true });
+  const beacons = [];
+  Object.defineProperty(globalThis, 'navigator', { value: { clipboard, sendBeacon: (url, blob) => { beacons.push(blob); return true; } }, configurable: true });
+  // Node has no window events: collect the popup's (pagehide) to fire them by hand.
+  const windowListeners = {};
+  globalThis.addEventListener = (type, fn) => { windowListeners[type] = fn; };
   local.devLibraryUrl ??= mock.url;
   local.telemetryNoticeShown ??= true;
   globalThis.chrome = {
@@ -111,7 +121,7 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   const $ = (id) => document.getElementById(id);
-  return { $, clipboard, badge, alarms, local, document, focused, writes, ready: popup.ready };
+  return { $, clipboard, badge, alarms, local, document, focused, writes, beacons, windowListeners, ready: popup.ready };
 }
 
 const posts = (path) => mock.log.filter((e) => e.method === 'POST' && e.path === path);
@@ -594,4 +604,61 @@ test('reopening while a crawl still runs on an already-indexed site delivers the
   assert.ok(!stages().includes('waiting'));
   assert.equal(gets('/v1/packages').length, 1);
   assert.ok(p.local[PENDING_KEY][SITE], 'still followed in the background');
+}));
+
+test('pagehide after hidden still sends the crawl_wait "closed" it just recorded', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  const p = await openPopup(PAGE);
+  await waitFor(() => p.document.body.dataset.stage === 'waiting');
+  Object.defineProperty(p.document, 'visibilityState', { value: 'hidden', configurable: true });
+  p.document.dispatchEvent(new p.document.defaultView.Event('visibilitychange'));
+  await sleep(20);
+  const before = p.beacons.length;
+  p.windowListeners.pagehide();
+  await waitFor(async () => p.beacons.length > before);
+  const sent = (await Promise.all(p.beacons.slice(before).map((b) => b.text()))).map((t) => JSON.parse(t));
+  const names = sent.flatMap((body) => body.events.map((e) => [e.name, e.props.outcome]));
+  assert.deepEqual(names.filter(([n]) => n === 'crawl_wait'), [['crawl_wait', 'closed']]);
+  p.$('copy-now').onclick();
+  await p.ready;
+}));
+
+test('an unreachable library is retried once, with a short timeout, after a crawl completes', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
+  failPackages = true;
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
+  const started = Date.now();
+  const p = await openPopup(PAGE, { local });
+  await p.ready;
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+  assert.ok(Date.now() - started < 2_000, 'no long retry chain');
+  assert.equal(packageAttempts, 2, 'the first try and one retry');
+}));
+
+test('package retries use a 4 s timeout; the first try keeps the normal one', async () => {
+  const realTimeout = AbortSignal.timeout;
+  const timeouts = [];
+  AbortSignal.timeout = (ms) => { timeouts.push(ms); return realTimeout.call(AbortSignal, ms); };
+  try {
+    const lib = createLibrary({ baseUrl: 'https://api.scoop.md/v1', installId: 'i', client: 't', fetchImpl: async () => new Response('# p', { status: 200 }) });
+    await lib.pagePackage(SITE, PAGE);
+    await lib.pagePackage(SITE, PAGE, { timeoutMs: timing.packageRetryTimeoutMs });
+  } finally {
+    AbortSignal.timeout = realTimeout;
+  }
+  assert.deepEqual(timeouts, [10_000, 4_000]);
+});
+
+test('index delivered on reopen while the crawl runs: no ✓ later, and no re-delivery', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
+  const r = mock.newRequest(SITE, PAGE);
+  r.advance();
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: r.view().id, site: SITE, url: PAGE, state: 'indexing', startedAt: Date.now() } } };
+  const p = await openPopup(PAGE, { local });
+  await p.ready;
+  assert.equal(p.local[PENDING_KEY][SITE].delivered, true);
+  assert.equal(p.badge.text, '…', 'still followed while it runs');
+  // The crawl completes in the background: no ✓, and the entry goes.
+  const chromeApi = globalThis.chrome;
+  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
+  for (let i = 0; i < 6 && p.local[PENDING_KEY][SITE]; i++) await pollPending(chromeApi, lib);
+  assert.equal(p.local[PENDING_KEY][SITE], undefined);
+  assert.equal(p.badge.text, '');
 }));

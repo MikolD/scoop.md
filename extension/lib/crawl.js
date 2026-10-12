@@ -94,7 +94,8 @@ export function live(pending, now = Date.now()) {
 // watching every tab's navigation, which the extension doesn't do.
 export async function updateBadge(chromeApi, pending, now = Date.now()) {
   const entries = Object.values(live(pending ?? await loadPending(chromeApi), now));
-  const text = entries.some((e) => e.state === 'complete') ? '✓' : entries.some((e) => !isTerminal(e.state)) ? '…' : '';
+  // A crawl whose pages were already delivered never shows ✓.
+  const text = entries.some((e) => e.state === 'complete' && !e.delivered) ? '✓' : entries.some((e) => !isTerminal(e.state)) ? '…' : '';
   try {
     await chromeApi.action?.setBadgeBackgroundColor?.({ color: BADGE_COLOR });
     await chromeApi.action?.setBadgeText?.({ text });
@@ -126,6 +127,7 @@ export async function pollPending(chromeApi, library, now = Date.now()) {
   }
   for (const [site, e] of Object.entries(pending)) {
     if (e.state === 'rejected' || e.state === 'failed') delete pending[site];
+    else if (e.state === 'complete' && e.delivered) delete pending[site];
   }
   const kept = live(pending, now);
   await savePending(chromeApi, kept);

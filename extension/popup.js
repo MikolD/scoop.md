@@ -230,10 +230,14 @@ async function deliverShared(shared, scoop) {
 async function deliverIndexed(scoop, { fresh = false } = {}) {
   const site = siteKey(tab.url);
   let res;
+  let offline = 0;
   for (const wait of fresh ? [0, ...timing.packageRetryMs] : [0]) {
     if (wait) await sleep(wait);
-    res = await library.pagePackage(site, scoop.pageUrl);
+    // Retries get a short timeout, and an unreachable library only one retry,
+    // so an outage can't hold the loader for long.
+    res = await library.pagePackage(site, scoop.pageUrl, wait ? { timeoutMs: timing.packageRetryTimeoutMs } : {});
     if (res.ok || ![0, 404, 429, 503].includes(res.status)) break;
+    if (res.status === 0 && ++offline > 1) break;
   }
   if (!res.ok || typeof res.data !== 'string' || !res.data.trim()) return false;
   $('rebuild').hidden = false;
@@ -340,6 +344,7 @@ async function waitForCrawl(scoop, initial) {
             $('copy-now').onclick = null;
             $('copy-now').disabled = true;
             waitOutcome('stalled_index');
+            await rememberCrawl(chrome, { requestId: initial.id, site, url: scoop.pageUrl, state: req.state, delivered: true });
             showLoader();
             $('rebuild').hidden = false;
             return deliver({ text: pkg.data, scoop, indexed: true, summary: `${kb(pkg.data)} · from the ${site} docs index` });
@@ -396,7 +401,8 @@ async function run({ skipLibrary = false } = {}) {
   const [best, siteStatus, pending] = await Promise.all([
     ask ? library.best(site) : null,
     ask ? library.siteStatus(site) : null,
-    ask ? loadPending(chrome).then((p) => p[site] ?? null) : null,
+    // A crawl whose pages were already delivered is only followed, not waited on.
+    ask ? loadPending(chrome).then((p) => (p[site]?.delivered ? null : p[site] ?? null)) : null,
   ]);
   const shared = best?.ok && best.data?.skill?.sections?.length ? best.data.skill : null;
   const index = siteStatus?.ok ? siteStatus.data : null;
@@ -421,7 +427,11 @@ async function run({ skipLibrary = false } = {}) {
       // pages): give them now; the service worker keeps following the crawl.
       if (index?.indexed) {
         askedIndex = true;
-        if (await deliverIndexed(scoop)) return;
+        if (await deliverIndexed(scoop)) {
+          // Delivered: the service worker still follows the crawl, but shows no ✓ for it.
+          await rememberCrawl(chrome, { ...pending, delivered: true });
+          return;
+        }
       }
       return waitForCrawl(scoop, { id: pending.requestId, state: pending.state, phase: pending.phase });
     } else {
@@ -607,6 +617,8 @@ function onClose() {
 // Hidden isn't always closed (the popup can come back), so only pagehide ends a wait.
 globalThis.addEventListener?.('pagehide', () => {
   waitOutcome('closed');
+  // Hidden may already have run onClose: send the crawl_wait just queued too.
+  telemetry.flushOnClose();
   onClose();
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') onClose(); });

@@ -57,7 +57,7 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
     siteStatus: (site) => call('GET', `/sites/${encodeURIComponent(site)}/status`, undefined, STATUS_TIMEOUT_MS),
     requestCrawl: (url) => call('POST', '/crawl-requests', { url }, CRAWL_TIMEOUT_MS),
     crawlRequest: (id) => call('GET', `/crawl-requests/${encodeURIComponent(id)}`, undefined, VOTE_TIMEOUT_MS),
-    pagePackage: (site, url) => call('GET', `/packages?site=${encodeURIComponent(site)}&url=${encodeURIComponent(url)}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),
+    pagePackage: (site, url, { timeoutMs = PACKAGE_TIMEOUT_MS } = {}) => call('GET', `/packages?site=${encodeURIComponent(site)}&url=${encodeURIComponent(url)}`, undefined, timeoutMs, 'text'),
   };
 }
 
