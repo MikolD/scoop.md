@@ -192,13 +192,14 @@ const ANNOUNCE_DELAY_MS = 50;
 // The content, announced with the status line, and focus on the Copy button
 // (on the Overview and Search tabs, their own status line and button).
 function reveal() {
+  if (verdict.state === 'checking') setChip(devDocs(siteInfo?.index, siteInfo?.quick, null));
   setStage('content');
   const panel = $(PANELS[activeTab]);
   panel.classList.remove('reveal');
   void panel.offsetWidth;
   panel.classList.add('reveal');
   if (activeTab === 'page') {
-    announce($('status').textContent);
+    announce(`${$('status').textContent} ${$('devdocs').getAttribute('aria-label')}.`.replace('..', '.'));
     if (!$('copy').disabled) $('copy').focus();
   } else {
     const id = activeTab === 'overview' ? 'overview-status' : 'search-status';
@@ -244,13 +245,14 @@ async function composePage({ site, scoop, sections, relatedLinks = [] }) {
     useBackend: Boolean(settings.share && siteInfo?.libraryUp && !current.private),
   });
   const title = scoop?.title || tab.title || '';
-  const text = buildPagePackage({ site, title, pageUrl: scoop?.pageUrl ?? tab.url, llms, llmsFull, instructions: live.instructions, sections: live.sections, relatedLinks: live.relatedLinks });
+  const text = buildPagePackage({ site, title, pageUrl: scoop?.pageUrl ?? tab.url, devDocs: verdict.state !== 'no', llms, llmsFull, instructions: live.instructions, sections: live.sections, relatedLinks: live.relatedLinks });
   showPageMeta({ llms: llms?.url, instructions: live.instructions });
   return text;
 }
 
 // "This page": the llms.txt line and the instructions list (3, then "Show all").
 function showPageMeta({ llms = null, instructions = [] } = {}) {
+  $('page-meta').hidden = !llms && !instructions.length;
   $('llms-line').hidden = !llms;
   if (llms) {
     $('llms-link').textContent = llms.replace(/^https?:\/\//, '');
@@ -277,23 +279,47 @@ function showPageMeta({ llms = null, instructions = [] } = {}) {
   };
 }
 
-// The developer-docs chip: the library's verdict (site status or /quick);
-// unknown or unreachable: a local guess (llms.txt or a .md twin found, a docs
-// path, code in the page). While a background crawl is still deciding: "Checking…".
-function devDocs(index, quick, scoop, crawling) {
+// The developer-docs verdict, at the top of the card: the library's (site
+// status or /quick); unknown or unreachable: a local guess (indexed, llms.txt
+// or a .md twin found, a docs path, code in the page). "Checking…" only
+// shows during the loader: the content always gets a yes or a no.
+function devDocs(index, quick, scoop) {
   const said = index?.isDevDocs?.verdict ?? quick?.isDevDocs?.verdict;
-  if (said === 'yes' || said === 'no') return said;
-  if (crawling && (!background?.phase || background.phase === 'gate')) return 'checking';
-  const kinds = new Set([...(scoop?.sections ?? []), ...(quick?.sources ?? [])].map((s) => s?.kind));
-  const code = (scoop?.sections ?? []).some((s) => /^```/m.test(s.content ?? ''));
-  return kinds.has('llms') || kinds.has('page-md') || docsLike(tab.url) || code ? 'yes' : 'no';
+  if (said === 'yes' || said === 'no') return { state: said, guess: false };
+  const kinds = new Set([...(scoop?.sections ?? siteInfo?.scoopSections ?? []), ...(quick?.sources ?? [])].map((s) => s?.kind));
+  const code = (scoop?.sections ?? siteInfo?.scoopSections ?? []).some((s) => /^```/m.test(s.content ?? ''));
+  const yes = Boolean(index?.indexed) || kinds.has('llms') || kinds.has('page-md') || docsLike(tab.url) || code;
+  return { state: yes ? 'yes' : 'no', guess: true };
 }
-const CHIP = { yes: 'Developer docs ✓', no: 'Not developer docs', checking: 'Checking…' };
-function setChip(state) {
-  $('devdocs').dataset.state = state;
-  $('devdocs').textContent = CHIP[state];
-  $('devdocs').hidden = false;
+const NOT_DOCS = 'scoop.md copied just this page. Search and Overview are for developer docs.';
+let verdict = { state: 'checking', guess: false };
+function setChip({ state, guess = false }) {
+  verdict = { state, guess };
+  const site = siteInfo?.site ?? siteKey(tab.url);
+  const chip = $('devdocs');
+  chip.dataset.state = state;
+  $('devdocs-text').textContent = { yes: `Developer docs · ${site}`, no: 'Not developer docs', checking: 'Checking…' }[state];
+  chip.setAttribute('aria-label', {
+    yes: `${site} is developer docs${guess ? ' (guess)' : ''}`,
+    no: `Not developer docs${guess ? ' (guess)' : ''}. ${NOT_DOCS}`,
+    checking: 'Checking whether this is developer docs',
+  }[state]);
+  chip.title = guess ? `${state === 'yes' ? 'Developer docs' : 'Not developer docs'} (guess)` : '';
+  $('devdocs-why').hidden = state !== 'no';
+  // The same verdict for the other tabs: no developer docs, no Overview or Search.
+  for (const t of ['overview', 'search']) {
+    const el = $(`tab-${t}`);
+    if (state === 'no') {
+      el.setAttribute('aria-disabled', 'true');
+      el.title = NOT_DOCS;
+    } else {
+      el.removeAttribute('aria-disabled');
+      el.title = '';
+    }
+  }
+  if (state === 'no' && activeTab !== 'page') switchTab('page');
 }
+const tabOff = (t) => $(`tab-${t}`).getAttribute('aria-disabled') === 'true';
 
 // The site's instructions for coding agents, as /quick reports them.
 function siteInstructions() {
@@ -388,9 +414,10 @@ async function followCrawl(site, scoop, id) {
     if (!res.ok) { if (res.status === 404) break; errors++; continue; }
     await rememberCrawl(chrome, { requestId: id, site, url: scoop.pageUrl, state: res.data.state });
     background = res.data;
-    if ($('devdocs').dataset.state === 'checking') {
-      if (res.data.state === 'rejected') setChip('no');
-      else if (res.data.phase && res.data.phase !== 'gate') setChip('yes');
+    // The crawl's gate decides a guess.
+    if (verdict.guess) {
+      if (res.data.state === 'rejected') setChip({ state: 'no' });
+      else if (res.data.phase && res.data.phase !== 'gate') setChip({ state: 'yes' });
     }
     if (res.data.state === 'complete') {
       note('crawl-note', `The full docs for ${site} are ready.`);
@@ -424,7 +451,7 @@ async function run({ skipLibrary = false } = {}) {
   $('full-docs').hidden = true;
   showFeedback(null);
   $('rebuild').hidden = true;
-  setChip('checking');
+  setChip({ state: 'checking' });
   showPageMeta();
   showLoader();
   const site = siteKey(tab.url);
@@ -461,8 +488,7 @@ async function run({ skipLibrary = false } = {}) {
   siteInfo.pageUrl = scoop?.pageUrl;
   background = pending ?? (index?.crawling ? index.request : null);
 
-  const crawlingNow = Boolean(pending && !isTerminal(pending.state)) || Boolean(index?.crawling);
-  setChip(devDocs(index, null, scoop, crawlingNow));
+  setChip(devDocs(index, null, scoop));
 
   // 1. A crawl this install asked for has completed: the full docs.
   let askedIndex = false;
@@ -493,7 +519,9 @@ async function run({ skipLibrary = false } = {}) {
   // instructions for agents, and whether it's developer docs.
   const quick = pagePublic ? await library.quick(scoop.pageUrl) : null;
   siteInfo.quick = quick?.ok ? quick.data : null;
-  setChip(devDocs(index, siteInfo.quick, scoop, crawlingNow || Boolean(crawlId) || (unseen && mayCrawl)));
+  // A crawl gate that already decided (followCrawl) beats a new guess.
+  const said = devDocs(index, siteInfo.quick, scoop);
+  if (!said.guess || verdict.guess || verdict.state === 'checking') setChip(said);
   // 3. The shared skill.
   if (shared) {
     await deliverShared(shared, scoop);
@@ -507,7 +535,7 @@ async function run({ skipLibrary = false } = {}) {
 // Tabs: This page, Overview, Search. Arrow keys move between them (roving tabindex).
 const TABS = ['page', 'overview', 'search'];
 function switchTab(name, { focus = false } = {}) {
-  if (!TABS.includes(name)) return;
+  if (!TABS.includes(name) || tabOff(name)) return;
   if (name !== activeTab) track('tab_switch', { tab: name });
   activeTab = name;
   for (const t of TABS) {
@@ -523,8 +551,10 @@ function switchTab(name, { focus = false } = {}) {
 for (const t of TABS) {
   $(`tab-${t}`).onclick = () => switchTab(t);
   $(`tab-${t}`).onkeydown = (e) => {
-    const i = TABS.indexOf(activeTab);
-    const to = { ArrowRight: TABS[(i + 1) % 3], ArrowLeft: TABS[(i + 2) % 3], Home: TABS[0], End: TABS[2] }[e.key];
+    const on = TABS.filter((x) => !tabOff(x));
+    const i = on.indexOf(activeTab);
+    const n = on.length;
+    const to = { ArrowRight: on[(i + 1) % n], ArrowLeft: on[(i + n - 1) % n], Home: on[0], End: on[n - 1] }[e.key];
     if (!to) return;
     e.preventDefault?.();
     switchTab(to, { focus: true });

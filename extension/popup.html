@@ -103,12 +103,16 @@
 
     <div id="content" role="tabpanel" aria-labelledby="tab-page" hidden>
     <section class="card hero">
+      <div class="verdict">
+        <span id="devdocs" class="chip" data-state="checking" role="img" aria-label="Checking whether this is developer docs"><span class="chip-icon" aria-hidden="true"></span><span id="devdocs-text">Checking…</span></span>
+        <p id="devdocs-why" class="meta" hidden>scoop.md copied just this page. Search and Overview are for developer docs.</p>
+      </div>
+
       <div class="head">
         <p id="status" class="busy" role="status">Scooping this page…</p>
       </div>
 
-      <div class="page-meta">
-        <span id="devdocs" class="chip" data-state="checking">Checking…</span>
+      <div id="page-meta" class="page-meta" hidden>
         <p id="llms-line" class="meta" hidden>llms.txt verified · <a id="llms-link" href="#" target="_blank" rel="noopener"></a></p>
         <div id="instructions" class="instructions" hidden>
           <p class="panel-sub">Instructions for agents</p>

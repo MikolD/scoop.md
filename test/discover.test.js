@@ -123,3 +123,18 @@ test('local, private and link-local hosts are never shared', async () => {
   assert.equal((await scoopPage('http://wiki.local/docs/a', { fetchImpl, parseHtml, allowPrivateHosts: true })).isPublic, true);
   assert.equal((await scoopPage('https://ex.com/docs/a', { fetchImpl, parseHtml })).isPublic, true);
 });
+
+test('a short page that loads the same without cookies stays public; a signed-in shell does not', async () => {
+  const { scoopPage } = await import('../extension/lib/scoop.js');
+  const parseHtml = (h) => new DOMParser().parseFromString(h, 'text/html');
+  const page = (html) => async (url) => ({ ok: !url.endsWith('.md') && !url.endsWith('.txt'), headers: new Headers({ 'content-type': 'text/html' }), text: async () => html });
+  const example = '<html><head><title>Example Domain</title></head><body><div><h1>Example Domain</h1><p>This domain is for use in documentation examples without needing permission.</p></div></body></html>';
+  const translated = example.replace('</p>', `</p>${'<p lang="fr">Ce domaine est réservé à des exemples de documentation, sans autorisation préalable.</p>'.repeat(5)}`);
+  const short = await scoopPage('https://example.com/', { fetchImpl: page(example), parseHtml, tabHtml: async () => translated });
+  assert.equal(short.isPublic, true, 'example.com: its anonymous text is in the tab too; a script only added translations');
+  assert.match(short.sections[0].content, /Example Domain/);
+  const signedIn = `<main><h1>Dashboard</h1><p>${'Your private project settings. '.repeat(20)}</p></main>`;
+  const shell = await scoopPage('https://app.ex.com/settings', { fetchImpl: page('<main><p>Sign in to continue.</p></main>'), parseHtml, tabHtml: async () => signedIn });
+  assert.equal(shell.isPublic, false, 'the tab has clearly more text: read from the tab, never shared');
+  assert.match(shell.sections[0].content, /Dashboard/);
+});

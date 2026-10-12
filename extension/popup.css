@@ -158,9 +158,18 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 
 /* This page: what scoop.md knows about the page */
 .page-meta { display: grid; gap: 6px; min-width: 0; }
-.chip { justify-self: start; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--muted); font-size: var(--text-sm); font-weight: var(--weight-strong); }
-.chip[data-state="yes"] { color: var(--ok); }
-.chip[data-state="checking"] { font-weight: var(--weight-medium); }
+.verdict { display: grid; gap: 6px; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 6px; justify-self: start; max-width: 100%; padding: 5px 12px 5px 8px; border-radius: 999px; background: var(--chip-wait); color: var(--chip-wait-on); font-size: var(--text); font-weight: var(--weight-bold); }
+.chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-icon { display: grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 50%; font-size: var(--text-xs); line-height: 1; }
+.chip[data-state="yes"] { background: var(--chip-yes); color: var(--chip-yes-on); }
+.chip[data-state="yes"] .chip-icon::before { content: "✓"; }
+.chip[data-state="no"] { background: var(--chip-no); color: var(--chip-no-on); }
+.chip[data-state="no"] .chip-icon::before { content: "✕"; }
+.chip[data-state="checking"] .chip-icon { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chip[data-state="checking"] .chip-icon { animation: none; } }
+.tab[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
 #llms-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #llms-line a, .instructions a { color: var(--link); }
 .instructions ul { display: grid; gap: 2px; margin: 0; padding-left: 18px; font-size: var(--text-sm); }

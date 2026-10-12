@@ -177,8 +177,8 @@ test('the loader stays at least loaderMs, the copy lands before the copied momen
   assert.ok(p.clipboard.writes[0].at <= copiedStage.at);
   assert.ok(content.at - copiedStage.at >= timing.celebrateMs - 10);
   await sleep(80);
-  assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent.');
-  assert.deepEqual(p.writes.announce, ['', 'Copied. Paste it into your agent.']);
+  assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent. docs.example.com is developer docs (guess).', 'the status, then the verdict');
+  assert.deepEqual(p.writes.announce, ['', 'Copied. Paste it into your agent. docs.example.com is developer docs (guess).']);
   assert.deepEqual(p.focused, ['copy']);
   assert.equal(p.$('content').hidden, false);
   assert.equal(p.$('tabs').hidden, false, 'the tabs show with the content');
@@ -201,7 +201,7 @@ test('a failed copy is announced with the status text, with no copied moment', (
   const p = await openPopup(PAGE, { clipboardFails: true });
   await p.ready;
   await sleep(80);
-  assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard.');
+  assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard. docs.example.com is developer docs (guess).');
   assert.ok(!stages().includes('copied'));
 }));
 
@@ -812,41 +812,83 @@ const INSTRUCTIONS = [
   { text: 'Retry on 429 with backoff.' },
 ];
 
-test('"This page": the developer docs chip from the library verdict (status, then /quick)', async () => {
-  await withMock({ sites: { [SITE]: { indexed: true, isDevDocs: { verdict: 'yes', method: 'classifier', score: 0.93 } } } }, async () => {
-    const p = await openPopup(PAGE);
-    await p.ready;
-    assert.equal(p.$('devdocs').dataset.state, 'yes');
-    assert.equal(p.$('devdocs').textContent, 'Developer docs ✓');
-  });
-  await withMock({ sites: { [SITE]: { status: 'not_devtool', quickDevDocs: { verdict: 'no', method: 'gate', score: 0.1 } } } }, async () => {
-    const p = await openPopup(PAGE);
-    await p.ready;
-    assert.equal(p.$('devdocs').dataset.state, 'no', 'the /quick verdict wins over the docs-like path');
-    assert.equal(p.$('devdocs').textContent, 'Not developer docs');
-  });
-});
+const chip = (p) => ({ state: p.$('devdocs').dataset.state, text: p.$('devdocs-text').textContent, label: p.$('devdocs').getAttribute('aria-label'), title: p.$('devdocs').title, why: !p.$('devdocs-why').hidden });
 
-test('"This page": "Checking…" while the background crawl is still at the gate; unknown then falls back to the local guess', async () => {
+test('the developer docs verdict at the top of the card: yes, with the site name, from the library', () => withMock({
+  sites: { [SITE]: { indexed: true, isDevDocs: { verdict: 'yes', method: 'classifier', score: 0.93 } } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.deepEqual(chip(p), { state: 'yes', text: `Developer docs · ${SITE}`, label: `${SITE} is developer docs`, title: '', why: false });
+  const card = p.document.querySelector('#content .hero');
+  assert.equal(card.firstElementChild.className, 'verdict', 'above "Copied…"');
+  assert.equal(p.$('tab-overview').getAttribute('aria-disabled'), null);
+  assert.equal(p.$('tab-search').getAttribute('aria-disabled'), null);
+}));
+
+const NOT_DOCS = 'scoop.md copied just this page. Search and Overview are for developer docs.';
+
+test('not developer docs: a different pill and why, Overview and Search disabled, and the copy is not called docs', () => withMock({
+  sites: { [SITE]: { status: 'not_devtool', quickDevDocs: { verdict: 'no', method: 'gate', score: 0.1 } } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.deepEqual(chip(p), { state: 'no', text: 'Not developer docs', label: `Not developer docs. ${NOT_DOCS}`, title: '', why: true }, 'the /quick verdict wins over the docs-like path');
+  assert.equal(p.$('devdocs-why').textContent, NOT_DOCS);
+  for (const t of ['overview', 'search']) {
+    assert.equal(p.$(`tab-${t}`).getAttribute('aria-disabled'), 'true');
+    assert.equal(p.$(`tab-${t}`).title, NOT_DOCS);
+  }
+  p.$('tab-search').onclick();
+  assert.equal(p.$('tab-page').getAttribute('aria-selected'), 'true', 'a disabled tab does not open');
+  assert.equal(p.$('search').hidden, true);
+  p.$('tab-page').onkeydown({ key: 'ArrowRight' });
+  assert.equal(p.$('tab-page').getAttribute('aria-selected'), 'true', 'arrow keys skip disabled tabs');
+  assert.match(p.clipboard.text, /^# Guide \(docs\.example\.com, via scoop\.md\)$/m);
+  assert.ok(!/^# .*\bdocs for\b/m.test(p.clipboard.text) && !p.clipboard.text.includes("public docs"), 'not called docs');
+  await sleep(80);
+  assert.match(p.$('announce').textContent, /Not developer docs\./);
+}));
+
+test('the verdict is never left undecided: unknown, a crawl still at the gate, or the library down all get the local guess', async () => {
+  // Library unknown, crawl held at the gate: a guess, marked as one; the crawl's gate can still decide it.
   await withMock({ sites: { [SITE]: { hold: true, steps: [{ state: 'queued', phase: 'gate' }, { state: 'running', phase: 'gate' }] } } }, async () => {
     const p = await openPopup(PAGE);
     await p.ready;
-    await waitFor(() => gets('/v1/crawl-requests/').length >= 2);
-    assert.equal(p.$('devdocs').dataset.state, 'checking');
-    assert.equal(p.$('devdocs').textContent, 'Checking…');
+    assert.deepEqual(chip(p), { state: 'yes', text: `Developer docs · ${SITE}`, label: `${SITE} is developer docs (guess)`, title: 'Developer docs (guess)', why: false });
   });
   await withMock({ sites: { [SITE]: { status: 'not_devtool', isDevDocs: { verdict: 'unknown', method: 'none', score: null } } } }, async () => {
     const p = await openPopup(PAGE);
     await p.ready;
-    assert.equal(p.$('devdocs').dataset.state, 'yes', 'a docs path');
+    assert.equal(chip(p).state, 'yes', 'a docs path');
   });
   await withMock({ sites: {} }, async () => {
     const p = await openPopup(PAGE, { local: { devLibraryUrl: 'http://localhost:9/v1' } });
     await p.ready;
-    assert.equal(p.$('devdocs').dataset.state, 'yes', 'library unreachable: the local guess');
+    assert.equal(chip(p).state, 'yes', 'library unreachable: the local guess');
+    assert.equal(chip(p).title, 'Developer docs (guess)');
     assert.equal(p.$('llms-line').hidden, true);
     assert.equal(p.$('instructions').hidden, true, 'no instructions, no section');
   });
+});
+
+test('a guess is settled by the crawl gate: rejected means not developer docs', () => withMock({
+  sites: { [SITE]: { steps: [{ state: 'queued', phase: 'gate' }, { state: 'rejected', phase: 'gate' }] } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  await waitFor(() => p.$('devdocs').dataset.state === 'no');
+  assert.equal(chip(p).title, '', 'no longer a guess');
+  assert.equal(p.$('tab-search').getAttribute('aria-disabled'), 'true');
+}));
+
+test('the verdict pill: icon and text, filled colours from tokens, a spinner only while checking', () => {
+  const css = read('../extension/popup.css');
+  assert.match(css, /\.chip\[data-state="yes"\] \{ background: var\(--chip-yes\); color: var\(--chip-yes-on\); \}/);
+  assert.match(css, /\.chip\[data-state="no"\] \{ background: var\(--chip-no\); color: var\(--chip-no-on\); \}/);
+  assert.match(css, /\.chip\[data-state="yes"\] \.chip-icon::before \{ content: "✓"; \}/);
+  assert.match(css, /\.chip\[data-state="no"\] \.chip-icon::before \{ content: "✕"; \}/);
+  assert.match(css, /\.chip\[data-state="checking"\] \.chip-icon \{[^}]*animation: spin/);
 });
 
 test('"This page": instructions for agents, 3 then "Show all", sources checked; the copy lists them before the page', () => withMock({

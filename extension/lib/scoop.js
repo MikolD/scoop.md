@@ -9,6 +9,7 @@ import { isPrivateHost } from './hosts.js';
 export { isPrivateHost };
 
 const MIN_PAGE_CHARS = 200;
+const MIN_SAME_CHARS = 80; // enough to be the page's text, not a "Loading…" shell
 const label = (s) => s.slice(0, 200);
 
 // Drops the fragment, unless it is the route of a hash-routed site (/#/guide),
@@ -58,10 +59,18 @@ export async function scoopPage(url, { fetchImpl = fetch, parseHtml, title = '',
       md = htmlToMarkdown(pickMain(doc), pageUrl);
     }
     if (md.length <= MIN_PAGE_CHARS && tabHtml) {
+      // A short page whose anonymous text is still there in the tab stays
+      // public, even when scripts add more (example.com adds translations).
+      // The tab's copy is used when it is a different page (a sign-in shell
+      // anonymously) with clearly more text.
       const live = await tabHtml();
-      if (live) {
-        doc = parseHtml(live);
-        md = htmlToMarkdown(pickMain(doc), pageUrl);
+      const liveDoc = live ? parseHtml(live) : null;
+      const liveMd = liveDoc ? htmlToMarkdown(pickMain(liveDoc), pageUrl) : '';
+      const flat = (t) => t.replace(/\s+/g, ' ').trim();
+      const samePage = md.length >= MIN_SAME_CHARS && flat(liveMd).includes(flat(md));
+      if (liveMd && !samePage && (!md || liveMd.length > md.length + Math.max(100, md.length / 5))) {
+        doc = liveDoc;
+        md = liveMd;
         isPublic = false;
       }
     }
