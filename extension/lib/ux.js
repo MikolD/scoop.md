@@ -10,6 +10,8 @@ export const timing = {
   // The popup stops waiting for a crawl after this and copies the page; the
   // service worker keeps following the request.
   maxWaitMs: 10 * 60_000,
+  // Retries of the page's package right after a crawl completes.
+  packageRetryMs: [1_500, 3_000, 6_000],
 };
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

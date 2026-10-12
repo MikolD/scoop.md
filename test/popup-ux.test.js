@@ -45,7 +45,7 @@ before(async () => {
 after(() => { globalThis.fetch = realFetch; docs.close(); mock?.close(); });
 
 beforeEach(() => {
-  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000 });
+  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000, packageRetryMs: [10, 20, 40] });
   stageLog.length = 0;
 });
 
@@ -432,11 +432,11 @@ test('waiting is announced once; phases are announced by the live phase line', (
   await p.ready;
 }));
 
-test('a pending crawl that completed but whose package is missing asks /packages once, then builds here', () => withMock({ sites: { [SITE]: { indexed: true, packages404: true } } }, async () => {
+test('a pending crawl that completed but whose package is missing: /packages with its retries, not again for the indexed status, then built here', () => withMock({ sites: { [SITE]: { indexed: true, packages404: true } } }, async () => {
   const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
   const p = await openPopup(PAGE, { local });
   await p.ready;
-  assert.equal(gets('/v1/packages').length, 1);
+  assert.equal(gets('/v1/packages').length, 1 + timing.packageRetryMs.length);
   assert.match(p.clipboard.text, /# Get started with Widgets/);
 }));
 
@@ -550,4 +550,19 @@ test('the popup hidden mid-wait (window in the background) keeps waiting and sti
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE), 'the indexed package, not a timeout fallback');
   assert.equal(p.$('crawl-note').textContent, '');
   assert.deepEqual(queued(p.local, 'crawl_wait').map((w) => w.outcome), ['complete']);
+}));
+
+test('right after a crawl completes, a package the index cannot answer yet is retried', () => withMock({ sites: { [SITE]: { packages404Times: 2 } } }, async () => {
+  // Live on staging: reopening hono.dev right after ✓ got 404 from /packages and
+  // fell back to the local build; a minute later the same call answered 200.
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  assert.equal(gets('/v1/packages').length, 3, 'two 404s, then the package');
+}));
+
+test('an indexed site opened normally is asked once (no retries)', () => withMock({ sites: { [SITE]: { indexed: true, packages404Times: 1 } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.equal(gets('/v1/packages').length, 1);
 }));

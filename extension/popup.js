@@ -224,9 +224,17 @@ async function deliverShared(shared, scoop) {
 // server builds it (it already puts this page first and links the rest of the
 // site). Local sources are not merged in: they would repeat the same page.
 // Returns false when the index has nothing for the page.
-async function deliverIndexed(scoop) {
+// fresh: the crawl has only just completed. The index can take a few seconds
+// to answer for its pages (live on staging: 404 right after "complete", 200 a
+// minute later), so a not-found or busy answer is retried a few times.
+async function deliverIndexed(scoop, { fresh = false } = {}) {
   const site = siteKey(tab.url);
-  const res = await library.pagePackage(site, scoop.pageUrl);
+  let res;
+  for (const wait of fresh ? [0, ...timing.packageRetryMs] : [0]) {
+    if (wait) await sleep(wait);
+    res = await library.pagePackage(site, scoop.pageUrl);
+    if (res.ok || ![0, 404, 429, 503].includes(res.status)) break;
+  }
   if (!res.ok || typeof res.data !== 'string' || !res.data.trim()) return false;
   $('rebuild').hidden = false;
   await deliver({ text: res.data, scoop, indexed: true, summary: `${kb(res.data)} · from the ${site} docs index` });
@@ -244,7 +252,7 @@ async function requestCrawl(scoop) {
     return deliverLocal(scoop, { crawlNote: res.status === 429 ? 'The docs index is busy right now, so we copied just this page.' : '' });
   }
   if (state === 'complete') {
-    if (await deliverIndexed(scoop)) return;
+    if (await deliverIndexed(scoop, { fresh: true })) return;
     return deliverLocal(scoop);
   }
   if (state === 'rejected') return deliverLocal(scoop, { crawlNote: REJECTED_NOTE });
@@ -327,7 +335,7 @@ async function waitForCrawl(scoop, initial) {
       $('copy-now').disabled = true;
       showLoader();
       await forgetCrawl(chrome, site);
-      if (await deliverIndexed(scoop)) return;
+      if (await deliverIndexed(scoop, { fresh: true })) return;
       return deliverLocal(scoop);
     }
     if (req.state === 'timeout') {
@@ -384,7 +392,7 @@ async function run({ skipLibrary = false } = {}) {
     if (pending.state === 'complete') {
       await forgetCrawl(chrome, site);
       askedIndex = true;
-      if (await deliverIndexed(scoop)) return;
+      if (await deliverIndexed(scoop, { fresh: true })) return;
     } else if (!isTerminal(pending.state)) {
       return waitForCrawl(scoop, { id: pending.requestId, state: pending.state, phase: pending.phase });
     } else {

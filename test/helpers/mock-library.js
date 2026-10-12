@@ -95,6 +95,10 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
     }
     if (req.method === 'GET' && u.pathname === '/v1/packages') {
       const name = u.searchParams.get('site');
+      if (site(name).packages404Times > 0) {
+        site(name).packages404Times--;
+        return json(404, { error: { code: 'not_found', message: 'Nothing indexed matches' } });
+      }
       if (!site(name).indexed || site(name).packages404) return json(404, { error: { code: 'not_indexed', message: `${name} is not indexed` } });
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(site(name).packageText ?? packageFor(name, u.searchParams.get('url')));
