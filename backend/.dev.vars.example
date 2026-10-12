@@ -19,5 +19,7 @@ ALLOW_ANY_EXTENSION=1
 #   openssl rand -base64 32
 # ADMIN_UI_USER=admin
 # ADMIN_UI_PASSCODE=
-# Usage telemetry: salts the daily-rotating IP-subject hash and the website's visitor ID. Any random string locally.
-TELEMETRY_SALT=local-telemetry-salt
+# Usage telemetry: salts the daily-rotating IP-subject hash and the website's visitor ID.
+# Unset, events are still stored, without either. Generate one:
+#   openssl rand -base64 32
+# TELEMETRY_SALT=
