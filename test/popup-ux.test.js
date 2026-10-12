@@ -360,6 +360,7 @@ test('progressText: friendly labels, counts and how far along', () => {
   assert.equal(progressText({ state: 'running', phase: 'browser', pagesFound: 1 }).label, 'Reading 1 page');
   assert.deepEqual(progressText({ state: 'running', phase: 'discover', pagesFound: 30 }), { label: 'Finding the docs', count: '30 pages found', fraction: null });
   assert.deepEqual(progressText({ state: 'indexing', phase: 'index', pagesFound: 40, pagesIndexed: 10 }), { label: 'Indexing 10/40', count: '', fraction: 0.25 });
+  assert.equal(progressText({ state: 'indexing', phase: 'index', pagesFound: 3, pagesIndexed: 0 }).fraction, null, 'an empty bar looks stuck');
 });
 
 test('library client: the index calls follow the contract', async () => {

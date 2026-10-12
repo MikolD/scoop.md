@@ -40,7 +40,8 @@ export function progressText(req = {}) {
     case 'index': return {
       label: found ? `Indexing ${Math.min(indexed, found)}/${found}` : 'Indexing',
       count: '',
-      fraction: found ? Math.min(1, indexed / found) : null,
+      // Nothing indexed yet: keep the bar moving rather than show it empty.
+      fraction: found && indexed ? Math.min(1, indexed / found) : null,
     };
     default: return { label: 'Getting started', count, fraction: null };
   }
