@@ -477,6 +477,8 @@ function seed(raw: ReturnType<typeof fakeD1>['raw']) {
   profile.run('asked.example', 'ready', 'requested', 0);
   page.run('https://shop.example/x', 'shop.example', 'Shop');
   profile.run('shop.example', 'not_devtool', 'admin', 1);
+  // Rejected after a user's crawl request: never published (it would reveal what users browse).
+  profile.run('visited.example', 'not_devtool', 'requested', 0);
   // Indexed by an admin with no profile (POST /v1/admin/index): listed.
   page.run('https://manual.example/x', 'manual.example', 'Manual');
   raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) SELECT url, 1, 200, url, '2026-10-12', 'crawl' FROM page_index`).run();
@@ -493,6 +495,7 @@ test('GET /v1/sites/index: approved indexed sites with page counts, ETag and 304
   for (const h of ['shop.example', 'amazon.com', 'www.amazon.com', 'amazon.co.uk', 'google.com', 'www.google.com', 'ebay.com']) assert.ok(r.json.notDocs.includes(h), h);
   assert.ok(!r.json.notDocs.some((h: string) => h.includes('*')), 'no patterns');
   assert.ok(!r.json.notDocs.includes('docs.example.dev'));
+  assert.ok(!r.json.notDocs.includes('visited.example'), 'requested rejections stay private');
   assert.equal(r.headers.get('cache-control'), 'public, max-age=3600');
   assert.match(r.headers.get('etag')!, /^"[0-9a-f]{32}"$/);
   assert.equal(r.headers.get('access-control-allow-origin'), '*');

@@ -472,9 +472,13 @@ const routes: Route[] = [
              WHERE COALESCE(s.approved, 1) = 1 AND COALESCE(s.status, '') != 'not_devtool'
              GROUP BY p.site ORDER BY p.site`,
           ).all<{ site: string; pages: number }>());
-        // And hosts that are not docs, for a "not docs" badge: sites the gate rejected, and the denylist's hosts.
+        // And hosts that are not docs, for a "not docs" badge: sites an admin's crawl rejected, and the
+        // denylist's hosts. Rejections of user-requested crawls stay out: publishing them would reveal
+        // which sites extension users visited and asked about.
         const { results: rejected } = await retryD1(() =>
-          env.DB.prepare(`SELECT site FROM site_profiles WHERE status = 'not_devtool' ORDER BY site`).all<{ site: string }>());
+          env.DB.prepare(
+            `SELECT site FROM site_profiles WHERE status = 'not_devtool' AND COALESCE(source, 'admin') != 'requested' ORDER BY site`,
+          ).all<{ site: string }>());
         const notDocs = [...new Set([...rejected.map((r) => r.site), ...denylistHosts()])].sort();
         body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })), notDocs });
         etag = `"${(await sha256Hex(body)).slice(0, 32)}"`;
