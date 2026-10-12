@@ -392,7 +392,11 @@ listening on `::` for that port.
   without the sandbox. Stopping the sandbox and recording its cost is a
   separate `browser-stop` step, so a collect retry never finds the sandbox
   already killed. An uploaded result (optional presigned path) is checked
-  against the 25 MB cap by its R2 `size` before it is read.
+  against the 25 MB cap by its R2 `size` before it is read. When the job
+  server gives no result (a 409 "not finished", an error answer, the sandbox
+  unreachable), collect throws so the step's retries try again; an error
+  manifest (0 pages) is written only when the job's own `/status` says
+  `failed`. Retries exhausted fail the run through the `fail` step.
 - **Result collection:** the Worker reads `GET /result` from the sandbox's job
   server in every environment (traffic token + job token). It must be
   `application/json`, is read with the same capped reader as page fetches (at
@@ -412,8 +416,12 @@ listening on `::` for that port.
   credentials. The kill-by-`runId` at `browser-start` removes it if that run's
   start step executes again; otherwise the E2B timeout does. Sandboxes can
   also be found by hand with `GET /v2/sandboxes?metadata=purpose%3Dscoop-crawl`.
-  The run row stays `running` until it is 6 hours old, when it stops
-  blocking new crawls of the site.
+  The run row stays `running`, and the profile's `crawl_state` stays
+  `crawling`, until something moves them: the next `POST /v1/admin/crawl` for
+  the site marks queued/running runs older than 6 hours `failed` ("abandoned")
+  in the same D1 batch as the new run (and that crawl resets `crawl_state` as
+  it starts and finishes), and the public profile stops reporting
+  `crawling: true` once `crawl_state` hasn't changed for 6 hours.
 - **Auth failures** (401/403 from E2B's API or proxy) make `poll` throw instead
   of reporting the sandbox as still running.
 - **Endpoints verified against the live API** (2026-10-12, real key):

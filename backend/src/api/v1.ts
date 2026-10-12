@@ -1,7 +1,7 @@
 // The v1 API (docs/BACKEND.md §5). Each route names its pattern for the request log.
 
 import { checkHourly, ipSubject } from '../db/ratelimit.ts';
-import { CrawlStore } from '../db/crawl.ts';
+import { CrawlStore, STALE_RUN_HOURS } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
 import type { SkillRow } from '../db/store.ts';
@@ -143,7 +143,9 @@ function profileJson(r: SiteProfileRow) {
     needsBrowser: Boolean(r.needs_browser),
     crawlDelay: r.crawl_delay,
     // A re-crawl in progress; status is still the last finished crawl's outcome.
-    crawling: r.crawl_state === 'crawling',
+    // A terminated Workflow never resets crawl_state; past the stale-run
+    // window it is not reported as crawling.
+    crawling: r.crawl_state === 'crawling' && Date.parse(r.updated_at) > Date.now() - STALE_RUN_HOURS * 3_600_000,
     lastCrawledAt: r.last_crawled_at,
     updatedAt: r.updated_at,
   };

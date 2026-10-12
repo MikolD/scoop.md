@@ -789,17 +789,22 @@ function collectSetup() {
   const result = JSON.stringify({ pages: Array.from({ length: 23 }, (_, i) => ({ url: `https://ex.com/#/p${i}`, title: `P${i}`, markdown: body })).concat([{ url: 'https://evil.com/x', title: 'X', markdown: body }]) });
   let reads = 0;
   let alive = true;
+  // What the job server answers: the result, or null (a 409 / error), and its /status.
+  const job = { result: result as string | null, state: 'finished', error: null as string | null };
   const crawler = {
     async result() {
       reads++;
       if (!alive) throw new Error('sandbox gone');
-      return result;
+      return job.result;
+    },
+    async status() {
+      return alive ? { state: job.state, error: job.error } : null;
     },
   };
   const input = {
     bucket: r2, crawler, handle: { id: 'sbx1', startedAt: 0 }, runId: 'cr_1', site: 'ex.com', robots: parseRobots(''), maxPages: 100, perBatch: 10,
   };
-  return { r2, objects, input, reads: () => reads, kill: () => { alive = false; } };
+  return { r2, objects, input, job, reads: () => reads, kill: () => { alive = false; } };
 }
 
 test('N1: collectResult writes batches then a manifest; a retry after the sandbox is gone returns the manifest', async () => {
@@ -879,4 +884,48 @@ test('N3: status changes only when a crawl finishes or fails; a failed re-crawl 
   await store.beginCrawl('empty.com');
   await store.failCrawl('empty.com');
   assert.equal((await store.getProfile('empty.com'))!.status, 'failed');
+});
+
+test('L-a: no result yet (409 / error) throws so the step retries; only a job that says failed gets an error manifest', async () => {
+  const t = collectSetup();
+  t.job.result = null; // e.g. /result answered 409 "not finished"
+  t.job.state = 'running';
+  await assert.rejects(collectResult(t.input), /not available yet \(job state: running\)/);
+  assert.equal(t.objects.has(manifestKey('cr_1')), false);
+  // The job finishes; the retry collects the real result.
+  t.job.result = JSON.stringify({ pages: [{ url: 'https://ex.com/a', title: 'A', markdown: 'Readable docs text. '.repeat(10) }] });
+  t.job.state = 'finished';
+  assert.equal((await collectResult(t.input)).pages, 1);
+
+  // Sandbox unreachable: still a retry, never an empty manifest.
+  const u = collectSetup();
+  u.job.result = null;
+  u.kill();
+  await assert.rejects(collectResult(u.input), /sandbox gone|job state: unknown/);
+  assert.equal(u.objects.has(manifestKey('cr_1')), false);
+
+  // The job itself reports failure: that is final.
+  const f = collectSetup();
+  f.job.result = null;
+  f.job.state = 'failed';
+  f.job.error = 'browser crashed';
+  assert.deepEqual(await collectResult(f.input), { pages: 0, batches: 0, skipped: 0, error: 'browser crashed' });
+  assert.ok(f.objects.has(manifestKey('cr_1')));
+});
+
+test('L-c: a run still queued/running after 6 hours is marked failed (abandoned) when a new crawl starts', async () => {
+  const { d1, raw } = fakeD1();
+  const { r2 } = fakeR2();
+  const store = new CrawlStore(d1, r2);
+  const t = new Date('2026-10-12T00:00:00Z');
+  assert.equal(await store.createRun('cr_1', 'ex.com', 'https://ex.com/', t), true);
+  await store.updateRun('cr_1', { status: 'running' }); // then the Workflow is terminated
+  assert.equal(await store.createRun('cr_2', 'ex.com', 'https://ex.com/', new Date(t.getTime() + 3_600_000)), false);
+  assert.equal(await store.createRun('cr_3', 'ex.com', 'https://ex.com/', new Date(t.getTime() + 7 * 3_600_000)), true);
+  const old = raw.prepare("SELECT status, error, finished_at FROM crawl_runs WHERE id = 'cr_1'").get() as { status: string; error: string; finished_at: string };
+  assert.equal(old.status, 'failed');
+  assert.match(old.error, /abandoned/);
+  assert.ok(old.finished_at);
+  const active = raw.prepare("SELECT COUNT(*) AS n FROM crawl_runs WHERE site = 'ex.com' AND status IN ('queued', 'running')").get() as { n: number };
+  assert.equal(active.n, 1);
 });

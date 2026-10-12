@@ -27,7 +27,7 @@ export interface Manifest {
 
 export interface CollectInput {
   bucket: Pick<R2Bucket, 'get' | 'put' | 'delete'>;
-  crawler: Pick<BrowserCrawler, 'result'> & { status?(h: RunHandle): Promise<{ error: string | null } | null> };
+  crawler: Pick<BrowserCrawler, 'result'> & { status(h: RunHandle): Promise<{ state: string; error: string | null } | null> };
   handle: RunHandle;
   runId: string;
   site: string;
@@ -49,7 +49,15 @@ export async function collectResult(c: CollectInput): Promise<Manifest> {
     throw new Error(`uploaded crawl result is over ${MAX_RESULT_BYTES} bytes`);
   }
   const raw = uploaded ? await uploaded.text() : await c.crawler.result(c.handle);
-  const error = raw === null ? ((await c.crawler.status?.(c.handle))?.error ?? 'no result') : null;
+  let error: string | null = null;
+  if (raw === null) {
+    // No result (a 409 "not finished", an error answer, a proxy hiccup). Only
+    // the job's own word that it failed is final; anything else throws so the
+    // step's retry can try again while the sandbox is still up.
+    const status = await c.crawler.status(c.handle);
+    if (status?.state !== 'failed') throw new Error(`crawl result not available yet (job state: ${status?.state ?? 'unknown'})`);
+    error = status.error ?? 'crawl failed';
+  }
   const { pages, skipped } = raw === null ? { pages: [] as FetchedSource[], skipped: 0 } : browserPages(raw, c.site, c.robots, c.maxPages);
 
   let batches = 0;

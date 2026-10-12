@@ -55,9 +55,10 @@ export interface RecordStats {
   unchanged: number;
 }
 
-// A run older than this that never finished (its Workflow died) no longer
-// blocks a new crawl of the same site.
-const STALE_RUN_HOURS = 6;
+// A run older than this that never finished (its Workflow died or was
+// terminated) no longer blocks a new crawl of the same site, and a profile
+// whose crawl_state hasn't moved for this long is not shown as crawling.
+export const STALE_RUN_HOURS = 6;
 // sendBatch takes at most 100 messages.
 const OUTBOX_BATCH = 100;
 
@@ -76,17 +77,28 @@ export class CrawlStore {
   // Creates a queued run unless the site already has a queued or running one
   // (started in the last STALE_RUN_HOURS). One statement, so two concurrent
   // requests can't both win. Returns false when another run is active.
+  // Runs still queued/running past STALE_RUN_HOURS (a terminated Workflow
+  // never ran its fail step) are marked failed in the same batch, so they stop
+  // showing as active.
   async createRun(id: string, site: string, startUrl: string, now = new Date()): Promise<boolean> {
     const since = new Date(now.getTime() - STALE_RUN_HOURS * 3_600_000).toISOString();
-    const r = await this.db
-      .prepare(
-        `INSERT INTO crawl_runs (id, site, start_url, started_at, status)
-         SELECT ?1, ?2, ?3, ?4, 'queued'
-         WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE site = ?2 AND status IN ('queued', 'running') AND started_at > ?5)`,
-      )
-      .bind(id, site, startUrl, now.toISOString(), since)
-      .run();
-    return r.meta.changes === 1;
+    const [, inserted] = await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE crawl_runs SET status = 'failed', finished_at = ?3, error = 'abandoned: still unfinished after ${STALE_RUN_HOURS} hours'
+           WHERE site = ?1 AND status IN ('queued', 'running') AND started_at <= ?2`,
+        )
+        .bind(site, since, now.toISOString()),
+      this.db
+        .prepare(
+          `INSERT INTO crawl_runs (id, site, start_url, started_at, status)
+           SELECT ?1, ?2, ?3, ?4, 'queued'
+           WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE site = ?2 AND status IN ('queued', 'running'))
+           RETURNING id`,
+        )
+        .bind(id, site, startUrl, now.toISOString()),
+    ]);
+    return (inserted.results as unknown[]).length === 1;
   }
 
   async getRun(id: string): Promise<CrawlRunRow | null> {
