@@ -89,8 +89,8 @@ In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real exte
 | `1-stripe-webhooks-copied.png` | 1280×800 | docs.stripe.com/webhooks rebuilt from the page ("Rebuild from this page", since the live library already serves a Stripe skill): "Copied. Paste it into your agent.", 2 sources (the page's `.md` and `llms.txt`), "Shared with the library" (api.scoop.md) |
 | `2-stripe-library-hit.png` | 1280×800 | docs.stripe.com/payments/checkout served from the live library (api.scoop.md): "shared, worked for 2 people", vote buttons, "Rebuild from this page" |
 | `3-python-html-converted.png` | 1280×800 | docs.python.org/3/library/json.html (no Markdown published) converted from HTML, the preview scrolled to a converted code block, "Shared with the library" (api.scoop.md) |
-| `4-settings.png` | 1280×800 | Settings: sharing toggle, theme, keyboard shortcut |
+| `4-settings.png` | 1280×800 | Settings (0.3.0): sharing toggle, "Send usage statistics" toggle with the install ID, theme, keyboard shortcut, version |
+| `5-first-run-notice.png` | 1280×800 | The first popup after install, on react.dev/learn against the live library: the usage statistics notice ("Turn off" / "OK") and the sharing note above the copied result |
 | `promo-small-440x280.png` | 440×280 | Small promo tile: icon, "scoop.md", "Scoop any doc into your coding agent" on #ffeee0 |
 | `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 2 |
 
-Retake `4-settings.png` for 0.3.0: the Settings page now also has the "Send usage statistics" toggle and the install ID.
