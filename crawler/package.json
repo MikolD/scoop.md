@@ -1,0 +1,23 @@
+{
+  "name": "scoop-md-crawler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Browser crawler for client-rendered docs sites; runs inside an E2B sandbox.",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "crawl": "node cli.js",
+    "sync": "cp ../extension/lib/extract.js vendor/extract.js && cp ../backend/src/crawl/robots.ts vendor/robots.ts",
+    "template:build": "npm run sync && e2b template create scoop-crawler --dockerfile e2b.Dockerfile --cmd 'cd /home/user/crawler && node server.js' --ready-cmd 'curl -sf http://localhost:8080/health' --cpu-count 2 --memory-mb 2048"
+  },
+  "dependencies": {
+    "playwright": "1.64.0"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@e2b/cli": "2.21.2"
+  }
+}
