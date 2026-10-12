@@ -567,3 +567,55 @@ test('fetchPlanned: page-html pages become Markdown via extract.js; thin pages f
   assert.ok(!a.markdown!.includes('Footer text'));
   assert.deepEqual([m.kind, m.title], ['page-md', 'Negotiated']);
 });
+
+test('HIGH-1: with Crawl-delay 3, all 10 pages succeed; the timeout starts after the politeness wait', async () => {
+  // Politeness waits run at 1/10 real time: page 10 starts 27 s (2.7 s real)
+  // in, well past the 1.5 s per-hop timeout. A timeout that started before the
+  // wait would abort the later pages.
+  const base = Date.now();
+  const scaled: Clock = {
+    now: () => (Date.now() - base) * 10,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms / 10)),
+  };
+  const robots = { state: 'ok' as const, text: 'User-agent: *\nCrawl-delay: 3\n' };
+  const interval = intervalFor(parseRobots(robots.text).crawlDelay);
+  assert.equal(interval, 3000);
+  const routes: Record<string, () => Response> = {};
+  const plan = Array.from({ length: 10 }, (_, i) => {
+    routes[`https://ex.com/p${i}.md`] = () => new Response(md(`P${i}`), { headers: { 'content-type': 'text/markdown' } });
+    return { url: `https://ex.com/p${i}`, sourceUrl: `https://ex.com/p${i}.md`, kind: 'page-md' as const };
+  });
+  const { impl } = fakeFetch(routes);
+  const slow = async (url: string, init: RequestInit) => {
+    await new Promise((r) => setTimeout(r, 20));
+    if (init.signal?.aborted) throw new Error('aborted');
+    return impl(url, init);
+  };
+  const limiter = new HostLimiter({ intervalMs: interval, clock: scaled });
+  const t0 = Date.now();
+  const { pages, failed, skipped } = await fetchPlanned(plan, new Map(), robots, { fetchImpl: slow, limiter, timeoutMs: 1500 });
+  assert.ok(Date.now() - t0 >= 2500, 'the politeness waits really happened');
+  assert.deepEqual([pages.length, failed, skipped], [10, 0, 0]);
+});
+
+test('L4: robots-disallowed and off-site pages are skipped, not failed', async () => {
+  const { impl } = fakeFetch({
+    'https://ex.com/away.md': () => new Response(null, { status: 302, headers: { location: 'https://other.com/x.md' } }),
+    'https://ex.com/ok.md': () => new Response(md('Ok'), { headers: { 'content-type': 'text/markdown' } }),
+  });
+  const plan = ['private/a', 'away', 'ok', 'missing'].map((x) => ({ url: `https://ex.com/${x}`, sourceUrl: `https://ex.com/${x}.md`, kind: 'page-md' as const }));
+  const r = await fetchPlanned(plan, new Map(), { state: 'ok', text: 'User-agent: *\nDisallow: /private' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.deepEqual([r.pages.length, r.failed, r.skipped], [1, 1, 2]);
+});
+
+test('HIGH-2: a 50,000-entry sitemap without lastmod parses in linear time, and parsing stops at the cap', () => {
+  const xml = '<urlset>' + Array.from({ length: 50_000 }, (_, i) => `<url><loc>https://ex.com/docs/p${i}</loc></url>`).join('\n') + '</urlset>';
+  const t0 = performance.now();
+  const all = parseSitemap(xml);
+  const ms = performance.now() - t0;
+  assert.equal(all.entries.length, 50_000);
+  assert.equal(all.entries[49_999].loc, 'https://ex.com/docs/p49999');
+  assert.equal(all.entries[0].lastmod, null);
+  assert.ok(ms < 500, `took ${Math.round(ms)} ms`);
+  assert.equal(parseSitemap(xml, 5001).entries.length, 5001);
+});

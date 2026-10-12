@@ -75,6 +75,7 @@ export interface DiscoverOptions {
   allowLocalhost?: boolean;
   limiter?: HostLimiter;
   budget?: number;
+  timeoutMs?: number; // per request hop, after the politeness wait
 }
 
 export function robotsFrom(file: RobotsFile): Robots {
@@ -173,7 +174,8 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
       if (fallback && fetchedMaps === 1) queue.push(`${origin}/sitemap_index.xml`);
       continue;
     }
-    const map = parseSitemap(r.text);
+    // Stop parsing once we hold as many URLs as we keep.
+    const map = parseSitemap(r.text, MAX_URLS_KEPT - pageUrls.size + 1);
     if (map.kind === 'index') {
       // Docs-looking child sitemaps first.
       const children = map.entries.map((e) => e.loc).filter(sameSite);
@@ -295,11 +297,14 @@ export async function fetchPlanned(
   prev: Map<string, { etag: string | null; last_modified: string | null }>,
   robotsFile: RobotsFile,
   o: DiscoverOptions & { limiter: HostLimiter },
-): Promise<{ pages: FetchedSource[]; failed: number }> {
+): Promise<{ pages: FetchedSource[]; failed: number; skipped: number }> {
   const robots = robotsFrom(robotsFile);
+  // A page is skipped when the site's own rules keep us away (robots.txt, a
+  // redirect off the site), and failed when fetching or converting it failed.
+  const SKIP = 'skip' as const;
   const results = await Promise.all(
-    plan.map(async (p): Promise<FetchedSource | null> => {
-      if (!robots.allowed(pathOf(p.sourceUrl))) return null;
+    plan.map(async (p): Promise<FetchedSource | typeof SKIP | null> => {
+      if (!robots.allowed(pathOf(p.sourceUrl))) return SKIP;
       const before = prev.get(p.url);
       const r = await crawlFetch(p.sourceUrl, {
         fetchImpl: o.fetchImpl,
@@ -308,8 +313,9 @@ export async function fetchPlanned(
         allowed: robots.allowed,
         etag: before?.etag,
         lastModified: before?.last_modified,
+        timeoutMs: o.timeoutMs,
       });
-      if (!r.ok) return null;
+      if (!r.ok) return r.skipped ? SKIP : null;
       if (r.notModified) return { ...p, title: null, markdown: null, etag: r.etag, lastModified: r.lastModified };
       if (r.over) return null;
       if (looksLikeText(r.contentType, r.text)) {
@@ -322,6 +328,7 @@ export async function fetchPlanned(
       return { ...p, title: page.title, markdown: page.markdown, etag: r.etag, lastModified: r.lastModified };
     }),
   );
-  const pages = results.filter((r): r is FetchedSource => r !== null);
-  return { pages, failed: results.length - pages.length };
+  const pages = results.filter((r): r is FetchedSource => r !== null && r !== SKIP);
+  const skipped = results.filter((r) => r === SKIP).length;
+  return { pages, failed: results.length - pages.length - skipped, skipped };
 }

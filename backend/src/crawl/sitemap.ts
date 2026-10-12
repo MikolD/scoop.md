@@ -24,32 +24,36 @@ function text(s: string): string {
   return (cdata ? cdata[1] : decodeXML(t)).trim();
 }
 
-// Content of the first <tag>…</tag> inside xml[from, to), or null.
-function inner(xml: string, tag: string, from: number, to: number): string | null {
-  const open = xml.indexOf(`<${tag}>`, from);
-  if (open === -1 || open >= to) return null;
+// Content of the first <tag>…</tag> in one entry's block, or null. Searching
+// the block (not the whole document) keeps parsing linear: an entry without
+// <lastmod> must not scan to the end of the file.
+function inner(block: string, tag: string): string | null {
+  const open = block.indexOf(`<${tag}>`);
+  if (open === -1) return null;
   const start = open + tag.length + 2;
-  const close = xml.indexOf(`</${tag}>`, start);
-  if (close === -1 || close > to) return null;
-  return xml.slice(start, close);
+  const close = block.indexOf(`</${tag}>`, start);
+  return close === -1 ? null : block.slice(start, close);
 }
 
-export function parseSitemap(xml: string): Sitemap {
+// Parses at most `max` entries (the caller's own cap can be lower than the
+// protocol's 50,000) and stops there.
+export function parseSitemap(xml: string, max = MAX_SITEMAP_URLS): Sitemap {
   const head = xml.slice(0, 2000).toLowerCase();
   const kind = head.includes('<sitemapindex') ? 'index' : 'urlset';
   const item = kind === 'index' ? 'sitemap' : 'url';
   const entries: SitemapEntry[] = [];
   let i = 0;
-  while (entries.length < MAX_SITEMAP_URLS) {
+  while (entries.length < Math.min(max, MAX_SITEMAP_URLS)) {
     // `<url>` or `<url ` (attributes), not `<urlset`.
     let open = xml.indexOf(`<${item}`, i);
     while (open !== -1 && !/[\s>]/.test(xml[open + item.length + 1] ?? '')) open = xml.indexOf(`<${item}`, open + 1);
     if (open === -1) break;
     const close = xml.indexOf(`</${item}>`, open);
     if (close === -1) break;
-    const loc = inner(xml, 'loc', open, close);
+    const block = xml.slice(open, close);
+    const loc = inner(block, 'loc');
     if (loc !== null) {
-      const lastmod = inner(xml, 'lastmod', open, close);
+      const lastmod = inner(block, 'lastmod');
       const value = text(loc);
       if (value) entries.push({ loc: value, lastmod: lastmod === null ? null : text(lastmod) || null });
     }
