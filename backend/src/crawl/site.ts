@@ -25,6 +25,7 @@ import type { Robots } from './robots.ts';
 import { parseSitemap } from './sitemap.ts';
 import { extractPage, MIN_WORDS } from './html.ts';
 import { skipLowValue } from './skip.ts';
+import { headingText } from '../index/chunk.ts';
 
 export const DEFAULT_PAGE_BUDGET = 500;
 const TWIN_SAMPLE = 10;
@@ -333,7 +334,9 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
 // The page's title: its first Markdown heading, if any.
 export function markdownTitle(md: string): string | null {
   const m = /^#{1,2}[ \t]+(.{1,300})$/m.exec(md.slice(0, 20_000));
-  return m ? m[1].replace(/[ \t#]+$/, '').trim() || null : null;
+  // Same cleaning as the indexer's titles: inline Markdown, a closing "#"
+  // and permalink markers go; "C#" keeps its "#".
+  return m ? headingText(m[1].replace(/[ \t]+#+[ \t]*$/, '')) || null : null;
 }
 
 export interface FetchedSource {

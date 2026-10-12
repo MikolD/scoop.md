@@ -89,13 +89,36 @@ export function stripLinks(s: string): string {
   return out;
 }
 
-// Heading text without inline Markdown: links keep their text, emphasis and code markers go.
+// Permalink markers doc generators put on headings: Sphinx "Title ¶" (often
+// a link, "[¶](#title)", whose text is kept), "§", "🔗", and "#" (MkDocs,
+// Docusaurus), appended or, VuePress-style, prepended. A "#" counts only when
+// it stands apart, so "C#" and "F#" keep theirs.
+const MARKS = ['🔗\uFE0F', '🔗', '¶', '§'];
+
+export function stripPermalinks(t: string): string {
+  for (;;) {
+    let next = t;
+    const mark = MARKS.find((m) => next.endsWith(m));
+    if (mark) next = next.slice(0, -mark.length).trimEnd();
+    else if (next === '#' || next.endsWith(' #')) next = next.slice(0, -1).trimEnd();
+    if (next === t) break;
+    t = next;
+  }
+  for (const m of [...MARKS, '#']) {
+    if (t === m) return '';
+    if (t.startsWith(`${m} `)) return t.slice(m.length + 1).trimStart();
+  }
+  return t;
+}
+
+// Heading text without inline Markdown: links keep their text, emphasis and
+// code markers go, and so do permalink markers.
 export function headingText(s: string): string {
-  return stripLinks(s.slice(0, MAX_HEADING_LINE))
+  const text = stripLinks(s.slice(0, MAX_HEADING_LINE))
     .replace(/[*_`]/g, '')
     .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, 200);
+    .trim();
+  return stripPermalinks(text).slice(0, 200);
 }
 
 // The page title: the first level-1 heading outside code, else the first heading.

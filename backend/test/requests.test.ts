@@ -17,7 +17,7 @@ import {
 } from '../src/crawl/requests.ts';
 import type { RequestDeps } from '../src/crawl/requests.ts';
 import { anchorCandidates, anchorQuery, pathQuery } from '../src/search/anchor.ts';
-import { discoverSite } from '../src/crawl/site.ts';
+import { discoverSite, markdownTitle } from '../src/crawl/site.ts';
 import { HostLimiter } from '../src/crawl/polite.ts';
 import { extractPage } from '../src/crawl/html.ts';
 import { fakeD1, fakeR2 } from './helpers.ts';
@@ -573,4 +573,10 @@ test('a start page served as Markdown (content negotiation, as Read the Docs doe
     'https://rtd.example.dev/en/stable/quickstart/',
     'https://rtd.example.dev/en/stable/api/',
   ]); // genindex is on the skip list, other.example is off-site
+});
+
+test('stored page titles drop permalink markers and keep a real # (C#)', () => {
+  assert.equal(markdownTitle('# Uploading Files [¶](#uploading-files)\n\ntext'), 'Uploading Files');
+  assert.equal(markdownTitle('# Using C#\n\ntext'), 'Using C#');
+  assert.equal(markdownTitle('## Webhooks ##\n'), 'Webhooks');
 });

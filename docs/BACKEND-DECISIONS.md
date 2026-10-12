@@ -1070,3 +1070,10 @@ BACKEND.md §5 "Crawl requests".
 - **Reference server**: keeps the shapes in memory; it can't crawl, so a
   request stays `queued`, and `?url=` packages are always `not_indexed`.
   Rate limits are left to the Worker, as for the other writes.
+- **Permalink markers** are stripped from page titles and heading trails in
+  `headingText` (`src/index/chunk.ts`), which the indexer, skill titles and the
+  crawler's stored page titles all use: a trailing `¶`, `§` or `🔗` (Sphinx
+  serves `# Title [¶](#title)`, whose link text survives link stripping), a
+  `#` standing apart at the end, and the same markers leading the text
+  (VuePress). A `#` attached to a word (`C#`, `F#`) is kept. A scan, not a
+  regex, since heading text comes from the site.
