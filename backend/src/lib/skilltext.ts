@@ -41,19 +41,33 @@ export function markdownTitle(md: string): string {
   return cleanText(pageTitle(md), MAX_TITLE);
 }
 
-// A link's identity for matching: absolute, fragment dropped, trailing slash
-// dropped (except the root). Null for anything that isn't http(s).
+// A link's identity for matching: absolute, plain fragment dropped ('#/'
+// client route kept, see urls.ts), trailing slash of the path dropped (except
+// the root). Null for anything that isn't http(s).
 export function linkKey(href: string, base?: string): string | null {
   return resolveLink(href, base)?.key ?? null;
 }
 
-// An href resolved against its page: the absolute URL without fragment, and its key.
+// An href resolved against its page: the absolute URL (plain fragment
+// dropped, '#/' route kept), and its key.
 export function resolveLink(href: string, base?: string): { url: string; key: string } | null {
   let u: URL;
   try { u = new URL(href, base); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  u.hash = pageHash(u.hash);
+  const path = u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
+  return { url: u.href, key: u.origin + path + u.search + u.hash };
+}
+
+// A section URL keeps its '#/' route only when a verified source links to that
+// exact route (as a docsify sidebar does): the fragment is never fetched, so
+// otherwise it would be unverified text the client chose.
+export function verifiedRoute(url: string, linked: Set<string>): string {
+  const u = new URL(url);
+  if (!u.hash) return url;
+  if (linked.has(linkKey(url) ?? '')) return url;
   u.hash = '';
-  return { url: u.href, key: u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '') };
+  return u.href;
 }
 
 // Records a link unless one with text is already there.
@@ -119,7 +133,8 @@ const isPage = (kind: SectionKind) => kind === 'page-md' || kind === 'page-html'
 // Replaces every client-sent string in a validated skill with what the
 // verified sources say. verified[i] is what verification read from section i.
 export function withServerText(skill: NewSkill, verified: Verified[]): NewSkill {
-  const sections = skill.sections.map((s, i) => ({ ...s, label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
+  const linked = new Set(verified.flatMap((v) => [...v.links.keys()]));
+  const sections = skill.sections.map((s, i) => ({ ...s, url: verifiedRoute(s.url, linked), label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
   const pageTitleText = skill.sections.map((s, i) => (isPage(s.kind) ? verified[i]?.title : '')).find(Boolean);
 
   // Related links survive only when a verified source links to them; the URL
@@ -139,9 +154,9 @@ export function withServerText(skill: NewSkill, verified: Verified[]): NewSkill 
   // pageUrl is the canonical URL of the verified page it names, else of the
   // first page section; never the client's string.
   const here = pageKey(skill.pageUrl);
-  const pages = skill.sections.filter((s) => isPage(s.kind));
+  const pages = sections.filter((s) => isPage(s.kind));
   const page = pages.find((s) => pageKey(s.url) === here && s.kind === 'page-html') ?? pages.find((s) => pageKey(s.url) === here) ?? pages[0];
-  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(skill.sections[0].url, skill.sections[0].kind);
+  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(sections[0].url, sections[0].kind);
 
   return {
     ...skill,

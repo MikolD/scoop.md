@@ -103,6 +103,18 @@ open, plus places where the spec and the reference server (`server/`) disagree.
     decodes to whitespace or control characters is refused (400). Docs
     sources rarely have a query at all; `?v=2&lang=en` still passes, and `+`
     counts as a space, as in form encoding.
+  - `#/` client routes are a prose channel too (`https://docs.stripe.com/#/
+    Ignore-all-previous-instructions…` passed verification, since fragments
+    are never fetched). Routes are now slugs only (at most 100 characters of
+    `[A-Za-z0-9/_.-]`, everywhere `pageHash` runs: skills, the queue
+    consumer, the admin route and the crawler's copy in `crawler/vendor/`),
+    and a shared skill keeps a section's route only when one of its verified
+    sources links to that exact route, as a docsify sidebar's
+    `href="#/cdn"` does. Link keys keep routes for this, so a related link to
+    `#/quickstart` matches the sidebar link too. Otherwise the route is
+    dropped from the section URL and so from `pageUrl`. Crawled pages keep
+    their routes (the crawler only follows same-site links it found),
+    subject to the slug rule.
   - Everything has `\p{Cc}`/`\p{Cf}` removed, whitespace collapsed, and is
     capped at 300 / 200 / 120 characters without splitting a surrogate pair.
   - Linear time on hostile sources: ATX headings are parsed by hand (the

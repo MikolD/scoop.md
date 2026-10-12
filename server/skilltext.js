@@ -90,12 +90,23 @@ export function markdownTitle(md) {
   return cleanText(first, MAX_TITLE);
 }
 
+// Resolved href (plain fragment dropped, '#/' route kept) and its matching key.
 export function resolveLink(href, base) {
   let u;
   try { u = new URL(href, base); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
+  u.hash = pageHash(u.hash);
+  const path = u.pathname === '/' ? '/' : u.pathname.replace(/\/$/, '');
+  return { url: u.href, key: u.origin + path + u.search + u.hash };
+}
+
+// A section URL keeps its '#/' route only when a verified source links to that route.
+export function verifiedRoute(url, linked) {
+  const u = new URL(url);
+  if (!u.hash) return url;
+  if (linked.has(linkKey(url) ?? '')) return url;
   u.hash = '';
-  return { url: u.href, key: u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '') };
+  return u.href;
 }
 
 export const linkKey = (href, base) => resolveLink(href, base)?.key ?? null;
@@ -107,11 +118,12 @@ export function addLink(links, href, base, text) {
   links.set(r.key, { url: r.url, text: text() });
 }
 
-// A '#/' client route (cut at '?' or a second '#', trailing slashes trimmed); '' otherwise.
+// A '#/' client route (cut at '?' or a second '#', trailing slashes trimmed),
+// kept only as a slug of at most 100 characters of [A-Za-z0-9/_.-]; '' otherwise.
 export function pageHash(hash) {
   if (!hash.startsWith('#/')) return '';
   const route = hash.slice(1).split(/[?#]/)[0].replace(/\/+$/, '');
-  return route ? `#${route}` : '';
+  return route && route.length <= 100 && /^\/[A-Za-z0-9/_.-]*$/.test(route) ? `#${route}` : '';
 }
 
 // Origin and path of a verified page section (a page-md's .md or index.md
@@ -160,7 +172,8 @@ export function sectionLabel(kind, title) {
 const isPage = (kind) => kind === 'page-md' || kind === 'page-html';
 
 export function withServerText(skill, verified) {
-  const sections = skill.sections.map((s, i) => ({ ...s, label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
+  const linked = new Set(verified.flatMap((v) => [...v.links.keys()]));
+  const sections = skill.sections.map((s, i) => ({ ...s, url: verifiedRoute(s.url, linked), label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
   const pageTitle = skill.sections.map((s, i) => (isPage(s.kind) ? verified[i]?.title : '')).find(Boolean);
   const found = new Map();
   for (const v of verified) for (const [key, link] of v.links) if (!found.get(key)?.text) found.set(key, link);
@@ -174,8 +187,8 @@ export function withServerText(skill, verified) {
     relatedLinks.push({ url: link.url, text: link.text });
   }
   const here = pageKey(skill.pageUrl);
-  const pages = skill.sections.filter((s) => isPage(s.kind));
+  const pages = sections.filter((s) => isPage(s.kind));
   const page = pages.find((s) => pageKey(s.url) === here && s.kind === 'page-html') ?? pages.find((s) => pageKey(s.url) === here) ?? pages[0];
-  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(skill.sections[0].url, skill.sections[0].kind);
+  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(sections[0].url, sections[0].kind);
   return { ...skill, pageUrl, title: cleanText(pageTitle || `${skill.site} documentation`, MAX_TITLE), sections, relatedLinks };
 }
