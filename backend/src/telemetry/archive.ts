@@ -1,10 +1,13 @@
 // The permanent archive of raw telemetry in R2 (the TELEMETRY bucket,
 // scoop-telemetry-<env>): gzipped NDJSON, one object per consumer batch and
 // receive hour, at telemetry/raw/dt=YYYY-MM-DD/hour=HH/<uuid>.ndjson.gz.
-// Objects are never rewritten: a deletion request leaves a tombstone,
-// telemetry/tombstones/<install_id>.json, and every read through
-// readArchive() skips tombstoned install IDs. A redelivered queue message can
-// archive an event twice; dedupe on `id`.
+// Rows are archived without ip_hash (it exists only for abuse analysis and is
+// cleared from D1 after 30 days). Objects are never rewritten: a deletion
+// request leaves a tombstone, telemetry/tombstones/<install_id>.json, and every
+// read through readArchive() skips install IDs with a tombstone or a
+// telemetry_deletions row. A bucket lifecycle rule deletes raw objects after
+// 13 months (docs/TELEMETRY.md). A redelivered queue message can archive an
+// event twice; dedupe on `id`.
 
 import type { TelemetryRow } from './ingest.ts';
 
@@ -31,7 +34,7 @@ export async function writeArchive(bucket: R2Bucket, rows: TelemetryRow[]): Prom
   const keys: string[] = [];
   for (const group of byHour.values()) {
     const key = archiveKey(group[0].received_at);
-    const body = await gzip(group.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const body = await gzip(group.map(({ ip_hash: _, ...r }) => JSON.stringify(r)).join('\n') + '\n');
     await bucket.put(key, body, {
       httpMetadata: { contentType: 'application/x-ndjson', contentEncoding: 'gzip' },
       customMetadata: { events: String(group.length) },
@@ -66,9 +69,10 @@ export async function tombstones(bucket: R2Bucket): Promise<Set<string>> {
 export const MAX_ARCHIVE_DAYS = 31;
 export const MAX_ARCHIVE_OBJECTS = 5000;
 
-// Every archived row received between two UTC days (inclusive), tombstoned
-// install IDs left out, as NDJSON lines.
-export function readArchive(bucket: R2Bucket, from: string, to: string): ReadableStream<Uint8Array> {
+// Every archived row received between two UTC days (inclusive), deleted
+// install IDs (an R2 tombstone or a telemetry_deletions row in `db`) left
+// out, as NDJSON lines.
+export function readArchive(bucket: R2Bucket, from: string, to: string, db?: D1Database): ReadableStream<Uint8Array> {
   const enc = new TextEncoder();
   let keys: string[] | null = null;
   let skip: Set<string>;
@@ -77,6 +81,10 @@ export function readArchive(bucket: R2Bucket, from: string, to: string): Readabl
     async pull(controller) {
       if (!keys) {
         skip = await tombstones(bucket);
+        if (db) {
+          const { results } = await db.prepare('SELECT install_id FROM telemetry_deletions').all<{ install_id: string }>();
+          for (const r of results) skip.add(r.install_id);
+        }
         keys = [];
         for (let t = Date.parse(from); t <= Date.parse(to) && keys.length < MAX_ARCHIVE_OBJECTS; t += 86_400_000) {
           keys.push(...(await listAll(bucket, `${RAW_PREFIX}dt=${new Date(t).toISOString().slice(0, 10)}/`, MAX_ARCHIVE_OBJECTS)));

@@ -7,7 +7,7 @@ import type { Env } from '../env.ts';
 export const CACHE_BEST = 'public, max-age=30, s-maxage=60';
 export const CACHE_LIST = 'public, max-age=60, s-maxage=60';
 
-const ALLOW_HEADERS = 'content-type, x-scoop-install, x-scoop-client, authorization';
+const ALLOW_HEADERS = 'content-type, x-scoop-install, x-scoop-client, x-scoop-telemetry, authorization';
 const ALLOW_METHODS = 'GET, POST, DELETE, OPTIONS';
 
 export function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {

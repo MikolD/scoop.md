@@ -1,18 +1,19 @@
 // POST /v1/events and server-side API usage (docs/TELEMETRY.md). Ingestion
-// validates, rate limits, enriches (coarse geo from request.cf, a parsed
-// user-agent family, a daily-rotating salted hash of the IP subject) and
-// enqueues; the consumer (consumer.ts) does the D1 and R2 writes, so a slow
-// D1 never slows ingestion. The IP itself is never stored or enqueued.
+// validates, rate limits (per IP subject and per install), honours the
+// TELEMETRY_INGEST switch, enriches (coarse geo from request.cf, a parsed
+// user-agent family, HMAC of the IP subject under that day's random key) and
+// enqueues; the consumer (consumer.ts) applies the daily quotas and does the
+// D1 and R2 writes. The IP itself is never stored or enqueued.
 
 import { readJson, json } from '../api/http.ts';
 import { hmacHex, ipSubject } from '../db/ratelimit.ts';
 import { ApiError } from '../lib/errors.ts';
 import { sha256Hex, ulid } from '../lib/ids.ts';
 import type { Env } from '../env.ts';
-import { cleanText, MAX_EVENTS_BODY, publicHost, validateEvents } from './schema.ts';
+import { cleanText, LIFECYCLE, MAX_EVENTS_BODY, publicHost, validateEvents } from './schema.ts';
 import type { CleanBatch, CleanEvent } from './schema.ts';
 
-// One D1 row (src/telemetry/consumer.ts, migrations/0008_telemetry.sql).
+// One TELEMETRY_DB row (src/telemetry/consumer.ts, migrations-telemetry/0001_telemetry.sql).
 export interface TelemetryRow {
   id: string;
   source: 'extension' | 'site' | 'api';
@@ -124,22 +125,42 @@ export function outcomeOf(name: string, props: Record<string, unknown>): string 
   return null;
 }
 
-// Requests per minute, per install ID and per IP subject (EVENTS_LIMITER).
-async function limit(env: Env, key: string): Promise<void> {
-  if (!env.EVENTS_LIMITER || (await env.EVENTS_LIMITER.limit({ key })).success) return;
+// Requests per minute: 30 per IP subject (EVENTS_LIMITER), 10 per install ID (EVENTS_INSTALL_LIMITER).
+async function limit(limiter: RateLimit | undefined, key: string): Promise<void> {
+  if (!limiter || (await limiter.limit({ key })).success) return;
   const err = new ApiError('rate_limited', 'Too many events; try again later', 429);
   err.retryAfter = 60;
   throw err;
 }
 
+// The random key for a UTC day (TELEMETRY_DB day_keys), created on first use
+// and cached per isolate. The hourly cron deletes keys older than 48 hours:
+// after that, nobody (admins included) can link that day's hashes to an IP.
+const cache = new WeakMap<D1Database, Map<string, string>>();
+export async function dayKey(db: D1Database, day: string, now = new Date()): Promise<string> {
+  const dayKeys = cache.get(db) ?? new Map<string, string>();
+  cache.set(db, dayKeys);
+  const cached = dayKeys.get(day);
+  if (cached) return cached;
+  const fresh = [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, '0')).join('');
+  const [, got] = await db.batch([
+    db.prepare('INSERT OR IGNORE INTO day_keys (day, key, created_at) VALUES (?, ?, ?)').bind(day, fresh, now.toISOString()),
+    db.prepare('SELECT key FROM day_keys WHERE day = ?').bind(day),
+  ]);
+  const key = (got.results[0] as { key: string } | undefined)?.key ?? fresh;
+  if (dayKeys.size > 4) dayKeys.clear();
+  dayKeys.set(day, key);
+  return key;
+}
+
 export async function eventRows(batch: CleanBatch, req: Request, env: Env, ip: string, now: Date): Promise<TelemetryRow[]> {
   const day = isoDay(now.getTime());
   const subject = ipSubject(ip);
-  const salt = env.TELEMETRY_SALT;
   const ua = req.headers.get('user-agent');
-  const ipHash = salt ? (await hmacHex(salt, `ip:${day}:${subject}`)).slice(0, 32) : null;
+  const key = await dayKey(env.TELEMETRY_DB, day, now);
+  const ipHash = (await hmacHex(key, `ip:${subject}`)).slice(0, 32);
   // The website's cookieless visitor: same IP subject and user agent on the same UTC day.
-  const visitorId = batch.source === 'site' && salt ? (await hmacHex(salt, `visitor:${day}:${subject}:${ua ?? ''}`)).slice(0, 32) : null;
+  const visitorId = batch.source === 'site' ? (await hmacHex(key, `visitor:${subject}:${ua ?? ''}`)).slice(0, 32) : null;
   const geo = geoOf(req);
   const parsed = parseUa(ua);
   const c = batch.client;
@@ -182,20 +203,50 @@ export async function eventRows(batch: CleanBatch, req: Request, env: Env, ip: s
   }));
 }
 
+// TELEMETRY_INGEST: on (default), lifecycle (lifecycle events only) or off.
+export const ingestMode = (env: Env) => (env.TELEMETRY_INGEST === 'off' || env.TELEMETRY_INGEST === 'lifecycle' ? env.TELEMETRY_INGEST : 'on');
+
+// Queue messages stay well under the 128 KB limit: rows are split at about 90 KB.
+export const MAX_MESSAGE_BYTES = 90_000;
+export async function enqueue(queue: Queue<TelemetryMessage>, rows: TelemetryRow[]): Promise<number> {
+  const messages: { body: TelemetryMessage; contentType: 'json' }[] = [];
+  let cur: TelemetryRow[] = [];
+  let size = 0;
+  for (const r of rows) {
+    const bytes = new TextEncoder().encode(JSON.stringify(r)).length + 1;
+    if (cur.length && size + bytes > MAX_MESSAGE_BYTES) {
+      messages.push({ body: { v: 1, rows: cur }, contentType: 'json' });
+      cur = [];
+      size = 0;
+    }
+    cur.push(r);
+    size += bytes;
+  }
+  if (cur.length) messages.push({ body: { v: 1, rows: cur }, contentType: 'json' });
+  if (messages.length) await queue.sendBatch(messages);
+  return messages.length;
+}
+
 export async function ingestEvents(req: Request, env: Env, ip: string, now = new Date()): Promise<Response> {
   if (!originAllowed(req.headers.get('origin'), env)) throw new ApiError('forbidden', 'Events are accepted from the extension and scoop.md only', 403);
-  await limit(env, `ip:${ipSubject(ip)}`);
+  await limit(env.EVENTS_LIMITER, `ip:${ipSubject(ip)}`);
   const batch = validateEvents(await readJson(req, MAX_EVENTS_BODY), now.getTime());
-  if (batch.installId) await limit(env, `install:${batch.installId}`);
-  const rows = await eventRows(batch, req, env, ip, now);
-  if (rows.length) await env.TELEMETRY_QUEUE.send({ v: 1, rows } satisfies TelemetryMessage, { contentType: 'json' });
-  return json(202, { accepted: rows.length, dropped: batch.dropped });
+  if (batch.installId) await limit(env.EVENTS_INSTALL_LIMITER, `install:${batch.installId}`);
+  const mode = ingestMode(env);
+  if (mode === 'off') return json(202, { accepted: 0, dropped: batch.events.length + batch.dropped });
+  const events = mode === 'lifecycle' ? batch.events.filter((e) => LIFECYCLE.has(e.name)) : batch.events;
+  const rows = await eventRows({ ...batch, events }, req, env, ip, now);
+  if (rows.length) await enqueue(env.TELEMETRY_QUEUE, rows);
+  return json(202, { accepted: rows.length, dropped: batch.dropped + batch.events.length - rows.length });
 }
 
 // One API request as a usage event: route, site, query text, hit or miss,
-// result count, latency, X-Scoop-Client and country. No IP hash, install ID
-// or session: API callers aren't tracked. TELEMETRY_API_SAMPLE (0–1, default 1)
-// is the share of requests recorded.
+// result count, latency, X-Scoop-Client and country, timed to the hour. No IP
+// hash, install ID, session, region, network or user agent: API callers aren't
+// tracked. Nothing for an extension with usage statistics off
+// (X-Scoop-Telemetry: off), or while TELEMETRY_INGEST isn't on.
+// TELEMETRY_API_SAMPLE (0–1, default 1) is the share of requests recorded; the
+// consumer caps API rows per day (TELEMETRY_API_DAILY_MAX).
 export async function recordApiUsage(
   env: Env,
   req: Request,
@@ -205,7 +256,8 @@ export async function recordApiUsage(
   random = Math.random,
 ): Promise<void> {
   const name = API_ROUTES[route];
-  if (!name || !env.TELEMETRY_QUEUE) return;
+  if (!name || !env.TELEMETRY_QUEUE || ingestMode(env) !== 'on') return;
+  if ((req.headers.get('x-scoop-telemetry') ?? '').toLowerCase() === 'off') return;
   const sample = env.TELEMETRY_API_SAMPLE === undefined ? 1 : Number(env.TELEMETRY_API_SAMPLE);
   if (!(sample > 0) || random() >= sample) return;
   const u = o.usage;
@@ -219,8 +271,8 @@ export async function recordApiUsage(
   if (u.results !== undefined) props.results = u.results;
   if (hit !== undefined) props.hit = hit;
   if (client) props.client = client;
-  const parsed = parseUa(req.headers.get('user-agent'));
-  const at = now.toISOString();
+  const hour = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000);
+  const at = hour.toISOString();
   const row: TelemetryRow = {
     id: `api_${ulid(now.getTime())}`,
     source: 'api',
@@ -243,9 +295,12 @@ export async function recordApiUsage(
     arch: null,
     locale: null,
     timezone: null,
-    ua_browser: parsed.browser,
-    ua_os: parsed.os,
-    ...geoOf(req),
+    ua_browser: null,
+    ua_os: null,
+    country: geoOf(req).country,
+    region: null,
+    continent: null,
+    as_org: null,
     ip_hash: null,
   };
   await env.TELEMETRY_QUEUE.send({ v: 1, rows: [row] } satisfies TelemetryMessage, { contentType: 'json' });

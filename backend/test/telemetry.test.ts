@@ -10,11 +10,12 @@ import { registerHooks } from 'node:module';
 import type { Env } from '../src/env.ts';
 import { handleAdmin } from '../src/admin/app.ts';
 import { gunzip, readArchive, RAW_PREFIX } from '../src/telemetry/archive.ts';
-import { handleTelemetryBatch, pruneEvents } from '../src/telemetry/consumer.ts';
+import { handleTelemetryBatch, pruneTelemetry } from '../src/telemetry/consumer.ts';
 import { ingestEvents, parseUa, recordApiUsage } from '../src/telemetry/ingest.ts';
 import type { TelemetryMessage } from '../src/telemetry/ingest.ts';
 import { cleanPath, MAX_EVENTS, validateEvents } from '../src/telemetry/schema.ts';
 import { csvCell } from '../src/telemetry/queries.ts';
+import { hmacHex } from '../src/db/ratelimit.ts';
 import { fakeD1, fakeR2 } from './helpers.ts';
 
 registerHooks({
@@ -37,29 +38,36 @@ const CF = { country: 'GH', region: 'Greater Accra', continent: 'AF', asOrganiza
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 const CLIENT = { extVersion: '0.3.0', browser: 'Google Chrome', browserVersion: '130', os: 'mac', platformArch: 'arm', locale: 'en-GB', timezone: 'Africa/Accra' };
 
+// raw is TELEMETRY_DB (migrations-telemetry/); the library's DB is a separate database.
 function setup(over: Partial<Env> = {}) {
-  const { d1, raw } = fakeD1();
+  const { d1, raw } = fakeD1('migrations-telemetry');
   const telemetry = fakeR2();
   const sent: TelemetryMessage[] = [];
+  const batches: number[] = [];
   const keys: string[] = [];
   let allowed = Infinity;
+  const limiter = { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: keys.filter((k) => k === key).length <= allowed }; } };
   const env = {
-    DB: d1,
+    DB: fakeD1().d1,
+    TELEMETRY_DB: d1,
     SKILLS: fakeR2().r2,
     TELEMETRY: telemetry.r2,
-    TELEMETRY_QUEUE: { send: async (m: TelemetryMessage) => { sent.push(structuredClone(m)); } },
-    EVENTS_LIMITER: { limit: async ({ key }: { key: string }) => { keys.push(key); return { success: keys.filter((k) => k === key).length <= allowed }; } },
+    TELEMETRY_QUEUE: {
+      send: async (m: TelemetryMessage) => { sent.push(structuredClone(m)); },
+      sendBatch: async (ms: { body: TelemetryMessage }[]) => { batches.push(ms.length); for (const m of ms) sent.push(structuredClone(m.body)); },
+    },
+    EVENTS_LIMITER: limiter,
+    EVENTS_INSTALL_LIMITER: limiter,
     READ_LIMITER: { limit: async () => ({ success: true }) },
     ADMIN_AUTH_LIMITER: { limit: async () => ({ success: true }) },
     ASSETS: { fetch: async () => new Response('not found', { status: 404 }) },
-    TELEMETRY_SALT: 'test-salt',
     RATE_KEY: 'rk',
     ADMIN_UI_USER: 'admin',
     ADMIN_UI_PASSCODE: ADMIN_PASS,
     ENVIRONMENT: 'production',
     ...over,
   } as unknown as Env;
-  return { env, raw, sent, keys, telemetry, limitTo: (n: number) => { allowed = n; } };
+  return { env, raw, sent, batches, keys, telemetry, limitTo: (n: number) => { allowed = n; } };
 }
 
 function eventsReq(body: unknown, headers: Record<string, string> = {}) {
@@ -162,13 +170,17 @@ test('POST /v1/events: 202, enqueued with geo, UA family and a daily IP hash; th
   assert.match(a.ip_hash!, /^[0-9a-f]{32}$/);
   assert.equal(a.received_at, NOW.toISOString());
   assert.ok(!JSON.stringify(s.sent).includes(IP), 'no raw IP');
-  // Same IP, next day: a different hash.
+  // The hash is HMAC(that day's random key, IP subject); the key lives in TELEMETRY_DB.
+  const key = (s.raw.prepare('SELECT key FROM day_keys WHERE day = ?').get('2026-10-12') as { key: string }).key;
+  assert.match(key, /^[0-9a-f]{64}$/);
+  assert.equal((await hmacHex(key, `ip:${IP}`)).slice(0, 32), a.ip_hash);
+  // Same IP, next day: a new key, a different hash.
   await ingestEvents(eventsReq(envelope([ev('popup_open', {}, 9, T + 86_400_000 - 60_000)])), s.env, IP, new Date(T + 86_400_000));
   assert.notEqual(s.sent[1].rows[0].ip_hash, a.ip_hash);
-  // Without the salt nothing is hashed.
-  const bare = setup({ TELEMETRY_SALT: undefined });
-  await post(bare.env, envelope([ev('popup_open')]));
-  assert.equal(bare.sent[0].rows[0].ip_hash, null);
+  assert.equal((s.raw.prepare('SELECT COUNT(*) AS n FROM day_keys').get() as { n: number }).n, 2);
+  // Two days on, the first day's key is gone: its hashes can't be linked to an IP any more.
+  await pruneTelemetry(s.env.TELEMETRY_DB, new Date(T + 2 * 86_400_000));
+  assert.deepEqual(s.raw.prepare('SELECT day FROM day_keys').all().map((r) => (r as { day: string }).day), ['2026-10-13']);
 });
 
 test('POST /v1/events: rate limited per install and per IP subject; body and origin caps', async () => {
@@ -296,16 +308,21 @@ test('consumer: a message that is not a telemetry message is dropped; an R2 fail
   assert.equal((s.raw.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n, 0);
 });
 
-test('pruning: raw events older than 180 days leave D1; rollups and install days stay', async () => {
+test('pruning: raw events past 180 days leave D1, ip_hash goes after 30; rollups and install days stay', async () => {
   const s = setup();
   await post(s.env, envelope([ev('popup_open')]));
   await consume(s);
   s.raw.exec(`UPDATE events SET received_at = '2026-01-01T00:00:00.000Z'`);
   await post(s.env, envelope([ev('popup_open', {}, 2)]));
   await consume(s);
-  assert.equal(await pruneEvents(s.env.DB, NOW), 1);
+  await post(s.env, envelope([ev('popup_open', {}, 3)]));
+  await consume(s);
+  s.raw.exec(`UPDATE events SET received_at = '2026-09-01T00:00:00.000Z' WHERE seq = 3`);
+  assert.deepEqual(await pruneTelemetry(s.env.TELEMETRY_DB, NOW), { events: 1, ipHashes: 1 });
+  assert.deepEqual(s.raw.prepare('SELECT seq, ip_hash IS NOT NULL AS hashed FROM events ORDER BY seq').all().map((r) => ({ ...r })), [{ seq: 2, hashed: 1 }, { seq: 3, hashed: 0 }]);
+  s.raw.exec(`DELETE FROM events WHERE seq = 3`);
   assert.equal((s.raw.prepare('SELECT COUNT(*) AS n FROM events').get() as { n: number }).n, 1);
-  assert.equal((s.raw.prepare(`SELECT SUM(count) AS n FROM events_daily`).get() as { n: number }).n, 2);
+  assert.equal((s.raw.prepare(`SELECT SUM(count) AS n FROM events_daily`).get() as { n: number }).n, 3);
   assert.equal((s.raw.prepare('SELECT COUNT(*) AS n FROM install_days').get() as { n: number }).n, 1);
 });
 
@@ -403,7 +420,8 @@ test('admin telemetry: overview, sites, installs, retention, platforms, geograph
   try {
     const o = await admin(s.env, '/api/telemetry/overview?days=30');
     assert.equal(o.status, 200);
-    assert.deepEqual(o.body.installs, { total: 2, uninstalled: 0, net: 2, optedOut: 0 });
+    assert.deepEqual(o.body.installs, { total: 2, installed: 2, uninstalled: 0, net: 2, optedOut: 0, unknownUninstalls: 0 });
+    assert.equal(o.body.rawFrom, '2026-09-13');
     assert.equal(o.body.funnel.events.popupOpen, 2);
     assert.equal(o.body.funnel.events.scooped, 2);
     assert.equal(o.body.funnel.events.copied, 1);
@@ -432,7 +450,8 @@ test('admin telemetry: overview, sites, installs, retention, platforms, geograph
     const ret = await admin(s.env, '/api/telemetry/retention?weeks=4');
     // 2026-10-10 is a Saturday (week of Monday 10-05), 10-12 a Monday: two cohorts.
     assert.deepEqual(ret.body.cohorts.map((c: { cohort: string; size: number }) => [c.cohort, c.size]), [['2026-10-05', 1], ['2026-10-12', 1]]);
-    assert.deepEqual(ret.body.cohorts[0].active.slice(0, 3), [1, 1, 0], 'active in its first week and the next');
+    // Active days are by received day: everything arrived on 10-12, the second week of the first cohort.
+    assert.deepEqual(ret.body.cohorts[0].active.slice(0, 3), [0, 1, 0]);
     assert.deepEqual(ret.body.cohorts[1].active.slice(0, 2), [1, 0]);
     assert.deepEqual(ret.body.cohorts.map((c: { elapsed: number }) => c.elapsed), [1, 0]);
 
@@ -520,4 +539,173 @@ test('deletion: an install ID leaves D1, is refused from then on, and is skipped
   const rows = text.trim().split('\n').map((l) => JSON.parse(l));
   assert.ok(rows.length > 0);
   assert.ok(rows.every((r) => r.install_id !== ID));
+});
+
+// ---- Flood limits, switches and privacy fixes ------------------------------------
+
+const row = (over: Partial<Record<string, unknown>> = {}) => ({
+  id: crypto.randomUUID(), source: 'extension', name: 'popup_open', ts: NOW.toISOString(), day: '2026-10-12', received_at: NOW.toISOString(),
+  install_id: ID, session_id: 's', visitor_id: null, seq: 1, site: null, path: null, outcome: null, props: '{}', ext_version: '0.3.0',
+  browser: null, browser_version: null, os: null, arch: null, locale: null, timezone: null, ua_browser: null, ua_os: null,
+  country: 'GH', region: null, continent: null, as_org: null, ip_hash: 'iphash', ...over,
+}) as unknown as import('../src/telemetry/ingest.ts').TelemetryRow;
+
+test('quotas: 20 new installs per IP hash, 2,000 events per install, 20,000 per IP hash, the global ceiling keeps lifecycle only, API rows capped', async () => {
+  const { quota, QUOTAS } = await import('../src/telemetry/consumer.ts');
+  const fresh = () => ({ counts: new Map<string, number>(), ipInstalls: new Map<string, Set<string>>() });
+  const limits = { dailyMax: 1_000_000, apiDailyMax: 3 };
+
+  const installs = Array.from({ length: 25 }, () => row({ install_id: crypto.randomUUID() }));
+  let kept = quota(installs, fresh(), limits);
+  assert.equal(kept.rows.length, QUOTAS.newInstallsPerIp);
+  assert.equal(kept.dropped, 5);
+
+  const one = Array.from({ length: QUOTAS.eventsPerInstall + 10 }, () => row());
+  kept = quota(one, fresh(), limits);
+  assert.equal(kept.rows.length, QUOTAS.eventsPerInstall);
+
+  const state = fresh();
+  state.counts.set('2026-10-12|ip_events|iphash', QUOTAS.eventsPerIp - 1);
+  kept = quota([row(), row()], state, limits);
+  assert.equal(kept.rows.length, 1);
+  assert.equal(kept.deltas.get('2026-10-12|ip_events|iphash'), 1);
+
+  const ceiling = fresh();
+  ceiling.counts.set('2026-10-12|all_events|', 5);
+  kept = quota([row({ name: 'scoop_result' }), row({ name: 'install' }), row({ name: 'active_daily' })], ceiling, { dailyMax: 5, apiDailyMax: 3 });
+  assert.deepEqual(kept.rows.map((r) => r.name), ['install', 'active_daily']);
+
+  kept = quota(Array.from({ length: 5 }, () => row({ source: 'api', name: 'api_best', install_id: null, ip_hash: null })), fresh(), limits);
+  assert.equal(kept.rows.length, 3);
+});
+
+test('quotas through the consumer: counters persist in TELEMETRY_DB across batches', async () => {
+  const s = setup({ TELEMETRY_DAILY_MAX: '3' } as Partial<Env>);
+  await post(s.env, envelope([ev('popup_open', {}, 1), ev('popup_open', {}, 2)]));
+  await consume(s);
+  await post(s.env, envelope([ev('popup_open', {}, 3), ev('popup_open', {}, 4), ev('active_daily', {}, 5)]));
+  await consume(s);
+  assert.deepEqual(s.raw.prepare('SELECT seq FROM events ORDER BY seq').all().map((r) => (r as { seq: number }).seq), [1, 2, 3, 5]);
+  assert.equal((s.raw.prepare(`SELECT count FROM quota_counters WHERE kind = 'all_events'`).get() as { count: number }).count, 4);
+  assert.equal((s.raw.prepare(`SELECT COUNT(*) AS n FROM ip_installs`).get() as { n: number }).n, 1);
+});
+
+test('TELEMETRY_INGEST: off accepts nothing, lifecycle keeps lifecycle events only; API usage only when on', async () => {
+  const off = setup({ TELEMETRY_INGEST: 'off' } as Partial<Env>);
+  assert.deepEqual((await post(off.env, envelope([ev('install', { reason: 'install' }), ev('popup_open', {}, 2)]))).body, { accepted: 0, dropped: 2 });
+  assert.equal(off.sent.length, 0);
+  const life = setup({ TELEMETRY_INGEST: 'lifecycle' } as Partial<Env>);
+  const r = await post(life.env, envelope([ev('install', { reason: 'install' }), ev('scoop_start', {}, 2), ev('telemetry_opt_out', {}, 3)]));
+  assert.deepEqual(r.body, { accepted: 2, dropped: 1 });
+  assert.deepEqual(life.sent[0].rows.map((x) => x.name), ['install', 'telemetry_opt_out']);
+  await recordApiUsage(life.env, new Request('https://api.scoop.md/v1/search'), '/v1/search', { status: 200, latencyMs: 1, usage: {} }, NOW);
+  assert.equal(life.sent.length, 1, 'no API rows unless on');
+});
+
+test('the install limiter is its own binding; requests are split into queue messages under 90 KB', async () => {
+  const s = setup();
+  const installKeys: string[] = [];
+  (s.env as unknown as Record<string, unknown>).EVENTS_INSTALL_LIMITER = { limit: async ({ key }: { key: string }) => { installKeys.push(key); return { success: installKeys.length <= 1 }; } };
+  assert.equal((await post(s.env, envelope([ev('popup_open')]))).status, 202);
+  assert.equal((await post(s.env, envelope([ev('popup_open', {}, 2)]))).status, 429);
+  assert.deepEqual(installKeys, [`install:${ID}`, `install:${ID}`]);
+
+  const t = setup();
+  const long = '/docs/' + 'segment/'.repeat(36);
+  const events = Array.from({ length: 100 }, (_, i) => ev('error', { where: 'x'.repeat(40), code: 'c'.repeat(60), message: 'word '.repeat(40) }, i));
+  const big = Array.from({ length: 100 }, (_, i) => ev('scoop_result', { site: 'docs.stripe.com', path: long, outcome: 'copied_ready', sourceKinds: ['page-md', 'llms', 'llms-full', 'page-html'] }, i));
+  for (const body of [envelope(events), envelope(big, { sessionId: 'sess-2' })]) assert.equal((await post(t.env, body)).status, 202);
+  assert.ok(t.batches.every((n) => n >= 1));
+  for (const m of t.sent) assert.ok(JSON.stringify(m).length < 128_000, `message is ${JSON.stringify(m).length} bytes`);
+  assert.equal(t.sent.reduce((n, m) => n + m.rows.length, 0), 200);
+});
+
+test('the R2 archive has no ip_hash; D1 keeps it (until 30 days)', async () => {
+  const s = setup();
+  await post(s.env, envelope([ev('popup_open')]));
+  await consume(s);
+  const [key] = [...s.telemetry.objects.keys()].filter((k) => k.startsWith(RAW_PREFIX));
+  const line = JSON.parse((await gunzip(s.telemetry.objects.get(key) as Uint8Array)).trim());
+  assert.ok(!('ip_hash' in line));
+  assert.ok((s.raw.prepare('SELECT ip_hash FROM events').get() as { ip_hash: string }).ip_hash);
+});
+
+test('opt-out state: an older opt-in arriving later does not undo a newer opt-out', async () => {
+  const s = setup();
+  await post(s.env, envelope([ev('telemetry_opt_out', {}, 1, T - 60_000)], { sessionId: 'b' }));
+  await consume(s);
+  await post(s.env, envelope([ev('telemetry_opt_in', {}, 1, T - 120_000)], { sessionId: 'a' }));
+  await consume(s);
+  const row = s.raw.prepare('SELECT opted_out, opted_changed_at FROM installs').get() as Record<string, unknown>;
+  assert.deepEqual({ ...row }, { opted_out: 1, opted_changed_at: new Date(T - 60_000).toISOString() });
+});
+
+test('an uninstall for an unknown install ID creates no installs row; it is counted apart', async () => {
+  const s = setup();
+  await post(s.env, { source: 'site', sessionId: 'bye', events: [ev('uninstall', { installId: ID2, version: '0.3.0' })] }, { origin: 'https://scoop.md' });
+  await consume(s);
+  assert.equal((s.raw.prepare('SELECT COUNT(*) AS n FROM installs').get() as { n: number }).n, 0);
+  assert.deepEqual({ ...(s.raw.prepare('SELECT install_id, known FROM uninstalls').get() as object) }, { install_id: ID2, known: 0 });
+});
+
+test('install days use the day the server received the event, not the client clock', async () => {
+  const s = setup();
+  await post(s.env, envelope([ev('popup_open', {}, 1, T + 5 * 86_400_000)]));
+  await consume(s);
+  assert.deepEqual(s.raw.prepare('SELECT day FROM install_days').all().map((r) => (r as { day: string }).day), ['2026-10-12']);
+});
+
+test('API usage: X-Scoop-Telemetry: off records nothing; rows keep the country only, timed to the hour', async () => {
+  const s = setup();
+  const req = (h: Record<string, string> = {}) => {
+    const r = new Request('https://api.scoop.md/v1/skills/best?site=react.dev', { headers: { 'user-agent': UA, ...h } });
+    Object.defineProperty(r, 'cf', { value: CF });
+    return r;
+  };
+  await recordApiUsage(s.env, req({ 'x-scoop-telemetry': 'off' }), '/v1/skills/best', { status: 200, latencyMs: 3, usage: { site: 'react.dev', hit: true } }, NOW);
+  assert.equal(s.sent.length, 0);
+  await recordApiUsage(s.env, req(), '/v1/skills/best', { status: 200, latencyMs: 3, usage: { site: 'react.dev', hit: true } }, NOW);
+  const r = s.sent[0].rows[0];
+  assert.equal(r.country, 'GH');
+  assert.deepEqual([r.region, r.continent, r.as_org, r.ua_browser, r.ua_os], [null, null, null, null, null]);
+  assert.equal(r.ts, '2026-10-12T10:00:00.000Z');
+  assert.equal(r.received_at, '2026-10-12T10:00:00.000Z');
+});
+
+test('paths: secret-looking segments are redacted and hash routes cut on the server too; error text loses emails and tokens', () => {
+  assert.equal(cleanPath('/document/d/1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms/edit'), '/document/d/:id/edit');
+  assert.equal(cleanPath('/docs/getting-started-with-v2-api'), '/docs/getting-started-with-v2-api');
+  assert.equal(cleanPath('/#/guide&x=1'), '/#/guide');
+  assert.equal(cleanPath('/#/guide#section'), '/#/guide');
+  const b = validateEvents(envelope([ev('error', { where: 'scoop', code: 'E', message: 'mail jane@acme.com token ghp_AbCdEfGhIjKlMnOpQrStUvWxYz1234' })]), T);
+  assert.equal(b.events[0].props.message, 'mail <email> token <token>');
+});
+
+test('deletion: the tombstone is written first, and archive reads also skip IDs deleted in D1 only', async () => {
+  const s = setup();
+  await post(s.env, envelope([ev('popup_open')]));
+  await consume(s);
+  const order: string[] = [];
+  const db = s.env.TELEMETRY_DB;
+  const failing = {
+    prepare: (sql: string) => db.prepare(sql),
+    batch: async () => { order.push('d1'); throw new Error('d1 down'); },
+  } as unknown as D1Database;
+  const r2 = { put: async (key: string, value: string) => { order.push('r2'); await s.env.TELEMETRY.put(key, value); } } as unknown as R2Bucket;
+  const { deleteInstall } = await import('../src/telemetry/queries.ts');
+  await assert.rejects(deleteInstall(failing, r2, ID, NOW), /d1 down/);
+  assert.deepEqual(order, ['r2', 'd1']);
+
+  const t = setup();
+  await post(t.env, envelope([ev('popup_open')]));
+  await consume(t);
+  t.raw.prepare('INSERT INTO telemetry_deletions (install_id, deleted_at) VALUES (?, ?)').run(ID, NOW.toISOString());
+  let text = '';
+  const reader = readArchive(t.env.TELEMETRY, '2026-10-12', '2026-10-12', t.env.TELEMETRY_DB).getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    text += new TextDecoder().decode(value);
+  }
+  assert.equal(text, '');
 });

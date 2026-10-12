@@ -8,6 +8,11 @@ const DAY_MS = 86_400_000;
 export const dayOf = (now: Date, back = 0) => new Date(now.getTime() - back * DAY_MS).toISOString().slice(0, 10);
 const num = (v: unknown) => Number(v ?? 0);
 
+// Raw events are pruned after 180 days: figures read from `events` cover at
+// most that, whatever the window (the UI says so). Rollups cover the window.
+export const RAW_DAYS = 180;
+const rawFrom = (now: Date, since: string) => (since > dayOf(now, RAW_DAYS - 1) ? since : dayOf(now, RAW_DAYS - 1));
+
 type Row = Record<string, unknown>;
 
 async function all<T = Row>(db: D1Database, sql: string, ...params: (string | number | null)[]): Promise<T[]> {
@@ -24,10 +29,12 @@ export async function overview(db: D1Database, days: number, now = new Date(Date
   const since = dayOf(now, days - 1);
   const today = dayOf(now);
   const [installs, uninstalls, dau, totals, active, funnel, funnelInstalls, library, shares, sizes] = await Promise.all([
-    all(db, `SELECT substr(first_seen, 1, 10) AS day, COUNT(*) AS n FROM installs WHERE first_seen >= ? GROUP BY day ORDER BY day`, since),
-    all(db, `SELECT substr(uninstalled_at, 1, 10) AS day, COUNT(*) AS n FROM installs WHERE uninstalled_at >= ? GROUP BY day ORDER BY day`, since),
+    // New installs by their install event (not first contact: existing users updating to 0.3.0 aren't new).
+    all(db, `SELECT substr(installed_at, 1, 10) AS day, COUNT(*) AS n FROM installs WHERE installed_at >= ? GROUP BY day ORDER BY day`, since),
+    all(db, `SELECT substr(uninstalled_at, 1, 10) AS day, SUM(known) AS n, SUM(known = 0) AS unknown FROM uninstalls WHERE uninstalled_at >= ? GROUP BY day ORDER BY day`, since),
     all(db, `SELECT day, COUNT(*) AS n FROM install_days WHERE day >= ? GROUP BY day ORDER BY day`, since),
-    first(db, `SELECT COUNT(*) AS installs, COUNT(uninstalled_at) AS uninstalled, SUM(opted_out) AS opted_out FROM installs`),
+    first(db, `SELECT COUNT(*) AS installs, COUNT(installed_at) AS installed, COUNT(uninstalled_at) AS uninstalled, SUM(opted_out) AS opted_out,
+      (SELECT COUNT(*) FROM uninstalls WHERE known = 0) AS unknown_uninstalls FROM installs`),
     first(db, `SELECT
         (SELECT COUNT(*) FROM install_days WHERE day = ?1) AS dau,
         (SELECT COUNT(DISTINCT install_id) FROM install_days WHERE day >= ?2) AS wau,
@@ -58,8 +65,16 @@ export async function overview(db: D1Database, days: number, now = new Date(Date
   return {
     days,
     since,
+    rawFrom: rawFrom(now, since),
     perDay: { installs, uninstalls, active: dau },
-    installs: { total: num(t.installs), uninstalled: num(t.uninstalled), net: num(t.installs) - num(t.uninstalled), optedOut: num(t.opted_out) },
+    installs: {
+      total: num(t.installs),
+      installed: num(t.installed),
+      uninstalled: num(t.uninstalled),
+      net: num(t.installs) - num(t.uninstalled),
+      optedOut: num(t.opted_out),
+      unknownUninstalls: num(t.unknown_uninstalls),
+    },
     active: { dau: num(active.dau), wau: num(active.wau), mau: num(active.mau) },
     funnel: {
       events: { popupOpen: count('popup_open'), scooped: count('scoop_result', 'copied_ready'), copied: count('copy'), voted: count('vote') },
@@ -117,7 +132,7 @@ export async function siteDetail(db: D1Database, site: string, days: number, now
       AND (name IN ('error', 'report') OR outcome IN ('error', 'empty', 'not_shared'))
       ORDER BY ts DESC LIMIT 50`, site, since),
   ]);
-  return { site, days, since, summary, perDay, paths, outcomes, shares, sources, queries, best, problems: recent };
+  return { site, days, since, rawFrom: rawFrom(now, since), summary, perDay, paths, outcomes, shares, sources, queries, best, problems: recent };
 }
 
 const STATUS: Record<string, string> = {
@@ -151,13 +166,14 @@ export async function installDetail(db: D1Database, installId: string) {
   return { install, activeDays: num(days.n), firstDay: days.first_day ?? null, lastDay: days.last_day ?? null, timeline, sites };
 }
 
-// Weekly cohorts by first-seen week (Monday) × weeks since, counted from install_days.
+// Weekly cohorts by install week (Monday; the install event, so installs from
+// before telemetry are left out) × weeks since, counted from install_days.
 export async function retention(db: D1Database, weeks: number, now = new Date(Date.now())) {
   const since = dayOf(now, weeks * 7);
-  const cohort = `date(first_seen, '-6 days', 'weekday 1')`;
+  const cohort = `date(installed_at, '-6 days', 'weekday 1')`;
   const [sizes, cells] = await Promise.all([
-    all<{ cohort: string; n: number }>(db, `SELECT ${cohort} AS cohort, COUNT(*) AS n FROM installs WHERE first_seen >= ? GROUP BY cohort ORDER BY cohort`, since),
-    all<{ cohort: string; week: number; n: number }>(db, `WITH c AS (SELECT install_id, ${cohort} AS cohort FROM installs WHERE first_seen >= ?)
+    all<{ cohort: string; n: number }>(db, `SELECT ${cohort} AS cohort, COUNT(*) AS n FROM installs WHERE installed_at >= ? GROUP BY cohort ORDER BY cohort`, since),
+    all<{ cohort: string; week: number; n: number }>(db, `WITH c AS (SELECT install_id, ${cohort} AS cohort FROM installs WHERE installed_at >= ?)
       SELECT c.cohort, CAST((julianday(d.day) - julianday(c.cohort)) / 7 AS INTEGER) AS week, COUNT(DISTINCT d.install_id) AS n
       FROM c JOIN install_days d ON d.install_id = c.install_id GROUP BY 1, 2 ORDER BY 1, 2`, since),
   ]);
@@ -185,7 +201,7 @@ export async function platforms(db: D1Database, days: number, now = new Date(Dat
     all(db, `SELECT COALESCE(ua_browser, '') AS value, COALESCE(ua_os, '') AS os, COUNT(*) AS n FROM events WHERE day >= ? AND source = 'site' AND name = 'page_view'
       GROUP BY 1, 2 ORDER BY n DESC LIMIT 30`, since),
   ]);
-  return { days, since, versions, browsers, browserVersions, oses, arches, locales, timezones, adoption, websiteBrowsers: uaBrowsers };
+  return { days, since, rawFrom: rawFrom(now, since), versions, browsers, browserVersions, oses, arches, locales, timezones, adoption, websiteBrowsers: uaBrowsers };
 }
 
 export async function geography(db: D1Database, days: number, now = new Date(Date.now())) {
@@ -199,7 +215,7 @@ export async function geography(db: D1Database, days: number, now = new Date(Dat
     all(db, `SELECT COALESCE(continent, '') AS continent, COALESCE(as_org, '') AS network, COUNT(DISTINCT install_id) AS installs
       FROM events WHERE day >= ? AND source = 'extension' GROUP BY 1, 2 ORDER BY installs DESC LIMIT 50`, since),
   ]);
-  return { days, since, installs, events, website, networks };
+  return { days, since, rawFrom: rawFrom(now, since), installs, events, website, networks };
 }
 
 export async function errors(db: D1Database, days: number, now = new Date(Date.now())) {
@@ -214,7 +230,7 @@ export async function errors(db: D1Database, days: number, now = new Date(Date.n
     all(db, `SELECT ts, install_id, ext_version, json_extract(props, '$.where') AS where_, outcome AS code, json_extract(props, '$.message') AS message
       FROM events WHERE day >= ? AND name = 'error' ORDER BY ts DESC LIMIT 50`, since),
   ]);
-  return { days, since, byCode, perDay, scoopFailures: failures, recent };
+  return { days, since, rawFrom: rawFrom(now, since), byCode, perDay, scoopFailures: failures, recent };
 }
 
 export async function apiUsage(db: D1Database, days: number, now = new Date(Date.now())) {
@@ -236,7 +252,7 @@ export async function apiUsage(db: D1Database, days: number, now = new Date(Date
     all(db, `SELECT COALESCE(json_extract(props, '$.client'), '') AS client, COUNT(*) AS n FROM events WHERE day >= ? AND source = 'api'
       GROUP BY 1 ORDER BY n DESC LIMIT 30`, since),
   ]);
-  return { days, since, routes, queries, zeroResults: zero, packages, best, clients };
+  return { days, since, rawFrom: rawFrom(now, since), routes, queries, zeroResults: zero, packages, best, clients };
 }
 
 export async function website(db: D1Database, days: number, now = new Date(Date.now())) {
@@ -255,7 +271,7 @@ export async function website(db: D1Database, days: number, now = new Date(Date.
     all(db, `SELECT json_extract(props, '$.target') AS target, COALESCE(path, '') AS path, COUNT(*) AS n FROM events WHERE day >= ? AND name = 'cta_click'
       GROUP BY 1, 2 ORDER BY n DESC LIMIT 50`, since),
   ]);
-  return { days, since, perDay, paths, referrers, utm, bye: { views: num(uninstalls.bye_views), uninstalls: num(uninstalls.uninstalls), reasons }, ctas };
+  return { days, since, rawFrom: rawFrom(now, since), perDay, paths, referrers, utm, bye: { views: num(uninstalls.bye_views), uninstalls: num(uninstalls.uninstalls), reasons }, ctas };
 }
 
 // ---- Export ------------------------------------------------------------------
@@ -308,16 +324,19 @@ export function exportTable(db: D1Database, table: string, from: string, to: str
 // export skip it. Rollups hold no install IDs and stay.
 export async function deleteInstall(db: D1Database, bucket: R2Bucket, installId: string, now = new Date(Date.now())) {
   const at = now.toISOString();
+  // The tombstone first: if anything after it fails, archive exports already skip the ID.
+  await writeTombstone(bucket, installId, at);
   const eventsDeleted = num((await first(db, 'SELECT COUNT(*) AS n FROM events WHERE install_id = ?', installId)).n);
   await db.batch([
     db.prepare('DELETE FROM events WHERE install_id = ?').bind(installId),
     db.prepare('DELETE FROM installs WHERE install_id = ?').bind(installId),
     db.prepare('DELETE FROM install_days WHERE install_id = ?').bind(installId),
+    db.prepare('DELETE FROM uninstalls WHERE install_id = ?').bind(installId),
+    db.prepare('DELETE FROM ip_installs WHERE install_id = ?').bind(installId),
     db
       .prepare('INSERT INTO telemetry_deletions (install_id, deleted_at, events_deleted) VALUES (?1, ?2, ?3) ON CONFLICT (install_id) DO UPDATE SET deleted_at = ?2, events_deleted = events_deleted + ?3')
       .bind(installId, at, eventsDeleted),
   ]);
-  await writeTombstone(bucket, installId, at);
   return { installId, deletedAt: at, eventsDeleted, tombstone: `${TOMBSTONE_PREFIX}${installId}.json` };
 }
 

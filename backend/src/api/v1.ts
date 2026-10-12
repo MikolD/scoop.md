@@ -210,7 +210,8 @@ const routes: Route[] = [
       json(200, {
         ok: true,
         version: env.VERSION || VERSION,
-        secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY), telemetrySalt: Boolean(env.TELEMETRY_SALT) },
+        secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY) },
+        telemetry: env.TELEMETRY_INGEST || 'on',
       }),
   },
   {

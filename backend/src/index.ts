@@ -12,9 +12,12 @@ import { handleIndexBatch } from './index/consumer.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { ApiError, notFound } from './lib/errors.ts';
-import { handleTelemetryBatch, pruneEvents } from './telemetry/consumer.ts';
+import { handleTelemetryBatch, pruneTelemetry } from './telemetry/consumer.ts';
 import { API_ROUTES, recordApiUsage } from './telemetry/ingest.ts';
 import type { Env } from './env.ts';
+
+// The telemetry pruning cron in wrangler.jsonc.
+const HOURLY = '23 * * * *';
 
 export { CrawlSite } from './crawl/workflow.ts';
 export { CrawlBatch } from './admin/batch-workflow.ts';
@@ -89,11 +92,14 @@ export default {
     else await handleIndexBatch(batch, indexDeps(env));
   },
 
-  // Daily: prune raw telemetry past 180 days, and re-enqueue a bounded batch of
+  // Hourly: prune telemetry (raw events past 180 days, ip_hash past 30, old day
+  // keys and quota counters). Daily (17 4 * * *): re-enqueue a bounded batch of
   // pages still waiting for a classification.
-  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
-    const pruned = await pruneEvents(env.DB);
-    console.log(JSON.stringify({ cron: 'telemetry-prune', pruned }));
+  async scheduled(controller: ScheduledController, env: Env): Promise<void> {
+    if (controller.cron === HOURLY) {
+      console.log(JSON.stringify({ cron: 'telemetry-prune', ...(await pruneTelemetry(env.TELEMETRY_DB)) }));
+      return;
+    }
     if (!env.OPENROUTER_API_KEY) return;
     const { totalCapUsd, dailyCapUsd } = indexDeps(env);
     const queued = await reclassify(env.DB, env.INDEX_QUEUE, { totalCapUsd, dailyCapUsd });

@@ -47,12 +47,12 @@ function range(url: URL, maxDays: number): { from: string; to: string } {
 }
 
 export const telemetryRoutes: { method: string; pattern: RegExp; handler: (c: Ctx) => Promise<Response> }[] = [
-  { method: 'GET', pattern: /^\/api\/telemetry\/overview$/, handler: async ({ env, url }) => json(200, await t.overview(env.DB, days(url))) },
-  { method: 'GET', pattern: /^\/api\/telemetry\/sites$/, handler: async ({ env, url }) => json(200, { days: days(url), sites: await t.topSites(env.DB, days(url)) }) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/overview$/, handler: async ({ env, url }) => json(200, await t.overview(env.TELEMETRY_DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/sites$/, handler: async ({ env, url }) => json(200, { days: days(url), rawFrom: t.dayOf(new Date(), Math.min(days(url), t.RAW_DAYS) - 1), sites: await t.topSites(env.TELEMETRY_DB, days(url)) }) },
   {
     method: 'GET',
     pattern: /^\/api\/telemetry\/sites\/([^/]+)$/,
-    handler: async ({ env, url, params }) => json(200, await t.siteDetail(env.DB, siteArg(params[0]), days(url))),
+    handler: async ({ env, url, params }) => json(200, await t.siteDetail(env.TELEMETRY_DB, siteArg(params[0]), days(url))),
   },
   {
     method: 'GET',
@@ -61,7 +61,7 @@ export const telemetryRoutes: { method: string; pattern: RegExp; handler: (c: Ct
       const offset = Math.max(0, Math.trunc(Number(url.searchParams.get('cursor'))) || 0);
       const q = (url.searchParams.get('q') ?? '').trim().toLowerCase();
       if (q && !/^[0-9a-f-]{1,36}$/.test(q)) throw bad('q is the start of an install ID');
-      const { rows, more } = await t.listInstalls(env.DB, { status: url.searchParams.get('status') ?? undefined, q: q || undefined, limit: PAGE, offset });
+      const { rows, more } = await t.listInstalls(env.TELEMETRY_DB, { status: url.searchParams.get('status') ?? undefined, q: q || undefined, limit: PAGE, offset });
       return json(200, { installs: rows, next: more ? String(offset + PAGE) : null });
     },
   },
@@ -69,7 +69,7 @@ export const telemetryRoutes: { method: string; pattern: RegExp; handler: (c: Ct
     method: 'GET',
     pattern: /^\/api\/telemetry\/installs\/([^/]+)$/,
     handler: async ({ env, params }) => {
-      const d = await t.installDetail(env.DB, installArg(params[0]));
+      const d = await t.installDetail(env.TELEMETRY_DB, installArg(params[0]));
       if (!d.install && !d.timeline.length) throw notFound('No telemetry for this install ID');
       return json(200, d);
     },
@@ -78,19 +78,19 @@ export const telemetryRoutes: { method: string; pattern: RegExp; handler: (c: Ct
     method: 'DELETE',
     pattern: /^\/api\/telemetry\/installs\/([^/]+)$/,
     // A deletion request (privacy policy): D1 rows go, the consumer refuses the ID from now on, R2 gets a tombstone.
-    handler: async ({ env, params }) => json(200, await t.deleteInstall(env.DB, env.TELEMETRY, installArg(params[0]))),
+    handler: async ({ env, params }) => json(200, await t.deleteInstall(env.TELEMETRY_DB, env.TELEMETRY, installArg(params[0]))),
   },
-  { method: 'GET', pattern: /^\/api\/telemetry\/deletions$/, handler: async ({ env }) => json(200, { deletions: await t.deletions(env.DB) }) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/deletions$/, handler: async ({ env }) => json(200, { deletions: await t.deletions(env.TELEMETRY_DB) }) },
   {
     method: 'GET',
     pattern: /^\/api\/telemetry\/retention$/,
-    handler: async ({ env, url }) => json(200, await t.retention(env.DB, Math.min(26, Math.max(1, Math.trunc(Number(url.searchParams.get('weeks'))) || 12)))),
+    handler: async ({ env, url }) => json(200, await t.retention(env.TELEMETRY_DB, Math.min(26, Math.max(1, Math.trunc(Number(url.searchParams.get('weeks'))) || 12)))),
   },
-  { method: 'GET', pattern: /^\/api\/telemetry\/platforms$/, handler: async ({ env, url }) => json(200, await t.platforms(env.DB, days(url))) },
-  { method: 'GET', pattern: /^\/api\/telemetry\/geo$/, handler: async ({ env, url }) => json(200, await t.geography(env.DB, days(url))) },
-  { method: 'GET', pattern: /^\/api\/telemetry\/errors$/, handler: async ({ env, url }) => json(200, await t.errors(env.DB, days(url))) },
-  { method: 'GET', pattern: /^\/api\/telemetry\/api$/, handler: async ({ env, url }) => json(200, await t.apiUsage(env.DB, days(url))) },
-  { method: 'GET', pattern: /^\/api\/telemetry\/website$/, handler: async ({ env, url }) => json(200, await t.website(env.DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/platforms$/, handler: async ({ env, url }) => json(200, await t.platforms(env.TELEMETRY_DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/geo$/, handler: async ({ env, url }) => json(200, await t.geography(env.TELEMETRY_DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/errors$/, handler: async ({ env, url }) => json(200, await t.errors(env.TELEMETRY_DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/api$/, handler: async ({ env, url }) => json(200, await t.apiUsage(env.TELEMETRY_DB, days(url))) },
+  { method: 'GET', pattern: /^\/api\/telemetry\/website$/, handler: async ({ env, url }) => json(200, await t.website(env.TELEMETRY_DB, days(url))) },
   {
     method: 'GET',
     pattern: /^\/api\/telemetry\/export$/,
@@ -100,7 +100,7 @@ export const telemetryRoutes: { method: string; pattern: RegExp; handler: (c: Ct
       const format = url.searchParams.get('format') === 'ndjson' || table === 'archive' ? 'ndjson' : 'csv';
       if (table !== 'archive' && !t.EXPORT_TABLES[table]) throw bad(`table must be one of ${[...Object.keys(t.EXPORT_TABLES), 'archive'].join(', ')}`);
       const { from, to } = range(url, table === 'archive' ? MAX_ARCHIVE_DAYS : 366);
-      const body = table === 'archive' ? readArchive(env.TELEMETRY, from, to) : t.exportTable(env.DB, table, from, to, format);
+      const body = table === 'archive' ? readArchive(env.TELEMETRY, from, to, env.TELEMETRY_DB) : t.exportTable(env.TELEMETRY_DB, table, from, to, format);
       return new Response(body, {
         headers: {
           'content-type': format === 'csv' ? 'text/csv; charset=utf-8' : 'application/x-ndjson; charset=utf-8',

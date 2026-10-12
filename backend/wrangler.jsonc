@@ -25,9 +25,12 @@
     "INDEX_DAILY_TOTAL_CAP_USD": "10",
     // Browser sandbox (E2B) spend per UTC day, USD.
     "E2B_DAILY_CAP_USD": "2",
-    // Share of API requests recorded as usage events (docs/TELEMETRY.md), 0-1.
-    "TELEMETRY_API_SAMPLE": "1"
-    // TELEMETRY_SALT (secret) salts the daily IP-subject hash; .dev.vars locally.
+    // Usage telemetry (docs/TELEMETRY.md): on | lifecycle | off; share of API requests
+    // recorded (0-1); daily ceilings for events (then lifecycle only) and API rows.
+    "TELEMETRY_INGEST": "on",
+    "TELEMETRY_API_SAMPLE": "1",
+    "TELEMETRY_DAILY_MAX": "2000000",
+    "TELEMETRY_API_DAILY_MAX": "200000"
     // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
@@ -37,7 +40,9 @@
   // Basic auth: the Worker runs first for every request (src/admin/app.ts).
   "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
   "d1_databases": [
-    { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
+    { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" },
+    // Usage telemetry, in its own database so a flood can never fill the library's (docs/TELEMETRY.md).
+    { "binding": "TELEMETRY_DB", "database_name": "scoop-telemetry-dev", "database_id": "00000000-0000-0000-0000-000000000001", "migrations_dir": "migrations-telemetry" }
   ],
   "r2_buckets": [
     { "binding": "SKILLS", "bucket_name": "scoop-skills-dev" },
@@ -57,8 +62,9 @@
     { "name": "SEARCH_LIMITER", "namespace_id": "4110", "simple": { "limit": 60, "period": 60 } },
     // Admin console: failed Basic auth attempts, 10 per minute per IP, then a lockout (src/admin/auth.ts).
     { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4120", "simple": { "limit": 10, "period": 60 } },
-    // POST /v1/events: 120 requests per minute per install ID and per IP subject (src/telemetry/ingest.ts).
-    { "name": "EVENTS_LIMITER", "namespace_id": "4130", "simple": { "limit": 120, "period": 60 } }
+    // POST /v1/events (src/telemetry/ingest.ts): 30 requests per minute per IP subject, 10 per install ID.
+    { "name": "EVENTS_LIMITER", "namespace_id": "4130", "simple": { "limit": 30, "period": 60 } },
+    { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4133", "simple": { "limit": 10, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -71,11 +77,11 @@
   "queues": {
     "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-dev" }],
     "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" },
-      { "queue": "telemetry-events-dev", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-dev" }]
+      { "queue": "telemetry-events-dev", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-dev" }]
   },
-  // Daily: prune raw telemetry past 180 days (src/telemetry/consumer.ts) and re-enqueue
-  // pages still waiting for a classification (src/index/reclassify.ts).
-  "triggers": { "crons": ["17 4 * * *"] },
+  // Daily (17 4): re-enqueue pages still waiting for a classification (src/index/reclassify.ts).
+  // Hourly (23 *): prune telemetry (src/telemetry/consumer.ts); the cron string must match HOURLY in src/index.ts.
+  "triggers": { "crons": ["17 4 * * *", "23 * * * *"] },
 
   "env": {
     "staging": {
@@ -101,11 +107,15 @@
         "INDEX_DAILY_TOTAL_CAP_USD": "10",
         "E2B_DAILY_CAP_USD": "2",
         "ADMIN_HOST": "admin-staging.scoop.md",
-        "TELEMETRY_API_SAMPLE": "1"
+        "TELEMETRY_INGEST": "on",
+        "TELEMETRY_API_SAMPLE": "1",
+        "TELEMETRY_DAILY_MAX": "2000000",
+        "TELEMETRY_API_DAILY_MAX": "200000"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
-        { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" },
+        { "binding": "TELEMETRY_DB", "database_name": "scoop-telemetry-staging", "database_id": "d059ae06-4a40-40ac-b096-5d511b2b0b89", "migrations_dir": "migrations-telemetry" }
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" },
@@ -121,7 +131,8 @@
         { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
         { "name": "SEARCH_LIMITER", "namespace_id": "4111", "simple": { "limit": 60, "period": 60 } },
         { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4121", "simple": { "limit": 10, "period": 60 } },
-        { "name": "EVENTS_LIMITER", "namespace_id": "4131", "simple": { "limit": 120, "period": 60 } }
+        { "name": "EVENTS_LIMITER", "namespace_id": "4131", "simple": { "limit": 30, "period": 60 } },
+        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4134", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -130,9 +141,9 @@
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-staging" }],
         "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" },
-          { "queue": "telemetry-events-staging", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-staging" }]
+          { "queue": "telemetry-events-staging", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-staging" }]
       },
-      "triggers": { "crons": ["17 4 * * *"] }
+      "triggers": { "crons": ["17 4 * * *", "23 * * * *"] }
     },
     "production": {
       "name": "scoop-api",
@@ -157,11 +168,15 @@
         "INDEX_DAILY_TOTAL_CAP_USD": "10",
         "E2B_DAILY_CAP_USD": "2",
         "ADMIN_HOST": "admin.scoop.md",
-        "TELEMETRY_API_SAMPLE": "1"
+        "TELEMETRY_INGEST": "on",
+        "TELEMETRY_API_SAMPLE": "1",
+        "TELEMETRY_DAILY_MAX": "2000000",
+        "TELEMETRY_API_DAILY_MAX": "200000"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
-        { "binding": "DB", "database_name": "scoop-production", "database_id": "dfce240b-45c4-4ca1-a887-66be730d2b22", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "scoop-production", "database_id": "dfce240b-45c4-4ca1-a887-66be730d2b22", "migrations_dir": "migrations" },
+        { "binding": "TELEMETRY_DB", "database_name": "scoop-telemetry-production", "database_id": "1ea9ed26-92e3-4d1e-a031-bba44dbd11e0", "migrations_dir": "migrations-telemetry" }
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-production" },
@@ -177,7 +192,8 @@
         { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } },
         { "name": "SEARCH_LIMITER", "namespace_id": "4112", "simple": { "limit": 60, "period": 60 } },
         { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4122", "simple": { "limit": 10, "period": 60 } },
-        { "name": "EVENTS_LIMITER", "namespace_id": "4132", "simple": { "limit": 120, "period": 60 } }
+        { "name": "EVENTS_LIMITER", "namespace_id": "4132", "simple": { "limit": 30, "period": 60 } },
+        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4135", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -186,9 +202,9 @@
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-production" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-production" }],
         "consumers": [{ "queue": "index-pages-production", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" },
-          { "queue": "telemetry-events-production", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-production" }]
+          { "queue": "telemetry-events-production", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-production" }]
       },
-      "triggers": { "crons": ["17 4 * * *"] }
+      "triggers": { "crons": ["17 4 * * *", "23 * * * *"] }
     }
   }
 }

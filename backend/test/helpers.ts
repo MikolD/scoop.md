@@ -6,7 +6,6 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
-const MIGRATIONS = fileURLToPath(new URL('../migrations/', import.meta.url));
 
 type Param = string | number | null;
 
@@ -39,9 +38,11 @@ class Stmt {
   }
 }
 
-export function fakeD1() {
+// dir: 'migrations' (DB) or 'migrations-telemetry' (TELEMETRY_DB).
+export function fakeD1(dir = 'migrations') {
+  const migrations = fileURLToPath(new URL(`../${dir}/`, import.meta.url));
   const db = new DatabaseSync(':memory:');
-  for (const f of readdirSync(MIGRATIONS).filter((f) => f.endsWith('.sql')).sort()) db.exec(readFileSync(MIGRATIONS + f, 'utf8'));
+  for (const f of readdirSync(migrations).filter((f) => f.endsWith('.sql')).sort()) db.exec(readFileSync(migrations + f, 'utf8'));
   const d1 = {
     prepare: (sql: string) => new Stmt(db, sql),
     // D1 runs a batch as one transaction.

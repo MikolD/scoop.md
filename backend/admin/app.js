@@ -936,11 +936,21 @@ function windowPicker(base, days) {
   return h('span', { class: 'row small' }, 'Window:', [7, 30, 90, 365].map((d) => (d === days ? h('b', {}, `${d}d`) : h('a', { href: `${base}?days=${d}` }, `${d}d`))));
 }
 
-function telemetryHead(title, tab, days, base) {
+// rawFrom: the first day raw events cover (they are pruned after 180 days).
+function telemetryHead(title, tab, days, base, rawFrom) {
   return [
     h('div', { class: 'head' }, h('h1', {}, title), days ? windowPicker(base, days) : null),
     tabs(tab, days),
-  ];
+    days > 180 && rawFrom ? h('p', { class: 'meta small warn' }, `Raw events are kept 180 days: figures read from them start ${rawFrom}. Daily counts, installs and active days cover the whole window.`) : null,
+  ].filter(Boolean);
+}
+
+// Versions in semver order (0.10.0 after 0.9.0); anything unparsable last.
+function semverCmp(a, b) {
+  const p = (v) => (/^(\d+)\.(\d+)\.(\d+)/.exec(v ?? '') ?? []).slice(1).map(Number);
+  const [x, y] = [p(a), p(b)];
+  if (!x.length || !y.length) return x.length ? -1 : y.length ? 1 : String(a).localeCompare(String(b));
+  return x[0] - y[0] || x[1] - y[1] || x[2] - y[2];
 }
 
 const daysOf = (r) => Math.min(365, Math.max(1, Number(r.params.get('days')) || 30));
@@ -968,21 +978,24 @@ async function telemetryOverview(r) {
   const o = await api(`telemetry/overview?days=${days}`);
   const f = o.funnel;
   const steps = [['Popup opened', 'popupOpen'], ['Scooped (copied or ready)', 'scooped'], ['Copied', 'copied'], ['Voted', 'voted']];
-  const perDay = byDay({ installs: o.perDay.installs, uninstalls: o.perDay.uninstalls, active: o.perDay.active });
+  const perDay = byDay({ installs: o.perDay.installs, uninstalls: o.perDay.uninstalls, unknown: o.perDay.uninstalls.map((x) => ({ day: x.day, n: x.unknown })), active: o.perDay.active });
   return [
-    ...telemetryHead('Telemetry', '', days, '#/telemetry'),
+    ...telemetryHead('Telemetry', '', days, '#/telemetry', o.rawFrom),
     card('Installs', h('div', { class: 'stats' },
       stat(fmtInt(o.installs.total), 'installs seen'),
+      stat(fmtInt(o.installs.installed), 'installed since telemetry (install event)'),
       stat(fmtInt(o.installs.uninstalled), 'uninstalled'),
       stat(fmtInt(o.installs.net), 'net installs'),
       stat(fmtInt(o.installs.optedOut), 'opted out of statistics'),
       stat(fmtInt(o.active.dau), 'DAU (today)'),
       stat(fmtInt(o.active.wau), 'WAU (7 days)'),
-      stat(fmtInt(o.active.mau), 'MAU (30 days)'))),
+      stat(fmtInt(o.active.mau), 'MAU (30 days)'),
+      stat(fmtInt(o.installs.unknownUninstalls), 'uninstalls of unknown install IDs (not counted above)'))),
     card(`Per day (since ${o.since})`, table([
       { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
       barCol('Installs', 'installs', perDay),
       barCol('Uninstalls', 'uninstalls', perDay),
+      { label: 'Unknown IDs', get: (x) => fmtInt(x.unknown), cls: 'num hide-sm' },
       barCol('Active installs', 'active', perDay),
     ], perDay, 'No installs or activity in this window.')),
     card('Funnel', table([
@@ -1011,7 +1024,7 @@ async function telemetrySites(r) {
   const days = daysOf(r);
   const d = await api(`telemetry/sites?days=${days}`);
   return [
-    ...telemetryHead('Sites', 'sites', days, '#/telemetry/sites'),
+    ...telemetryHead('Sites', 'sites', days, '#/telemetry/sites', d.rawFrom),
     card(`Top sites (${d.sites.length})`, table([
       { label: 'Site', get: (s) => tSiteLink(s.site) },
       barCol('Scoops', 'scoops', d.sites),
@@ -1193,7 +1206,7 @@ async function telemetryRetention(r) {
         cls: 'num',
       })),
     ], d.cohorts, 'No installs in this window.'),
-    h('p', { class: 'meta small' }, 'A cohort is the installs first seen in a week (Monday to Sunday, UTC). Wn is the share that sent anything n weeks later.')),
+    h('p', { class: 'meta small' }, 'A cohort is the installs whose install event falls in a week (Monday to Sunday, UTC); installs from before usage statistics have none and are left out. Wn is the share that sent anything n weeks later (by the day the server received it).')),
   ];
 }
 
@@ -1204,10 +1217,10 @@ async function telemetryPlatforms(r) {
     { label: 'Value', get: (x) => x.value || '—', cls: 'mono' },
     barCol('Installs', 'installs', rows),
   ], rows));
-  const versions = [...new Set(d.adoption.map((x) => x.version))].sort();
+  const versions = [...new Set(d.adoption.map((x) => x.version))].sort(semverCmp);
   const adoption = [...d.adoption.reduce((m, x) => m.set(x.day, { day: x.day, ...m.get(x.day), [x.version]: x.n }), new Map()).values()];
   return [
-    ...telemetryHead('Versions & platforms', 'platforms', days, '#/telemetry/platforms'),
+    ...telemetryHead('Versions & platforms', 'platforms', days, '#/telemetry/platforms', d.rawFrom),
     h('p', { class: 'meta small' }, 'Installs seen in the window and not uninstalled.'),
     h('div', { class: 'cols' },
       breakdown('Extension version', d.versions),
@@ -1233,7 +1246,7 @@ async function telemetryGeo(r) {
   const days = daysOf(r);
   const d = await api(`telemetry/geo?days=${days}`);
   return [
-    ...telemetryHead('Geography', 'geo', days, '#/telemetry/geo'),
+    ...telemetryHead('Geography', 'geo', days, '#/telemetry/geo', d.rawFrom),
     h('p', { class: 'meta small' }, 'Country from the request IP (Cloudflare), at ingest. IPs are never stored.'),
     h('div', { class: 'cols' },
       card('Installs by country', table([
@@ -1267,7 +1280,7 @@ async function telemetryErrors(r) {
   for (const [day, n] of errDay) if (!perDay.some((x) => x.day === day)) perDay.push({ day, errors: n });
   perDay.sort((a, b) => (a.day < b.day ? -1 : 1));
   return [
-    ...telemetryHead('Errors', 'errors', days, '#/telemetry/errors'),
+    ...telemetryHead('Errors', 'errors', days, '#/telemetry/errors', d.rawFrom),
     card('By code, where and version', table([
       { label: 'Where', get: (x) => x.where_ ?? '' },
       { label: 'Code', get: (x) => h('span', { class: 'mono' }, x.code ?? '') },
@@ -1299,7 +1312,7 @@ async function telemetryApi(r) {
   const d = await api(`telemetry/api?days=${days}`);
   const routes = [...d.routes.reduce((m, x) => m.set(x.name, { name: x.name, ...m.get(x.name), [x.outcome || 'other']: x.n, total: (m.get(x.name)?.total ?? 0) + x.n }), new Map()).values()];
   return [
-    ...telemetryHead('API usage', 'api', days, '#/telemetry/api'),
+    ...telemetryHead('API usage', 'api', days, '#/telemetry/api', d.rawFrom),
     h('p', { class: 'meta small' }, 'Server-side, per request: route, site, query text, hit or miss, results, latency, client and country. No IPs or install IDs.'),
     card('Routes', table([
       { label: 'Route', get: (x) => h('span', { class: 'mono' }, x.name.replace('api_', '')) },
@@ -1345,7 +1358,7 @@ async function telemetryWebsite(r) {
   const days = daysOf(r);
   const d = await api(`telemetry/website?days=${days}`);
   return [
-    ...telemetryHead('Website', 'website', days, '#/telemetry/website'),
+    ...telemetryHead('Website', 'website', days, '#/telemetry/website', d.rawFrom),
     h('p', { class: 'meta small' }, 'scoop.md page views: no cookies; a visitor is a daily-rotating hash, so visitors are unique per day.'),
     card('Per day', table([
       { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },

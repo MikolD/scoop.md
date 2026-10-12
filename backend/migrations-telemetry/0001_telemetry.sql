@@ -1,8 +1,11 @@
--- Usage telemetry (docs/TELEMETRY.md): events from the extension and the
+-- Usage telemetry (docs/TELEMETRY.md), in its own D1 database (binding
+-- TELEMETRY_DB, migrations-telemetry/), so a flood of events can never fill
+-- the database the library runs on. Events from the extension and the
 -- website (POST /v1/events) and API usage, written by the telemetry-events
 -- queue consumer (src/telemetry/consumer.ts). Raw events are kept 180 days
--- (the daily cron prunes them); the rollups and the R2 archive are kept.
--- No IP addresses, names, emails or cookies are ever stored.
+-- (the hourly cron prunes them, and clears ip_hash after 30 days); the
+-- rollups and the R2 archive are kept. No IP addresses, names, emails or
+-- cookies are ever stored.
 
 -- One row per event. id is derived from (install or visitor, session, seq,
 -- name), so a resent or redelivered event is ignored. rolled is 0 only inside
@@ -16,7 +19,7 @@ CREATE TABLE events (
   received_at     TEXT NOT NULL,
   install_id      TEXT,                     -- extension events, and the website's uninstall events
   session_id      TEXT,
-  visitor_id      TEXT,                     -- website: daily-rotating salted hash, no cookie
+  visitor_id      TEXT,                     -- website: HMAC(that day's random key, IP subject + user agent), no cookie
   seq             INTEGER,
   site            TEXT,                     -- public hostname only
   path            TEXT,                     -- public pages only; no query or fragment
@@ -35,7 +38,7 @@ CREATE TABLE events (
   region          TEXT,
   continent       TEXT,
   as_org          TEXT,                     -- the network's ISP or organisation (coarse)
-  ip_hash         TEXT,                     -- HMAC(TELEMETRY_SALT, day + IP subject): rotates daily
+  ip_hash         TEXT,                     -- HMAC(that day's random key, IP subject); the key is deleted after 48 h, the hash after 30 days
   rolled          INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX events_name_ts ON events (name, ts);
@@ -45,7 +48,8 @@ CREATE INDEX events_received ON events (received_at);
 CREATE INDEX events_day ON events (day);
 CREATE INDEX events_unrolled ON events (rolled) WHERE rolled = 0;
 
--- One row per extension install ID.
+-- One row per extension install ID that sent extension events (an uninstall
+-- alone never creates one: see uninstalls).
 CREATE TABLE installs (
   install_id       TEXT PRIMARY KEY,
   first_seen       TEXT NOT NULL,
@@ -64,14 +68,28 @@ CREATE TABLE installs (
   copies           INTEGER NOT NULL DEFAULT 0, -- copy events
   opted_out        INTEGER NOT NULL DEFAULT 0,
   opted_out_at     TEXT,
+  opted_changed_at TEXT,                    -- ts of the toggle that set opted_out: only a newer one changes it
   uninstalled_at   TEXT,
   uninstall_reason TEXT
 );
 CREATE INDEX installs_first_seen ON installs (first_seen);
+CREATE INDEX installs_installed_at ON installs (installed_at);
+
+-- Every uninstall reported by scoop.md/bye, whether or not the install is
+-- known (known = 1 when an installs row existed). Unknown ones are counted
+-- apart: they may be forged or predate telemetry.
+CREATE TABLE uninstalls (
+  install_id     TEXT PRIMARY KEY,
+  uninstalled_at TEXT NOT NULL,
+  reason         TEXT,
+  version        TEXT,
+  known          INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX uninstalls_at ON uninstalls (uninstalled_at);
 CREATE INDEX installs_last_seen ON installs (last_seen);
 
--- Days each install sent anything: DAU/WAU/MAU and retention, kept past the
--- 180-day pruning of events.
+-- Days (UTC, by when the server received it) each install sent anything:
+-- DAU/WAU/MAU and retention, kept past the 180-day pruning of events.
 CREATE TABLE install_days (
   install_id TEXT NOT NULL,
   day        TEXT NOT NULL,
@@ -101,4 +119,31 @@ CREATE TABLE telemetry_deletions (
   install_id     TEXT PRIMARY KEY,
   deleted_at     TEXT NOT NULL,
   events_deleted INTEGER NOT NULL DEFAULT 0
+);
+
+-- A random key per UTC day for ip_hash and visitor_id. Keys older than 48 h
+-- are deleted, after which that day's hashes can't be linked to an IP.
+CREATE TABLE day_keys (
+  day        TEXT PRIMARY KEY,
+  key        TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+-- Daily quotas (src/telemetry/consumer.ts), by received day. kind is
+-- ip_events (subject ip_hash), install_events (install ID), all_events and
+-- api_rows (subject ''). Rows older than 2 days are deleted.
+CREATE TABLE quota_counters (
+  day     TEXT NOT NULL,
+  kind    TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  count   INTEGER NOT NULL,
+  PRIMARY KEY (day, kind, subject)
+);
+
+-- Install IDs seen per ip_hash per day, for the new-installs-per-IP quota.
+CREATE TABLE ip_installs (
+  day        TEXT NOT NULL,
+  ip_hash    TEXT NOT NULL,
+  install_id TEXT NOT NULL,
+  PRIMARY KEY (day, ip_hash, install_id)
 );

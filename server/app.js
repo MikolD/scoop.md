@@ -30,7 +30,7 @@ function cors(req) {
   return {
     'access-control-allow-origin': req.headers.origin || '*',
     'access-control-allow-methods': 'GET, POST, DELETE, OPTIONS',
-    'access-control-allow-headers': 'content-type, x-scoop-install, x-scoop-client, authorization',
+    'access-control-allow-headers': 'content-type, x-scoop-install, x-scoop-client, x-scoop-telemetry, authorization',
     vary: 'origin',
   };
 }

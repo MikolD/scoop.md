@@ -5,6 +5,7 @@
 // or fragment. A malformed envelope is a 400.
 
 import { isPrivateHost } from '../../../extension/lib/hosts.js';
+import { redactPath, scrubText } from '../../../extension/lib/privacy.js';
 import { bad } from '../lib/errors.ts';
 import { normalizeSite } from '../lib/ssrf.ts';
 
@@ -69,6 +70,10 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   uninstall_reason: ['site', { installId: { t: 'uuid' }, reason: oneOf('too_noisy', 'didnt_work', 'privacy', 'other') }],
 };
 
+// Events with no browsing data: still accepted under TELEMETRY_INGEST=lifecycle
+// and above the daily ceiling.
+export const LIFECYCLE = new Set(['install', 'update', 'browser_update', 'active_daily', 'telemetry_opt_out', 'telemetry_opt_in', 'uninstall', 'uninstall_reason']);
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const SESSION = /^[\w-]{1,64}$/;
 const SKILL = /^[\w-]{1,64}$/;
@@ -77,9 +82,8 @@ const HOST = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0
 // Control characters out, whitespace collapsed, capped.
 export const cleanText = (s: string, max: number) => s.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 
-// No URLs or hostnames in error text, whatever the client sent.
-export const scrubUrls = (s: string) =>
-  s.replace(/\b(?:[a-z][a-z0-9+.-]*:\/\/|www\.)\S+/gi, '<url>').replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?(?:\/\S*)?/gi, '<host>');
+// No emails, URLs, hostnames or tokens in error text, whatever the client sent (extension/lib/privacy.js).
+export const scrubUrls = (s: string) => scrubText(s);
 
 // A public hostname, normalized like the library's site key; null otherwise.
 export function publicHost(v: unknown): string | null {
@@ -96,8 +100,9 @@ export function cleanPath(v: unknown): string | null {
   const hashRoute = p.indexOf('#/');
   const head = hashRoute >= 0 ? p.slice(0, hashRoute) : p;
   const tail = hashRoute >= 0 ? p.slice(hashRoute) : '';
-  p = head.split(/[?#]/)[0] + tail.split('?')[0];
-  return cleanText(p, 300) || null;
+  // A hash route is cut at its own ?, & or second #; secret-looking segments become :id.
+  p = head.split(/[?#]/)[0] + (tail ? `#${tail.slice(1).split(/[?&#]/)[0]}` : '');
+  return cleanText(redactPath(p), 300) || null;
 }
 
 export interface Client {
