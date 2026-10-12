@@ -38,7 +38,7 @@ function ai(fetchImpl: GateAi['fetchImpl'], spent: number[] = [], capReached = f
 }
 
 test('gate lists: known docs hosts pass, search engines, shops, social and news are rejected without a request', () => {
-  for (const url of ['https://docs.stripe.com/', 'https://vercel.com/docs/functions', 'https://docs.aws.amazon.com/lambda/', 'https://developers.google.com/maps', 'https://flask.readthedocs.io/en/latest/']) {
+  for (const url of ['https://docs.stripe.com/', 'https://vercel.com/docs/functions', 'https://docs.aws.amazon.com/lambda/', 'https://developers.google.com/maps']) {
     assert.equal(listVerdict(url)?.decision, 'crawl', url);
     assert.equal(listVerdict(url)?.method, 'allowlist', url);
   }

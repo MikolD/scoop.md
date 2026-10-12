@@ -77,6 +77,8 @@ export interface Env {
   JEV_DAILY_TOKEN_CAP?: string;
   // GET /v1/quick: 30 per minute per IP subject (its probes fetch other sites and may ask Jev).
   QUICK_LIMITER?: RateLimit;
+  // /v1/quick's outbound probes per target host per minute (default 20).
+  PROBE_HOST_LIMITER?: RateLimit;
   // Live link checks (POST /v1/links/check, shares): per target host per minute.
   LINKCHECK_HOST_LIMITER?: RateLimit;
 }

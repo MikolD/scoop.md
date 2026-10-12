@@ -201,6 +201,8 @@ async function indexVersion(db: D1Database, site?: string): Promise<string> {
 // /v1/search and /v1/packages?q=: a 10-minute Cache API entry per kind, site,
 // normalised query, other parameters and index version. `build` runs on a miss.
 const QUERY_CACHE_SECONDS = 600;
+// The vector side's share of a q-mode answer on a miss (staging: 1-6 s cold); past it, full-text results.
+const VECTOR_BUDGET_MS = 1200;
 async function cachedQuery(
   db: D1Database, kind: 'search' | 'package', site: string | undefined, q: string, params: string, build: () => Promise<string>,
 ): Promise<{ body: string; hit: boolean }> {
@@ -544,12 +546,9 @@ const routes: Route[] = [
       usage.site = site;
       const cache = edgeCache();
       const key = new Request(`https://quick-cache.scoop.md/v1?url=${encodeURIComponent(pageUrl)}`);
-      // The first miss per target host per hour probes it; later misses answer from the site cache only.
-      const hostKey = new Request(`https://quick-cache.scoop.md/host?h=${encodeURIComponent(new URL(pageUrl).host)}`);
-      const [cached, status, probed, allowed] = await Promise.all([
+      const [cached, status, allowed] = await Promise.all([
         cache?.match(key).catch(() => undefined),
         retryD1(() => siteStatus(env.DB, site)),
-        cache?.match(hostKey).catch(() => undefined),
         instructionsAllowed(env.DB, site, pageUrl).catch(() => false),
       ]);
       // Instructions for agents: only for an indexed, approved (or allowlisted) site.
@@ -558,12 +557,12 @@ const routes: Route[] = [
       if (cached) {
         found = await cached.json();
       } else {
-        if (!probed) {
-          await cache?.put(hostKey, new Response('1', { headers: { 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` } })).catch(() => {});
-        }
+        // A counting budget per target host (PROBE_HOST_LIMITER): past it, answers come from the caches alone.
+        const host = new URL(pageUrl).host;
+        const probe = !env.PROBE_HOST_LIMITER || (await env.PROBE_HOST_LIMITER.limit({ key: host })).success;
         const d = await quickDiscover(pageUrl, {
           allowLocalhost: allowLocalhost(env),
-          probe: !probed,
+          probe,
           instructions: withInstructions,
           jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
           siteCache: cache && {
@@ -767,7 +766,7 @@ const routes: Route[] = [
       // Cached per site, query, filters and index version; the search limit applies on a miss.
       const cached = await cachedQuery(env.DB, 'search', site, q, `slot=${slot ?? ''}&limit=${limit}`, async () => {
         await limitSearch(env, ip);
-        const hits = await search(searchDeps(env), { q, site, slot, limit });
+        const hits = await search(searchDeps(env), { q, site, slot, limit, vectorBudgetMs: VECTOR_BUDGET_MS });
         // Snippets keep only links known to be ok.
         const states = await statesFor(env.DB, site ?? null, hits.map((h) => ({ text: h.snippet, base: h.url })), []);
         return JSON.stringify({
@@ -888,7 +887,7 @@ const routes: Route[] = [
         const q = label;
         const cached = await cachedQuery(env.DB, 'package', site, q, `budget=${budget}`, async () => {
           await limitSearch(env, ip);
-          const found = await search(searchDeps(env), { q, site, limit: 40 });
+          const found = await search(searchDeps(env), { q, site, limit: 40, vectorBudgetMs: VECTOR_BUDGET_MS });
           if (!found.length) throw notFound('Nothing indexed matches');
           return renderPackage(env.DB, { site, label: q, chunks: found, budget });
         });

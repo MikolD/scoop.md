@@ -57,5 +57,8 @@ export const ALLOW: string[] = [
   'developer.hashicorp.com', 'vite.dev', 'vitejs.dev', 'webpack.js.org', 'eslint.org/docs', 'prettier.io/docs', 'jestjs.io',
   'vitest.dev', 'playwright.dev', 'pnpm.io', 'tailwindcss.com/docs', 'ui.shadcn.com', 'radix-ui.com',
   'developers.google.com', 'cloud.google.com/docs', 'docs.cloud.google.com', 'firebase.google.com/docs', 'learn.microsoft.com', 'docs.npmjs.com',
-  'docs.gitlab.com', 'readthedocs.io', 'readthedocs.org',
+  'docs.gitlab.com',
+  // No hosting platform (readthedocs.io, github.io, …) belongs here: anyone
+  // can publish under one, so its subdomains go through signals or Jev and
+  // the approval queue (listVerdict skips multi-tenant hosts anyway).
 ];

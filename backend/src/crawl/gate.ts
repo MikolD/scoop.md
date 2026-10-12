@@ -19,6 +19,7 @@
 
 import { DOMParser } from 'linkedom';
 import { normalizeSite } from '../lib/ssrf.ts';
+import { isMultiTenant } from '../lib/domains.ts';
 import { htmlToText } from '../lib/verify.ts';
 import { CallError, callModel, DEFAULT_MODEL, FALLBACK_MODEL, stripFences } from '../index/classify.ts';
 import { askJev, jevCostUsd } from '../lib/jev.ts';
@@ -90,7 +91,9 @@ function underPath(prefix: string, path: string): boolean {
 export function listVerdict(startUrl: string): GateVerdict | null {
   const u = new URL(startUrl);
   const host = normalizeSite(u.hostname);
-  for (const entry of ALLOW) {
+  // A host on a hosting platform (evil.readthedocs.io, alice.github.io) is
+  // never let through by a list: anyone can publish there.
+  for (const entry of isMultiTenant(host) ? [] : ALLOW) {
     const slash = entry.indexOf('/');
     const h = slash < 0 ? entry : entry.slice(0, slash);
     const path = slash < 0 ? '' : entry.slice(slash);

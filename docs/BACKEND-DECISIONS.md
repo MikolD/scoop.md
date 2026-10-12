@@ -1411,3 +1411,18 @@ package surfaces it, from verified sources only.
   And `q` mode had no cache (0.7-11 s on staging): `/v1/search` and
   `/v1/packages?q=` are now cached 10 minutes per site, normalised query,
   parameters and index version, like the `url` mode.
+
+- **Re-review follow-ups (N1, N2) and q-mode latency.** N1: a host on a
+  hosting platform (`isMultiTenant`) is never let through by the gate's
+  allowlist, and readthedocs.io / .org are off it, so evil.readthedocs.io
+  goes through signals or Jev and, when requested, the approval queue (no
+  auto-approval, no instructions). N2: the hourly host marker skipped
+  every later page's own probes; it is replaced by a counting budget per
+  target host (`PROBE_HOST_LIMITER`, 20 per minute), and the llms results
+  are cached per host (root, docs.<domain>) and per first path segment, so
+  each page gets its twins and `isDevDocs` and the root llms.txt is
+  fetched once; nothing is cached for a probe that didn't run. Q mode on
+  staging after 9191938: warm hits 0.43-0.67 s, but cold misses 1.3-6 s,
+  and requests from one client landed in different data centers (EWR, MIA,
+  ATL), each with its own Cache API; so the vector side of a miss now gets
+  1.2 s, then the answer is full-text only.

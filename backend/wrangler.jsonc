@@ -79,7 +79,9 @@
     // GET /v1/quick: 30 per minute per IP subject (its probes fetch other sites).
     { "name": "QUICK_LIMITER", "namespace_id": "4140", "simple": { "limit": 30, "period": 60 } },
     // Live link checks: 10 per target host per minute.
-    { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4150", "simple": { "limit": 10, "period": 60 } }
+    { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4150", "simple": { "limit": 10, "period": 60 } },
+    // /v1/quick: outbound probes per target host, 20 per minute.
+    { "name": "PROBE_HOST_LIMITER", "namespace_id": "4160", "simple": { "limit": 20, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -157,7 +159,8 @@
         { "name": "EVENTS_LIMITER", "namespace_id": "4131", "simple": { "limit": 30, "period": 60 } },
         { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4134", "simple": { "limit": 10, "period": 60 } },
         { "name": "QUICK_LIMITER", "namespace_id": "4141", "simple": { "limit": 30, "period": 60 } },
-        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4151", "simple": { "limit": 10, "period": 60 } }
+        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4151", "simple": { "limit": 10, "period": 60 } },
+        { "name": "PROBE_HOST_LIMITER", "namespace_id": "4161", "simple": { "limit": 20, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -228,7 +231,8 @@
         { "name": "EVENTS_LIMITER", "namespace_id": "4132", "simple": { "limit": 30, "period": 60 } },
         { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4135", "simple": { "limit": 10, "period": 60 } },
         { "name": "QUICK_LIMITER", "namespace_id": "4142", "simple": { "limit": 30, "period": 60 } },
-        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4152", "simple": { "limit": 10, "period": 60 } }
+        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4152", "simple": { "limit": 10, "period": 60 } },
+        { "name": "PROBE_HOST_LIMITER", "namespace_id": "4162", "simple": { "limit": 20, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [

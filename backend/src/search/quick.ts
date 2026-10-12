@@ -179,13 +179,26 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
     }),
   ).then((all) => all.filter((f) => f !== null));
   const cands = quickCandidates(pageUrl);
-  const siteKey = cands.filter((c) => c.kind === 'llms-txt').map((c) => c.url).join(' ');
   const probing = o.probe !== false;
-  const siteFound = async (): Promise<SiteFound & { cached: boolean }> => {
-    const cached = await o.siteCache?.get(siteKey).catch(() => null);
-    if (cached) return { ...cached, cached: true };
-    if (!probing) return { found: [], instructions: null, cached: true };
-    return { found: await probe(cands.filter((c) => c.kind !== 'page-md')), instructions: null, cached: false };
+  // The llms files, cached in two groups: the host's (root and docs.<domain>),
+  // shared by every page of the host, and the first path segment's.
+  const page = new URL(pageUrl);
+  const first = page.pathname.split('/').filter(Boolean)[0];
+  const segBase = first && !/\.[a-z0-9]{1,5}$/i.test(first) ? `${page.origin}/${first}/` : null;
+  const llmsCands = cands.filter((c) => c.kind !== 'page-md');
+  const groups = [
+    { key: `host ${page.origin}`, cands: llmsCands.filter((c) => !segBase || !c.url.startsWith(segBase)) },
+    ...(segBase ? [{ key: `seg ${segBase}`, cands: llmsCands.filter((c) => c.url.startsWith(segBase)) }] : []),
+  ];
+  const groupFound = async (g: (typeof groups)[number]): Promise<{ key: string; found: Found[]; cached: boolean }> => {
+    const cached = await o.siteCache?.get(g.key).catch(() => null);
+    if (cached) return { key: g.key, found: cached.found, cached: true };
+    if (!probing) return { key: g.key, found: [], cached: true };
+    return { key: g.key, found: await probe(g.cands), cached: false };
+  };
+  const siteFound = async () => {
+    const parts = await Promise.all(groups.map(groupFound));
+    return { parts, found: parts.flatMap((p) => p.found) };
   };
   // Is it developer docs? The gate's lists first; else the page itself (when
   // robots.txt allows), for Jev or its signals.
@@ -221,8 +234,14 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
     if (sc.decision) isDevDocs = { verdict: sc.decision === 'crawl' ? 'yes' : 'no', method: 'signals', score: Math.min(0.95, 0.6 + Math.abs(sc.positive - sc.negative) / 30) };
   }
 
-  // Instructions for agents, from a verified llms.txt only, once per site.
-  let instructions = site.instructions;
+  // Instructions for agents, from a verified llms.txt only, cached per llms.txt.
+  const instrKey = llmsHit?.verified ? `instr ${llmsHit.source.url}` : null;
+  let instructions: QuickInstruction[] | null = instrKey ? ((await o.siteCache?.get(instrKey).catch(() => null))?.instructions ?? null) : [];
+  // llms.txt came from the cache (no text): read it again for extraction, when allowed to fetch.
+  if (o.instructions !== false && instructions === null && llmsHit && !llmsHit.text && probing) {
+    const r = await get(llmsHit.source.url, LLMS_CAP);
+    if (r.ok && !r.notModified && !r.over && isLlmsFile(r.url, 'llms.txt')) llmsHit.text = r.text;
+  }
   const instrCands: Candidate[] = o.instructions !== false && instructions === null && llmsHit?.verified && llmsHit.text
     ? safeCandidates(candidatesFromLlms(llmsHit.text, llmsHit.source.url)).slice(0, MAX_QUICK_CANDIDATES)
     : [];
@@ -276,8 +295,12 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
       console.warn(JSON.stringify({ quick: 'jev', error: (e as Error).message.slice(0, 200) }));
     }
   }
-  if (!site.cached || (site.instructions === null && instructions !== null)) {
-    await o.siteCache?.put(siteKey, { found: site.found.map(({ text: _, ...f }) => f), instructions }).catch(() => {});
+  // Only what was really probed is cached (a refused or skipped probe caches nothing).
+  for (const part of site.parts) {
+    if (!part.cached) await o.siteCache?.put(part.key, { found: part.found.map(({ text: _, ...f }) => f), instructions: null }).catch(() => {});
+  }
+  if (instrKey && instructions !== null && o.instructions !== false) {
+    await o.siteCache?.put(instrKey, { found: [], instructions }).catch(() => {});
   }
   return { sources: hits.map((h) => h.source), overview, isDevDocs, llms, agentInstructions: o.instructions === false ? [] : (instructions ?? []), jevTokens };
 }

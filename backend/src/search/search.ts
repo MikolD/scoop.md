@@ -14,6 +14,10 @@ export interface SearchParams {
   // Run full-text search first and skip the embedding and vector query when
   // it already found this many candidates.
   ftsEnough?: number;
+  // At most this long for the vector side (embedding + Vectorize); past it
+  // the results are full-text only, so a slow or cold vector side can't hold
+  // up the answer.
+  vectorBudgetMs?: number;
 }
 
 export interface ChunkHit {
@@ -125,7 +129,13 @@ export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHi
     fts = await ftsIds(deps.db, p);
     vec = fts.ids.length >= p.ftsEnough ? [] : await vectorIds(deps, p, [...unapproved]);
   } else {
-    [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p, [...unapproved])]);
+    const vecSide = vectorIds(deps, p, [...unapproved]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const bounded = p.vectorBudgetMs === undefined
+      ? vecSide
+      : Promise.race([vecSide, new Promise<string[]>((resolve) => { timer = setTimeout(() => resolve([]), p.vectorBudgetMs); })]);
+    [fts, vec] = await Promise.all([ftsIds(deps.db, p), bounded]);
+    clearTimeout(timer);
   }
   const fused = rrf([fts.ids, vec]);
   // Every fused candidate is read: vectors can point at chunks deleted since or

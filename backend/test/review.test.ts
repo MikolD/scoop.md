@@ -99,10 +99,12 @@ test('H1c, H2, M2 over HTTP: /v1/quick limits, per-host probe budget, approval-g
   (globalThis as { caches?: unknown }).caches = {
     default: { match: async (r: Request) => store.get(r.url)?.clone(), put: async (r: Request, res: Response) => { store.set(r.url, res.clone()); } },
   };
-  let quickLeft = 3;
+  let quickLeft = 10;
+  let probeLeft = 10;
   const e = {
     DB: d1, READ_LIMITER: { limit: async () => ({ success: true }) },
     QUICK_LIMITER: { limit: async () => ({ success: quickLeft-- > 0 }) },
+    PROBE_HOST_LIMITER: { limit: async ({ key }: { key: string }) => ({ success: key === 'ex.dev' && probeLeft-- > 0 }) },
     TELEMETRY_INGEST: 'off', ENVIRONMENT: 'production', JEV_API_KEY: 'k',
   } as unknown as Env;
   const llms = '# Example\n\n## For AI agents\n\n- Always pass the API-Version header in every request you make.\n- [Start](https://ex.dev/start.md)\n';
@@ -133,12 +135,14 @@ test('H1c, H2, M2 over HTTP: /v1/quick limits, per-host probe budget, approval-g
     assert.ok(!sent.includes('secret-page-name'), sent.slice(0, 500));
     assert.equal(j.calls[0].state.host, 'ex.dev');
 
-    // Another page of the host within the hour: no outbound fetches at all.
+    // Past the host's probe budget (PROBE_HOST_LIMITER): no outbound fetches; the cached root llms.txt still answers.
     fetched.length = 0;
+    probeLeft = 0;
     const second = await call('https://ex.dev/docs/other');
     assert.equal(second.status, 200);
-    assert.equal(fetched.length, 0, fetched.join(" "));
-    assert.equal(second.json.sources[0].url, 'https://ex.dev/llms.txt', 'from the site cache');
+    assert.equal(fetched.length, 0, fetched.join(' '));
+    assert.equal(second.json.sources[0].url, 'https://ex.dev/llms.txt', 'from the host cache');
+    probeLeft = 10;
 
     // Indexed and approved: instructions; robots.txt keeps the page fetch off /private.
     store.clear();
@@ -149,7 +153,8 @@ test('H1c, H2, M2 over HTTP: /v1/quick limits, per-host probe budget, approval-g
     assert.deepEqual(third.json.agentInstructions.map((i: any) => i.text), ['Always pass the API-Version header in every request you make.']);
     assert.ok(!fetched.includes('https://ex.dev/private/x'), 'robots.txt disallows the page');
 
-    // QUICK_LIMITER: the fourth request in the window is refused.
+    // QUICK_LIMITER: past its window's allowance, refused.
+    quickLeft = 0;
     assert.equal((await call('https://ex.dev/docs/y')).status, 429);
   } finally {
     globalThis.fetch = real;
@@ -317,4 +322,53 @@ test('q mode: /v1/search and /v1/packages?q= are cached per site, normalised que
   } finally {
     delete (globalThis as { caches?: unknown }).caches;
   }
+});
+
+test('N2: every page of a host gets its own .md twin and isDevDocs, and the root llms.txt from the host cache', async () => {
+  const fetched: string[] = [];
+  const fetchImpl = async (url: string) => {
+    fetched.push(url);
+    if (url === 'https://ex.dev/llms.txt') return new Response('# Ex\n\n- [A](https://ex.dev/a.md)\n' + 'words '.repeat(10), { headers: { 'content-type': 'text/plain' } });
+    if (/\/docs\/p\d\.md$/.test(url)) return new Response(`# Page\n\n${'text '.repeat(20)}`, { headers: { 'content-type': 'text/markdown' } });
+    if (/\/docs\/p\d$/.test(url)) return new Response('<html><head><title>P</title></head><body><nav><a href="/docs">Docs</a></nav></body></html>', { headers: { 'content-type': 'text/html' } });
+    return new Response('nf', { status: 404 });
+  };
+  const cache = new Map<string, any>();
+  const siteCache = { get: async (k: string) => cache.get(k) ?? null, put: async (k: string, v: any) => { cache.set(k, v); } };
+  for (const n of [1, 2, 3]) {
+    const d = await quickDiscover(`https://ex.dev/docs/p${n}`, { fetchImpl, siteCache });
+    assert.deepEqual(d.sources.map((x) => x.url), ['https://ex.dev/llms.txt', `https://ex.dev/docs/p${n}.md`], String(n));
+    assert.equal(d.llms?.verified, true);
+    assert.ok(fetched.includes(`https://ex.dev/docs/p${n}`), 'its own page, for isDevDocs');
+  }
+  // The root llms.txt was fetched once; the host and the /docs segment are cached apart.
+  assert.equal(fetched.filter((u) => u === 'https://ex.dev/llms.txt').length, 1);
+  assert.deepEqual([...cache.keys()].sort(), ['host https://ex.dev', 'instr https://ex.dev/llms.txt', 'seg https://ex.dev/docs/']);
+});
+
+test('N1: a hosting platform host is never let through by the lists (evil.readthedocs.io)', async () => {
+  const { listVerdict } = await import('../src/crawl/gate.ts');
+  assert.equal(listVerdict('https://evil.readthedocs.io/en/latest/'), null);
+  assert.equal(listVerdict('https://flask.readthedocs.io/en/latest/'), null);
+  assert.equal(listVerdict('https://someone.github.io/docs/'), null);
+  // Denylisted platforms still reject.
+  assert.equal(listVerdict('https://shop.myshopify.com/')?.decision, 'reject');
+  const { d1, raw } = fakeD1();
+  raw.prepare(`INSERT INTO site_profiles (site, status, updated_at, source, approved) VALUES ('evil.readthedocs.io', 'ready', 'x', 'requested', 0)`).run();
+  assert.equal(await instructionsAllowed(d1, 'evil.readthedocs.io', 'https://evil.readthedocs.io/en/latest/'), false);
+});
+
+test('q mode: a slow vector side is cut off at its budget; the answer is full-text only', async () => {
+  const { search } = await import('../src/search/search.ts');
+  const { d1, raw } = fakeD1();
+  raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, model, cost_usd, indexed_at) VALUES ('https://ex.dev/a', 'ex.dev', 'h', 'A', 'guide', 'm', 0, 'x')`).run();
+  raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES ('c0', 'https://ex.dev/a', 'ex.dev', 0, 'A', 'A', 'Rotate the signing secret.')`).run();
+  const t = Date.now();
+  const hits = await search({
+    db: d1,
+    embed: async () => [new Array(1024).fill(0)],
+    vectors: { query: () => new Promise((resolve) => { const keep = setTimeout(() => resolve({ matches: [], count: 0 } as never), 5000); keep.unref?.(); }) },
+  }, { q: 'signing secret', site: 'ex.dev', limit: 5, vectorBudgetMs: 100 });
+  assert.equal(hits.length, 1);
+  assert.ok(Date.now() - t < 1000, `${Date.now() - t} ms`);
 });
