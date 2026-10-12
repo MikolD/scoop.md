@@ -286,6 +286,9 @@ async function waitForCrawl(scoop, initial) {
   announce(`Figuring out the docs for ${site}…`);
   $('copy-now').disabled = false;
   waitingSince = Date.now();
+  // The give-up clock is this wait's own: waitingSince is cleared once the wait
+  // has been reported, which must not end the wait.
+  const waitStarted = waitingSince;
   let stopped = false;
   let copyingNow = null;
   $('copy-now').onclick = () => {
@@ -298,7 +301,7 @@ async function waitForCrawl(scoop, initial) {
     let req = initial;
     let errors = 0;
     while (!stopped && !isTerminal(req.state)) {
-      if (Date.now() - waitingSince >= timing.maxWaitMs) {
+      if (Date.now() - waitStarted >= timing.maxWaitMs) {
         req = { state: 'timeout' };
         break;
       }
@@ -561,11 +564,14 @@ let closed = false;
 function onClose() {
   if (closed) return;
   closed = true;
-  waitOutcome('closed');
   track('popup_close', { durationMs: Date.now() - openedAt });
   telemetry.flushOnClose();
 }
-globalThis.addEventListener?.('pagehide', onClose);
+// Hidden isn't always closed (the popup can come back), so only pagehide ends a wait.
+globalThis.addEventListener?.('pagehide', () => {
+  waitOutcome('closed');
+  onClose();
+});
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') onClose(); });
 
 // Exported so tests can wait for the first run.

@@ -537,3 +537,17 @@ test('a crawl that never finishes: after maxWaitMs the page is copied, and the r
   await sleep(60);
   assert.equal(gets('/v1/crawl-requests/').length, polls, 'the popup stopped polling');
 }));
+
+test('the popup hidden mid-wait (window in the background) keeps waiting and still delivers', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  // Live on staging: a visibilitychange to hidden reported the wait as closed and
+  // zeroed its clock, so the next poll "timed out" after 3 minutes, not 10.
+  Object.assign(timing, { pollMs: 25, maxWaitMs: 5_000 });
+  const p = await openPopup(PAGE);
+  await waitFor(() => p.document.body.dataset.stage === 'waiting');
+  Object.defineProperty(p.document, 'visibilityState', { value: 'hidden', configurable: true });
+  p.document.dispatchEvent(new p.document.defaultView.Event('visibilitychange'));
+  await p.ready;
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE), 'the indexed package, not a timeout fallback');
+  assert.equal(p.$('crawl-note').textContent, '');
+  assert.deepEqual(queued(p.local, 'crawl_wait').map((w) => w.outcome), ['complete']);
+}));
