@@ -85,11 +85,25 @@ async function vectorIds(deps: SearchDeps, p: SearchParams): Promise<string[]> {
   }
 }
 
+// llms-full.txt repeats a site's whole documentation in one file, so its chunks
+// match nearly everything and would crowd out the pages they were copied from.
+// They stay searchable, at 0.3 × their fused score.
+export const LLMS_FULL_WEIGHT = 0.3;
+
+export function sourceWeight(url: string): number {
+  try {
+    return /\/llms-full\.txt$/i.test(new URL(url).pathname) ? LLMS_FULL_WEIGHT : 1;
+  } catch {
+    return 1;
+  }
+}
+
 export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHit[]> {
   const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p)]);
   const fused = rrf([fts.ids, vec]);
-  // Over-fetch: vectors can point at chunks deleted since, or carry stale metadata.
-  const wanted = fused.slice(0, Math.min(DEPTH, p.limit * 2));
+  // Every fused candidate is read: vectors can point at chunks deleted since or
+  // carry stale metadata, and down-weighted sources must make room for others.
+  const wanted = fused.slice(0, DEPTH);
   if (!wanted.length) return [];
   const { results } = await deps.db
     .prepare(
@@ -100,10 +114,14 @@ export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHi
     .bind(...wanted.map((w) => w.id))
     .all<{ id: string; url: string; site: string; title: string; ord: number; heading_path: string; text: string; slot: string | null; topic_path: string | null }>();
   const rows = new Map(results.map((r) => [r.id, r]));
+  const ranked = wanted
+    .map(({ id, score }) => ({ id, score, r: rows.get(id) }))
+    .filter((w) => w.r && (!p.site || w.r.site === p.site) && (!p.slot || w.r.slot === p.slot))
+    .map((w) => ({ ...w, score: w.score * sourceWeight(w.r!.url) }))
+    .sort((a, b) => b.score - a.score);
   const hits: ChunkHit[] = [];
-  for (const { id, score } of wanted) {
-    const r = rows.get(id);
-    if (!r || (p.site && r.site !== p.site) || (p.slot && r.slot !== p.slot)) continue;
+  for (const { id, score, r: row } of ranked) {
+    const r = row!;
     hits.push({
       id,
       url: r.url,

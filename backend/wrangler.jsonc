@@ -53,7 +53,7 @@
   // The crawler sends one message per changed page; the consumer indexes it (src/index/).
   "queues": {
     "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }],
-    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" }]
+    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" }]
   },
   // Daily: re-enqueue pages still waiting for a classification (src/index/reclassify.ts).
   "triggers": { "crons": ["17 4 * * *"] },
@@ -98,7 +98,7 @@
       ],
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }],
-        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" }]
+        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" }]
       },
       "triggers": { "crons": ["17 4 * * *"] }
     },
@@ -140,7 +140,7 @@
       ],
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-production" }],
-        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" }]
+        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" }]
       },
       "triggers": { "crons": ["17 4 * * *"] }
     }

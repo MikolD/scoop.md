@@ -85,7 +85,12 @@ export interface ClassifyOptions {
   apiKey: string;
   fetchImpl?: FetchImpl;
   models?: string[];
+  // Wall-clock budget for the whole classification, all models included.
+  signal?: AbortSignal;
 }
+
+// Per page, so a slow model can't hold a queue batch past its limits.
+export const CLASSIFY_BUDGET_MS = 60_000;
 
 export interface PageInput {
   url: string;
@@ -161,7 +166,7 @@ export class ClassifyUnavailable extends Error {
   }
 }
 
-async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = fetch }: ClassifyOptions): Promise<{ content: string; cost: number }> {
+async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = fetch, signal }: ClassifyOptions): Promise<{ content: string; cost: number }> {
   const user = userMessage(page);
   // Charged when the call may have been billed but no usage came back.
   const estimate = estimateCost(model, SYSTEM.length + user.length);
@@ -187,7 +192,7 @@ async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = f
         max_tokens: MAX_TOKENS,
         usage: { include: true },
       }),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(TIMEOUT_MS)]) : AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (e) {
     // Timeout or dropped connection: the generation may have run and been billed.
@@ -225,6 +230,11 @@ export async function classifyPage(page: PageInput, opts: ClassifyOptions): Prom
   let invalid = false;
   const errors: string[] = [];
   for (const model of models) {
+    // Out of time: no fallback call; transient, so the queue retries later.
+    if (opts.signal?.aborted) {
+      errors.push(`${model}: skipped, classification budget used up`);
+      break;
+    }
     try {
       const { content, cost } = await callModel(model, page, opts);
       costUsd += cost;
