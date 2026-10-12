@@ -140,6 +140,25 @@ export class CrawlStore {
     return (inserted.results as unknown[]).length === 1;
   }
 
+  // The E2B daily cap: reserves a browser crawl's worst case (`usd`, the
+  // sandbox's full timeout) as the run's cost_usd, only if today's sandbox
+  // spend (runs started this UTC day, reservations included) stays within
+  // `capUsd`. One statement, so two runs can't both squeeze under the cap.
+  // The real cost replaces the reservation when the sandbox stops.
+  async reserveBrowser(id: string, usd: number, capUsd: number, now = new Date()): Promise<{ ok: boolean; spentUsd: number }> {
+    const day = now.toISOString().slice(0, 10);
+    const reserved = await this.db
+      .prepare(
+        `UPDATE crawl_runs SET cost_usd = ?2
+         WHERE id = ?1 AND (SELECT COALESCE(SUM(cost_usd), 0) FROM crawl_runs WHERE started_at >= ?3 AND id != ?1) + ?2 <= ?4
+         RETURNING id`,
+      )
+      .bind(id, usd, day, capUsd)
+      .first<{ id: string }>();
+    const spent = await this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM crawl_runs WHERE started_at >= ?').bind(day).first<{ s: number }>();
+    return { ok: reserved !== null, spentUsd: spent?.s ?? 0 };
+  }
+
   async getRun(id: string): Promise<CrawlRunRow | null> {
     return this.db.prepare('SELECT * FROM crawl_runs WHERE id = ?').bind(id).first<CrawlRunRow>();
   }

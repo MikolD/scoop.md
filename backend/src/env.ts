@@ -23,7 +23,11 @@ export interface Env {
   ADMIN_TOKEN?: string;
   // Admin console Basic auth: user name and passcode. Unset means no one gets in.
   ADMIN_UI_USER?: string;
-  ADMIN_UI_PASSCODE?: string;
+  ADMIN_UI_PASSCODE?: string; // at least 32 characters, or no one gets in
+  // The admin console's host in this environment (admin.scoop.md, admin-staging.scoop.md).
+  ADMIN_HOST?: string;
+  // Browser sandbox (E2B) spend cap per UTC day, in USD (default 2).
+  E2B_DAILY_CAP_USD?: string;
   RATE_KEY?: string;
   E2B_API_KEY?: string;
   // R2 S3 API token (Object Read & Write on the crawl bucket) for presigning uploads.

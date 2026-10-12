@@ -24,7 +24,7 @@ export default {
     const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
 
     // admin.scoop.md (and admin-staging): the console, behind Basic auth. Nothing below applies to it.
-    if (isAdminHost(url.hostname)) {
+    if (isAdminHost(url.hostname, env)) {
       const res = await handleAdmin(req, env, url, ip);
       console.log(JSON.stringify({ method: req.method, route: 'admin', status: res.status, ms: Date.now() - started }));
       return res;

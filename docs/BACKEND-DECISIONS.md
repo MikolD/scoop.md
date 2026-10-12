@@ -846,8 +846,8 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
 ## Admin console (admin.scoop.md)
 
 - **Same Worker, another host.** `admin.scoop.md` / `admin-staging.scoop.md`
-  are custom-domain routes on the API Worker. `src/index.ts` sends any host
-  starting with `admin.` or `admin-staging.` to `src/admin/app.ts` before the
+  are custom-domain routes on the API Worker. `src/index.ts` sends the
+  environment's `ADMIN_HOST` (and `admin.localhost` in dev) to `src/admin/app.ts` before the
   v1 router runs, so the API's routes, CORS and read limits are untouched and
   the console reuses the stores, search and crawl code in-process (no
   `ADMIN_TOKEN` in the browser). The v1 API is not served on admin hosts and
@@ -868,6 +868,28 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   so a browser's first, bare request (which triggers the prompt) never locks
   anyone out. Unset `ADMIN_UI_USER`, `ADMIN_UI_PASSCODE` or `RATE_KEY`: 401
   for everyone.
+- **Security review follow-ups (M1, L1-L5).**
+  - A passcode under 32 characters fails closed, like an unset one.
+  - Every failed attempt logs `admin_auth_fail` with a 16-hex hash of the
+    lockout key: one source can be told from many without logging an IP.
+  - A request without credentials gets 401 before any D1 read; the others
+    pass the per-IP `READ_LIMITER` before the lockout lookup, so the lockout
+    table can't be used to make the Worker query D1 at line rate.
+  - There is no global lockout: it would let anyone lock the owner out.
+  - Cross-site reads of `/api/*` are refused when `Sec-Fetch-Site` says so;
+    `search` and `package` embed the query.
+  - One running batch at a time.
+  - E2B spend is capped per UTC day. The cap is enforced where a sandbox is
+    about to start (the Workflow's `browser-budget` step), not in
+    `startCrawl`: only discovery knows whether a site needs a browser, and a
+    cap reached by browser crawls shouldn't stop Markdown crawls. The
+    sandbox's worst case is reserved in one conditional UPDATE, so concurrent
+    runs can't overshoot. A run that fails mid-sandbox keeps its reservation
+    as its cost, an overestimate on the safe side.
+  - Cancelling marks a run failed only once its Workflow is certainly stopped;
+    a run whose instance can't be reached is left for the stale-run rule.
+  - Admin hosts are pinned per environment (`ADMIN_HOST`); `admin.localhost`
+    works only when `ENVIRONMENT` is `dev`.
 - **CSRF** relies on `Sec-Fetch-Site: same-origin` (sent by every current
   browser), falling back to an exact `Origin` match; neither header means
   refused. Basic auth credentials are sent automatically by the browser, so

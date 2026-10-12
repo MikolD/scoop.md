@@ -34,6 +34,14 @@ export const MAX_SANDBOX_SECONDS = 3600;
 const VCPUS = 2;
 const MEMORY_GIB = 2;
 export const E2B_USD_PER_SECOND = VCPUS * 0.000014 + MEMORY_GIB * 0.0000045;
+// Sandbox spend per UTC day (E2B_DAILY_CAP_USD); a browser crawl that would
+// go over it fails before its sandbox starts (CrawlStore.reserveBrowser).
+export const DEFAULT_E2B_DAILY_CAP_USD = 2;
+
+export function e2bDailyCap(env: { E2B_DAILY_CAP_USD?: string }): number {
+  const n = Number(env.E2B_DAILY_CAP_USD);
+  return env.E2B_DAILY_CAP_USD && Number.isFinite(n) && n >= 0 ? n : DEFAULT_E2B_DAILY_CAP_USD;
+}
 
 export interface E2BOptions {
   apiKey: string;

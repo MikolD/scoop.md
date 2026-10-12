@@ -21,7 +21,7 @@ import { addCost, capsReached } from '../index/indexer.ts';
 import { indexDeps } from '../index/deps.ts';
 import { gateSite, GateUndecided } from './gate.ts';
 import type { GateVerdict } from './gate.ts';
-import { E2B_USD_PER_SECOND, E2BCrawler, MAX_SANDBOX_SECONDS } from './e2b.ts';
+import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
 import { batchKey, collectResult, planKey, runPrefix, uploadKey } from './collect.ts';
@@ -159,6 +159,14 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         if (!env.E2B_API_KEY || !env.E2B_TEMPLATE_ID) throw new Error('needs a browser, but E2B_API_KEY / E2B_TEMPLATE_ID are not set');
         const crawler = e2b();
         const maxMinutes = Math.min(p.maxMinutes, (MAX_SANDBOX_SECONDS - 300) / 60);
+
+        // The E2B daily cap: the sandbox's worst case is reserved first, and a
+        // run that would go over it fails here, before any sandbox exists.
+        const capUsd = e2bDailyCap(env);
+        const budget = await step.do('browser-budget', DB, () =>
+          store().reserveBrowser(p.runId, Number((Math.min(MAX_SANDBOX_SECONDS, Math.ceil(maxMinutes * 60) + 180) * E2B_USD_PER_SECOND).toFixed(6)), capUsd),
+        );
+        if (!budget.ok) throw new Error(`E2B daily cap reached: $${budget.spentUsd.toFixed(2)} of $${capUsd.toFixed(2)} spent today (E2B_DAILY_CAP_USD)`);
 
         // Kills any sandbox a failed earlier attempt of this step left behind,
         // then starts one tagged with the run ID. The output holds the

@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import type { Env } from '../src/env.ts';
 import { handleAdmin } from '../src/admin/app.ts';
-import { credentialsValid, isAdminHost, LOCKOUT_SECONDS, parseBasic, sameOrigin } from '../src/admin/auth.ts';
+import { credentialsValid, isAdminHost, LOCKOUT_SECONDS, MIN_PASSCODE, parseBasic, sameOrigin } from '../src/admin/auth.ts';
 import { BUSY_RETRY_MS, cancelBatch, createBatch, getBatch, MAX_START_ATTEMPTS, tickBatch } from '../src/admin/batch.ts';
 import type { JobRow } from '../src/admin/batch.ts';
 import { SEEDS, skillPackage } from '../src/admin/api.ts';
@@ -27,7 +27,7 @@ const { default: worker } = await import('../src/index.ts');
 const { buildPackage, withCurrentPage } = await import('../../extension/lib/package.js');
 
 const USER = 'admin';
-const PASS = 'correct horse battery staple';
+const PASS = 'correct horse battery staple, twice over';
 const ORIGIN = 'https://admin.scoop.md';
 const basic = (user: string, pass: string) => `Basic ${Buffer.from(`${user}:${pass}`, 'utf8').toString('base64')}`;
 const GOOD = basic(USER, PASS);
@@ -41,12 +41,18 @@ function setup(over: Partial<Env> = {}) {
   const terminated: string[] = [];
   const workflowStatus = new Map<string, string>();
   const attempts = new Map<string, number>();
+  const reads: string[] = [];
   const env = {
     DB: d1,
     SKILLS: skills.r2,
     CRAWL: {
       ...crawlR2.r2,
-      list: async ({ prefix }: { prefix: string }) => ({ objects: [...crawlR2.objects.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key })), truncated: false }),
+      // One key per page, so callers must follow the cursor.
+      list: async ({ prefix, cursor }: { prefix: string; cursor?: string }) => {
+        // The cursor is the last key returned, like R2's: stable while the caller deletes.
+        const keys = [...crawlR2.objects.keys()].filter((k) => k.startsWith(prefix) && (!cursor || k > cursor)).sort();
+        return { objects: keys.slice(0, 1).map((key) => ({ key })), truncated: keys.length > 1, cursor: keys[0] };
+      },
       delete: async (keys: string | string[]) => { for (const k of [keys].flat()) crawlR2.objects.delete(k); },
     },
     ASSETS: {
@@ -70,14 +76,15 @@ function setup(over: Partial<Env> = {}) {
         return { success: n <= 10 };
       },
     },
-    READ_LIMITER: { limit: async () => ({ success: true }) },
+    READ_LIMITER: { limit: async ({ key }: { key: string }) => { reads.push(key); return { success: reads.length <= 600 }; } },
     RATE_KEY: 'test-rate-key',
     ADMIN_UI_USER: USER,
     ADMIN_UI_PASSCODE: PASS,
     ENVIRONMENT: 'production',
+    ADMIN_HOST: 'admin.scoop.md',
     ...over,
   } as unknown as Env;
-  return { env, raw, d1, skills, crawlR2, created, batches, terminated, workflowStatus, attempts };
+  return { env, raw, d1, skills, crawlR2, created, batches, terminated, workflowStatus, attempts, reads };
 }
 
 function req(path: string, init: RequestInit & { auth?: string | null; host?: string } = {}) {
@@ -100,14 +107,18 @@ async function call(env: Env, r: Request, ip = '203.0.113.7') {
 
 // ---- Auth --------------------------------------------------------------------
 
-test('isAdminHost: admin and admin-staging hosts only', () => {
-  assert.ok(isAdminHost('admin.scoop.md'));
-  assert.ok(isAdminHost('admin-staging.scoop.md'));
-  assert.ok(isAdminHost('admin.localhost'));
-  assert.ok(!isAdminHost('api.scoop.md'));
-  assert.ok(!isAdminHost('api-staging.scoop.md'));
-  assert.ok(!isAdminHost('notadmin.scoop.md'));
-  assert.ok(!isAdminHost('scoop.md'));
+test('isAdminHost: exactly ADMIN_HOST; admin.localhost in dev only', () => {
+  const prod = { ADMIN_HOST: 'admin.scoop.md', ENVIRONMENT: 'production' as const };
+  const staging = { ADMIN_HOST: 'admin-staging.scoop.md', ENVIRONMENT: 'staging' as const };
+  assert.ok(isAdminHost('admin.scoop.md', prod));
+  assert.ok(!isAdminHost('admin-staging.scoop.md', prod));
+  assert.ok(isAdminHost('admin-staging.scoop.md', staging));
+  assert.ok(!isAdminHost('admin.scoop.md', staging));
+  assert.ok(!isAdminHost('admin.localhost', prod));
+  assert.ok(isAdminHost('admin.localhost', { ENVIRONMENT: 'dev' }));
+  assert.ok(!isAdminHost('admin.evil.example', { ENVIRONMENT: 'dev' }));
+  assert.ok(!isAdminHost('api.scoop.md', prod));
+  assert.ok(!isAdminHost('admin.scoop.md', { ENVIRONMENT: 'production' })); // no ADMIN_HOST: no console
 });
 
 test('parseBasic: UTF-8, colons in the passcode, junk', () => {
@@ -139,6 +150,14 @@ test('Basic auth: missing gets the prompt, wrong is refused, right gets in', asy
 });
 
 test('Basic auth fails closed when a secret is unset', async () => {
+  assert.equal(MIN_PASSCODE, 32);
+  // A passcode under 32 characters lets no one in, even typed correctly.
+  const short = 'x'.repeat(31);
+  const { env: weak } = setup({ ADMIN_UI_PASSCODE: short } as Partial<Env>);
+  assert.equal((await call(weak, req('/api/overview', { auth: basic(USER, short) }))).status, 401);
+  const long = 'x'.repeat(32);
+  const { env: ok } = setup({ ADMIN_UI_PASSCODE: long } as Partial<Env>);
+  assert.equal((await call(ok, req('/api/overview', { auth: basic(USER, long) }))).status, 200);
   for (const over of [{ ADMIN_UI_USER: undefined }, { ADMIN_UI_PASSCODE: undefined }, { ADMIN_UI_USER: '', ADMIN_UI_PASSCODE: '' }, { RATE_KEY: undefined }]) {
     const { env } = setup(over as Partial<Env>);
     assert.equal((await call(env, req('/api/overview'))).status, 401, JSON.stringify(over));
@@ -164,13 +183,45 @@ test('failed attempts: 10 per minute per IP, then 429 and a lockout the right pa
   const keys = raw.prepare('SELECT key FROM admin_auth_lockouts').all() as { key: string }[];
   assert.equal(keys.length, 1);
   assert.match(keys[0].key, /^[0-9a-f]{64}$/);
-  // Bare requests (the browser's first, before the prompt) don't count.
-  const { env: env2, attempts: a2 } = setup();
+  // Bare requests (the browser's first, before the prompt) don't count, and
+  // cost neither a limiter call nor a D1 read.
+  const { env: env2, attempts: a2, reads } = setup();
+  const prepare = env2.DB.prepare.bind(env2.DB);
+  let d1Reads = 0;
+  (env2.DB as { prepare: unknown }).prepare = (sql: string) => { d1Reads++; return prepare(sql); };
   for (let i = 0; i < 20; i++) assert.equal((await call(env2, req('/', { auth: null }))).status, 401);
-  assert.equal(a2.size, 0);
+  assert.deepEqual([a2.size, reads.length, d1Reads], [0, 0, 0]);
   // Once the lockout has passed, the right passcode works again.
   raw.prepare(`UPDATE admin_auth_lockouts SET until = '2000-01-01T00:00:00.000Z'`).run();
   assert.equal((await call(env, req('/'))).status, 200);
+});
+
+test('failed attempts are logged as admin_auth_fail with a hashed subject only', async () => {
+  const { env } = setup();
+  const lines: string[] = [];
+  const warn = console.warn;
+  console.warn = (s: string) => { lines.push(s); };
+  try {
+    await call(env, req('/', { auth: basic(USER, 'hunter2-wrong') }), '203.0.113.9');
+    for (let i = 0; i < 10; i++) await call(env, req('/', { auth: basic(USER, `g${i}`) }), '203.0.113.9');
+  } finally {
+    console.warn = warn;
+  }
+  const events = lines.map((l) => JSON.parse(l));
+  assert.equal(events.length, 11);
+  assert.ok(events.every((e) => e.event === 'admin_auth_fail' && /^[0-9a-f]{16}$/.test(e.subject)));
+  assert.equal(new Set(events.map((e) => e.subject)).size, 1);
+  assert.deepEqual(events.map((e) => e.locked), [...Array(10).fill(false), true]);
+  const all = lines.join('\n');
+  assert.doesNotMatch(all, /203\.0\.113|hunter2|admin"/);
+});
+
+test('a per-IP read limit comes before the lockout lookup', async () => {
+  const { env, reads } = setup();
+  reads.push(...Array(600).fill('x'));
+  const r = await call(env, req('/api/overview'));
+  assert.equal(r.status, 429);
+  assert.equal(r.headers.get('retry-after'), '60');
 });
 
 // ---- Headers, CSRF, routing --------------------------------------------------
@@ -199,6 +250,18 @@ test('security headers and no-store on every admin response', async () => {
     assert.equal(r.headers.get('etag'), null);
     assert.equal(r.headers.get('access-control-allow-origin'), null);
   }
+});
+
+test('cross-site reads of /api/* are refused (some pay for embeddings)', async () => {
+  const { env } = setup();
+  const get = (site?: string) => call(env, req('/api/overview', { headers: site ? { 'sec-fetch-site': site } : {} }));
+  assert.equal((await get('cross-site')).status, 403);
+  assert.equal((await get('same-site')).status, 403);
+  assert.equal((await get('none')).status, 403);
+  assert.equal((await get('same-origin')).status, 200);
+  assert.equal((await get()).status, 200); // curl
+  // The pages themselves can be opened from a link or the address bar.
+  assert.equal((await call(env, req('/', { headers: { 'sec-fetch-site': 'none' } }))).status, 200);
 });
 
 test('CSRF: state-changing requests must be same-origin', async () => {
@@ -230,7 +293,12 @@ test('admin host routing leaves api.* untouched', async () => {
   const v1 = await fetch(new Request('https://admin.scoop.md/v1/health', { headers: { authorization: GOOD } }));
   assert.equal(v1.status, 404);
   assert.equal(v1.headers.get('access-control-allow-origin'), null);
-  assert.equal((await fetch(new Request('https://admin-staging.scoop.md/api/overview', { headers: { authorization: GOOD } }))).status, 200);
+  // Another environment's admin host is not this one's console.
+  assert.equal((await fetch(new Request('https://admin-staging.scoop.md/api/overview', { headers: { authorization: GOOD } }))).status, 404);
+  // admin.localhost is the console only in local dev.
+  assert.equal((await fetch(new Request('http://admin.localhost:8787/api/overview', { headers: { authorization: GOOD } }))).status, 404);
+  const { env: dev } = setup({ ENVIRONMENT: 'dev', ADMIN_HOST: undefined } as Partial<Env>);
+  assert.equal((await worker.fetch(new Request('http://admin.localhost:8787/api/overview', { headers: { authorization: GOOD } }), dev)).status, 200);
 });
 
 // ---- Endpoints ---------------------------------------------------------------
@@ -318,10 +386,10 @@ test('runs: paged list with filters, detail, cancel', async () => {
 
   // Cancel: terminate the Workflow, mark the run failed, keep the site's outcome, clear working files.
   workflowStatus.set('cr_01CCCCCCCCCCCCCCCCCCCCCCCC', 'running');
-  crawlR2.objects.set('crawl-results/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/plan.json', '[]');
+  for (const f of ['plan.json', 'batch-0.json', 'batch-1.json', 'manifest.json']) crawlR2.objects.set(`crawl-results/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/${f}`, '[]');
   const c = await call(env, post('/api/runs/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/cancel', {}));
   assert.equal(c.status, 200);
-  assert.deepEqual(c.body, { terminated: true, sandboxes: 0, marked: true, notes: [] });
+  assert.deepEqual(c.body, { ok: true, terminated: true, sandboxes: 0, marked: true, notes: [] });
   assert.deepEqual(terminated, ['cr_01CCCCCCCCCCCCCCCCCCCCCCCC']);
   const run = raw.prepare(`SELECT status, error, finished_at FROM crawl_runs WHERE id = 'cr_01CCCCCCCCCCCCCCCCCCCCCCCC'`).get() as any;
   assert.equal(run.status, 'failed');
@@ -335,9 +403,37 @@ test('runs: paged list with filters, detail, cancel', async () => {
   assert.equal(again.body.terminated, false);
 });
 
-test('cancel kills the run\'s tagged E2B sandboxes', async () => {
-  const { env, raw, skills } = setup({ E2B_API_KEY: 'e2b-test' } as Partial<Env>);
+test('cancel leaves the run alone (502) when its Workflow cannot be stopped', async () => {
+  const { env, raw, skills } = setup();
   seed(raw, skills.objects);
+  // No instance to reach (get throws): the run is not marked failed.
+  const c = await call(env, post('/api/runs/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/cancel', {}));
+  assert.equal(c.status, 502);
+  assert.equal(c.body.ok, false);
+  assert.equal(c.body.marked, false);
+  assert.match(c.body.notes[0], /^workflow: instance\.not_found/);
+  assert.equal((raw.prepare(`SELECT status FROM crawl_runs WHERE id = 'cr_01CCCCCCCCCCCCCCCCCCCCCCCC'`).get() as any).status, 'running');
+  assert.equal((raw.prepare(`SELECT crawl_state FROM site_profiles WHERE site = 'docs.stripe.com'`).get() as any).crawl_state, 'crawling');
+  // terminate() itself failing: same.
+  const { env: env2, raw: raw2, skills: s2, workflowStatus } = setup();
+  seed(raw2, s2.objects);
+  workflowStatus.set('cr_01CCCCCCCCCCCCCCCCCCCCCCCC', 'running');
+  (env2 as { CRAWL_SITE: unknown }).CRAWL_SITE = { get: async () => ({ status: async () => ({ status: 'running' }), terminate: async () => { throw new Error('boom'); } }) };
+  const c2 = await call(env2, post('/api/runs/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/cancel', {}));
+  assert.equal(c2.status, 502);
+  assert.equal((raw2.prepare(`SELECT status FROM crawl_runs WHERE id = 'cr_01CCCCCCCCCCCCCCCCCCCCCCCC'`).get() as any).status, 'running');
+  // An instance that already ended (errored without its fail step): marked.
+  const { env: env3, raw: raw3, skills: s3, workflowStatus: w3 } = setup();
+  seed(raw3, s3.objects);
+  w3.set('cr_01CCCCCCCCCCCCCCCCCCCCCCCC', 'errored');
+  const c3 = await call(env3, post('/api/runs/cr_01CCCCCCCCCCCCCCCCCCCCCCCC/cancel', {}));
+  assert.deepEqual([c3.status, c3.body.terminated, c3.body.marked], [200, false, true]);
+});
+
+test('cancel kills the run\'s tagged E2B sandboxes', async () => {
+  const { env, raw, skills, workflowStatus } = setup({ E2B_API_KEY: 'e2b-test' } as Partial<Env>);
+  seed(raw, skills.objects);
+  workflowStatus.set('cr_01CCCCCCCCCCCCCCCCCCCCCCCC', 'running');
   const realFetch = globalThis.fetch;
   const calls: string[] = [];
   globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -676,11 +772,13 @@ test('batch endpoints: create from seeds, list, detail, cancel with stopRuns', a
   assert.equal(r.status, 202);
   assert.equal(r.body.jobs, 2);
   assert.deepEqual(batches, [{ id: r.body.batchId, params: { batchId: r.body.batchId } }]);
-  const all = await call(env, post('/api/batches', { concurrency: 8 }));
-  assert.equal(all.body.jobs, SEEDS.length);
+  // One running batch at a time.
+  const second = await call(env, post('/api/batches', { concurrency: 8 }));
+  assert.equal(second.status, 409);
+  assert.equal(batches.length, 1);
 
   const list = (await call(env, req('/api/batches'))).body.batches;
-  assert.equal(list.length, 2);
+  assert.equal(list.length, 1);
   const detail = (await call(env, req(`/api/batches/${r.body.batchId}`))).body;
   assert.deepEqual(detail.jobs.map((j: any) => j.max_pages), [3, 3]);
   assert.deepEqual(detail.jobs.map((j: any) => j.start_url), two);
@@ -690,8 +788,12 @@ test('batch endpoints: create from seeds, list, detail, cancel with stopRuns', a
   raw.prepare(`UPDATE crawl_batch_jobs SET status = 'running', run_id = 'cr_01DDDDDDDDDDDDDDDDDDDDDDDD' WHERE batch_id = ? AND ord = 0`).run(r.body.batchId);
   workflowStatus.set('cr_01DDDDDDDDDDDDDDDDDDDDDDDD', 'running');
   const c = await call(env, post(`/api/batches/${r.body.batchId}/cancel`, { stopRuns: true }));
-  assert.deepEqual(c.body, { cancelled: true, inFlight: 1, stopped: 1 });
+  assert.deepEqual(c.body, { cancelled: true, inFlight: 1, stopped: 1, notStopped: [] });
   assert.deepEqual(terminated, ['cr_01DDDDDDDDDDDDDDDDDDDDDDDD']);
+  // Not running any more: a new batch (every seed) can start.
+  const all = await call(env, post('/api/batches', { concurrency: 8 }));
+  assert.equal(all.status, 202);
+  assert.equal(all.body.jobs, SEEDS.length);
   assert.equal((await call(env, post(`/api/batches/${r.body.batchId}/cancel`, {}))).status, 409);
   assert.equal((await call(env, post('/api/batches/cb_01ZZZZZZZZZZZZZZZZZZZZZZZZ/cancel', {}))).status, 404);
 });
