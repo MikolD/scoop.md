@@ -391,6 +391,15 @@ listening on `::` for that port.
   when an R2 API token is configured (`R2_ACCESS_KEY_ID` etc.). R2 presigned
   URLs can be used any number of times until they expire, so the key is unique
   per run and the object is deleted once read.
+- **Terminated runs (accepted limitation).** The `fail` step runs only when
+  the Workflow throws. Terminating an instance from the API or dashboard skips
+  it, so a sandbox that run started keeps running until its E2B timeout (crawl
+  minutes + 3, at most 60). That is bounded, and the sandbox holds no
+  credentials. The kill-by-`runId` at `browser-start` removes it if that run's
+  start step executes again; otherwise the E2B timeout does. Sandboxes can
+  also be found by hand with `GET /v2/sandboxes?metadata=purpose%3Dscoop-crawl`.
+  The run row stays `running` until it is 6 hours old, when it stops
+  blocking new crawls of the site.
 - **Auth failures** (401/403 from E2B's API or proxy) make `poll` throw instead
   of reporting the sandbox as still running.
 - **Endpoints verified against the live API** (2026-10-12, real key):
