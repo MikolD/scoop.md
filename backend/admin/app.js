@@ -186,6 +186,7 @@ async function render() {
   for (const a of document.querySelectorAll('[data-nav]')) a.classList.toggle('on', a.dataset.nav === (NAV[key] ?? key));
   if (!view) return show(mine, [card('Not found', h('p', {}, 'No such page. '), h('a', { href: '#/' }, 'Back to the overview'))]);
   let out;
+  $view.setAttribute('aria-busy', 'true');
   try {
     out = await view(r);
   } catch (e) {
@@ -198,6 +199,7 @@ async function render() {
 // is running, re-renders every REFRESH_MS. Inputs keep focus and values.
 function show(mine, nodes, live = false) {
   if (mine !== generation) return;
+  $view.removeAttribute('aria-busy');
   const focused = document.activeElement?.id;
   const values = Object.fromEntries([...$view.querySelectorAll('input[id], select[id]')].map((i) => [i.id, i.type === 'checkbox' ? i.checked : i.value]));
   const keep = $view.dataset.hash === location.hash;
@@ -239,8 +241,10 @@ document.getElementById('theme').addEventListener('click', () => {
 // ---- Shared pieces -----------------------------------------------------------
 
 const siteLink = (site) => h('a', { href: `#/sites/${enc(site)}`, class: 'mono' }, site);
-const runLink = (id) => h('a', { href: `#/runs/${id}`, class: 'mono' }, id);
-const pageLink = (url, label) => h('a', { href: `#/page?url=${enc(url)}`, class: 'mono' }, label ?? url);
+// IDs end in their random part: phones show only the last 8 characters.
+const shortId = (id) => [h('span', { class: 'hide-sm' }, id.slice(0, -8)), id.slice(-8)];
+const runLink = (id) => h('a', { href: `#/runs/${id}`, class: 'mono', title: id }, shortId(id));
+const pageLink = (url, label = url) => h('a', { href: `#/page?url=${enc(url)}`, class: label === url ? 'mono' : undefined }, label);
 
 function gateText(g) {
   if (!g) return '';
@@ -382,7 +386,7 @@ async function crawls(r) {
       h('div', { class: 'head' }, h('h1', {}, 'Crawls'), active ? h('span', { class: 'live' }, `refreshing every ${REFRESH_MS / 1000}s`) : null),
       card('Start a crawl', crawlForm(), h('p', { class: 'meta small' }, 'One crawl per site at a time; the devtool gate runs first unless skipped.')),
       card(h('span', {}, 'Batches ', h('a', { href: '#/seeds', class: 'small' }, 'start one from Seeds')), table([
-        { label: 'Batch', get: (b) => h('a', { href: `#/batches/${b.id}`, class: 'mono' }, b.id) },
+        { label: 'Batch', get: (b) => h('a', { href: `#/batches/${b.id}`, class: 'mono', title: b.id }, shortId(b.id)) },
         { label: 'Status', get: (b) => pill(b.status) },
         { label: 'Progress', get: (b) => `${b.done}/${b.jobs} done · ${b.active} running`, cls: 'nowrap' },
         { label: 'Concurrency', get: (b) => b.concurrency, cls: 'num' },

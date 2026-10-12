@@ -30,6 +30,8 @@ src/db/           D1/R2 stores (skills; crawl profiles, runs, pages) and hourly 
 src/crawl/        Workflow "CrawlSite" and its portable parts (see src/crawl/README.md)
 src/index/        Queue consumer and pipeline: classify → chunk → embed → Vectorize + D1
 src/search/       hybrid search (FTS5 + Vectorize, RRF), topic trees, Markdown packages
+src/admin/        admin.scoop.md: Basic auth, JSON API, seed crawl batches (Workflow CrawlBatch)
+admin/            the admin console's static UI (HTML, CSS, one JS module; no build step)
 migrations/       D1 migrations (wrangler d1 migrations apply)
 test/             unit tests (node:test; node:sqlite stands in for D1)
 ```
@@ -170,6 +172,62 @@ reads the crawl result from the sandbox itself (20 MB cap) and kills it right
 after; the R2 API token secrets are optional and only switch on a presigned
 upload instead.
 
+## Admin console
+
+`admin.scoop.md` (production) and `admin-staging.scoop.md` (staging) are the
+same Worker on extra custom domains: every request whose host starts with
+`admin.` or `admin-staging.` goes to `src/admin/`, and nothing else in the API
+changes. It runs crawls (one URL, or seed batches), and shows every crawled
+site, page, label and chunk, what the agent gets (search hits and the
+`/v1/packages` Markdown, with Copy), the shared library (best and recent
+skills, the exact Markdown the extension copies, reports, takedown) and
+costs. Crawled and shared content is always rendered as text.
+
+- **HTTP Basic auth** on every request, static files included: user
+  `ADMIN_UI_USER`, password the passcode `ADMIN_UI_PASSCODE` (both secrets;
+  either unset, or `RATE_KEY` unset, and no one gets in). Compared as SHA-256
+  digests in constant time.
+- **Failed attempts**: 10 per minute per IP (`ADMIN_AUTH_LIMITER`, keyed by
+  HMAC(RATE_KEY, ipSubject)), then the subject is locked out for 60 s
+  (`admin_auth_lockouts`): 429 even with the right passcode.
+- **CSRF**: POST/DELETE need `Sec-Fetch-Site: same-origin`, or an `Origin`
+  equal to the console's own; curl therefore needs `-H "Origin: https://admin.scoop.md"`.
+- **Headers** on every response: a strict CSP (`default-src 'self'`, no inline
+  script or style, `frame-ancestors 'none'`), `X-Frame-Options: DENY`,
+  `Referrer-Policy: no-referrer`, `nosniff`, `Cache-Control: no-store`,
+  `X-Robots-Tag: noindex`. No CORS headers.
+- The UI calls same-origin JSON under `/api/*` (`src/admin/api.ts`), which runs
+  the admin logic in-process: `ADMIN_TOKEN` never reaches the browser.
+- **Seed batches** run server-side in the `CrawlBatch` Workflow
+  (`src/admin/batch.ts`): up to the chosen concurrency (1–8) at a time, never
+  two crawls of one site, a busy site (409) retried a minute later (30 tries),
+  one tick every 15 s. Cancel stops queuing; "Cancel and stop crawls" also
+  cancels the crawls in flight.
+- **Cancelling a run** terminates its CrawlSite instance, kills E2B sandboxes
+  tagged with the run ID, marks the run failed ("cancelled by an admin") and
+  deletes its `crawl-results/` files; the site keeps its last outcome.
+
+Locally, put `ADMIN_UI_USER` and `ADMIN_UI_PASSCODE` in `.dev.vars` (see
+`.dev.vars.example`), then open `http://admin.localhost:8787/` in Chrome or
+Firefox (`*.localhost` resolves to 127.0.0.1) and sign in. With curl, send the
+admin host in the Host header:
+
+```sh
+curl -i -H 'Host: admin.localhost:8787' http://127.0.0.1:8787/                      # 401, WWW-Authenticate: Basic
+curl -u admin:local-admin-passcode -H 'Host: admin.localhost:8787' http://127.0.0.1:8787/api/overview
+curl -u admin:local-admin-passcode -H 'Host: admin.localhost:8787' -H 'Origin: http://admin.localhost:8787' \
+  -H 'content-type: application/json' http://127.0.0.1:8787/api/crawl -d '{"url":"https://vitest.dev/","maxPages":10}'
+```
+
+Endpoints (all GET unless noted): `overview`, `runs?status=&site=&cursor=`,
+`runs/:id`, POST `runs/:id/cancel`, POST `crawl {url, maxPages?, force?}`,
+`seeds`, `batches`, POST `batches {startUrls?, concurrency, maxPages?, force?}`,
+`batches/:id`, POST `batches/:id/cancel {stopRuns?}`, `sites?status=&q=&cursor=`,
+`sites/:site`, `sites/:site/pages?topic=&cursor=`, `page?url=`,
+`search?site=&q=&slot=`, `package?site=&q=|topic=&budget=`, `library`,
+`library/:site`, `skills/:id`, DELETE `skills/:id`, `reports?all=1`,
+`costs?days=14`.
+
 ## Before the first deploy
 
 Nothing below exists yet; the owner creates it. Never touch unrelated resources
@@ -251,6 +309,20 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
 9. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
    D1, Workers Routes, Queues and Vectorize edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
    variable `BACKEND_DEPLOY=1` to switch the deploy jobs on.
+10. Admin console, per environment. Pick a user name and a long random
+    passcode (it is the only thing between the internet and the console):
+    ```sh
+    for env in staging production; do
+      npx wrangler secret put ADMIN_UI_USER --env $env
+      openssl rand -base64 24 | tee /dev/tty | npx wrangler secret put ADMIN_UI_PASSCODE --env $env
+    done
+    npx wrangler d1 migrations apply DB --env staging --remote      # 0006_admin.sql (batches, lockouts)
+    ```
+    `wrangler deploy` creates the rest: the custom domains `admin-staging.scoop.md`
+    / `admin.scoop.md` (no existing DNS records for them), the Workflows
+    `crawl-batch-staging` / `crawl-batch`, the static assets, and the
+    `ADMIN_AUTH_LIMITER` namespaces `4121` (staging) / `4122` (production)
+    (`4120` is dev; change them if another Worker uses those numbers).
 
 ## Deploy
 

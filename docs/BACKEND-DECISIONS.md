@@ -842,3 +842,55 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
 - **Queue names** (per account, so per environment): `index-pages-dev`
   (simulated locally), `index-pages-staging`, `index-pages-production`, with
   dead-letter queues `index-pages-dlq-dev|staging|production`.
+
+## Admin console (admin.scoop.md)
+
+- **Same Worker, another host.** `admin.scoop.md` / `admin-staging.scoop.md`
+  are custom-domain routes on the API Worker. `src/index.ts` sends any host
+  starting with `admin.` or `admin-staging.` to `src/admin/app.ts` before the
+  v1 router runs, so the API's routes, CORS and read limits are untouched and
+  the console reuses the stores, search and crawl code in-process (no
+  `ADMIN_TOKEN` in the browser). The v1 API is not served on admin hosts and
+  the console is not served on API hosts.
+- **Static UI through Workers Static Assets** (`admin/`, binding `ASSETS`,
+  `run_worker_first: true`), so the Worker authenticates every file before
+  calling `ASSETS.fetch`. Plain HTML, CSS and one ES module; hash routing, so
+  only `/`, `app.js`, `style.css` and the icon exist. The brand tokens are a
+  copy of `extension/theme.css` (the assets directory can't reach outside
+  `backend/`).
+- **Basic auth with a lockout.** A rate limiter that only counts failures
+  can't stop a guesser on its own: the 11th guess is still checked. So when
+  `ADMIN_AUTH_LIMITER` (10/min) refuses a failure, the subject (HMAC of
+  `ipSubject`, keyed by `RATE_KEY`) gets a 60 s row in `admin_auth_lockouts`,
+  and a locked-out subject gets 429 before its credentials are looked at.
+  That is one indexed D1 read per console request, which the console's
+  traffic can afford. Requests without an Authorization header don't count,
+  so a browser's first, bare request (which triggers the prompt) never locks
+  anyone out. Unset `ADMIN_UI_USER`, `ADMIN_UI_PASSCODE` or `RATE_KEY`: 401
+  for everyone.
+- **CSRF** relies on `Sec-Fetch-Site: same-origin` (sent by every current
+  browser), falling back to an exact `Origin` match; neither header means
+  refused. Basic auth credentials are sent automatically by the browser, so
+  this check is what stops another site from POSTing to the console.
+- **CSP without 'unsafe-inline'.** No inline script or style; dynamic widths
+  (meters) are set through CSSOM, which `style-src 'self'` allows. All crawled
+  and shared content goes in with `textContent`; links to crawled URLs only
+  ever carry http(s) hrefs.
+- **Seed batches in a Workflow, state in D1.** `CrawlBatch` ticks every 15 s
+  (`tickBatch`: follow runs, then start waiting jobs up to the concurrency);
+  the jobs live in `crawl_batch_jobs`, so the Workflow is only a clock. After
+  300 ticks it hands over to a new instance (`<batchId>-<n>`) rather than
+  approach the per-instance step limit. A job is claimed (run ID written)
+  before its crawl starts, so a retried tick recognises a start that went
+  through. Same rules as `scripts/crawl-seeds.mjs`: never two of one site,
+  409 retried after a minute, 30 tries. Seeds are selected by start URL
+  (`developers.cloudflare.com` appears three times).
+- **Cancelling a run** terminates the CrawlSite instance, kills its tagged
+  sandboxes and marks the run failed itself, because a terminated Workflow
+  never runs its `fail` step. The profile only goes idle (`endCrawl`): a
+  cancelled crawl has no outcome.
+- **The skill package preview is the extension's code.** `api.ts` imports
+  `extension/lib/package.js` (typed by `package.d.ts`, left out of the
+  extension zip) and calls `buildPackage(withCurrentPage(sections, null,
+  pageUrl))`, i.e. what the popup copies on the skill's own page when the local
+  scoop found nothing to add.
