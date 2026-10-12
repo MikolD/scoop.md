@@ -294,8 +294,9 @@ function showPageMeta({ llms = null, instructions = [] } = {}) {
 // or a .md twin found, a docs path, code in the page). "Checking…" only
 // shows during the loader: the content always gets a yes or a no.
 function devDocs(index, quick, scoop) {
-  const said = index?.isDevDocs?.verdict ?? quick?.isDevDocs?.verdict;
-  if (said === 'yes' || said === 'no') return { state: said, guess: false };
+  // Status may say 'unknown' while /quick knows: either one's yes or no wins over a guess.
+  const said = [index?.isDevDocs?.verdict, quick?.isDevDocs?.verdict].find((v) => v === 'yes' || v === 'no');
+  if (said) return { state: said, guess: false };
   const kinds = new Set([...(scoop?.sections ?? siteInfo?.scoopSections ?? []), ...(quick?.sources ?? [])].map((s) => s?.kind));
   const code = (scoop?.sections ?? siteInfo?.scoopSections ?? []).some((s) => /^```/m.test(s.content ?? ''));
   const yes = Boolean(index?.indexed) || kinds.has('llms') || kinds.has('page-md') || docsLike(tab.url) || code;

@@ -173,6 +173,7 @@ export function tokenEstimate(text) {
 export function packageMeta(text) {
   const llms = String(text ?? '').match(/^Docs index for agents: (\S+)/m)?.[1] ?? null;
   const block = String(text ?? '').split(/^## What this site says to AI agents\s*$/m)[1]?.split(/^## /m)[0] ?? '';
-  const instructions = [...block.matchAll(/^> - (.+?)(?: \(\[source\]\((https?:\/\/[^)\s]+)\)\))?$/gm)].map((m) => ({ text: m[1].trim(), url: m[2] ?? null }));
+  // Items end with their source: " ([source](url))" here, " (url)" from the server.
+  const instructions = [...block.matchAll(/^> - (.+?)(?: \((?:\[source\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^)\s]+))\))?$/gm)].map((m) => ({ text: m[1].trim(), url: m[2] ?? m[3] ?? null }));
   return { llms, instructions };
 }

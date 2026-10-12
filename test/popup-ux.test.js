@@ -1110,3 +1110,12 @@ test('links: fuzz: 2,000 random mixes of []()<>, backticks, URLs and text always
   const cases = Array.from({ length: 2000 }, () => Array.from({ length: 1 + rand(40) }, () => parts[rand(parts.length)]).join(''));
   await scanTerminates(cases, 20_000);
 });
+
+test('the verdict: an "unknown" site status does not hide what /quick knows', () => withMock({
+  sites: { [SITE]: { isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 }, quickDevDocs: { verdict: 'no', method: 'jev', score: 0.03 } } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.equal(p.$('devdocs').dataset.state, 'no', 'the /quick verdict, though the page path looks like docs');
+  assert.equal(p.$('devdocs').title, '', 'not a guess');
+}));
