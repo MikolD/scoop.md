@@ -126,7 +126,8 @@ export function candidatesFromLlms(md: string, url: string): Candidate[] {
 // agents, and anywhere a paragraph that mentions agents, LLMs, AI assistants or MCP.
 export function candidatesFromPage(md: string, url: string): Candidate[] {
   let path = '';
-  try { path = new URL(url).pathname.replace(/[-_/.]+/g, ' '); } catch { /* keep empty */ }
+  // An llms file's own name is not a sign the page is about agents.
+  try { path = new URL(url).pathname.replace(/\/llms(-[a-z]+)?\.txt$/i, '').replace(/[-_/.]+/g, ' '); } catch { /* keep empty */ }
   const pageAbout = AGENT_TOPIC.test(path);
   return blocks(md)
     .filter((b) => usable(b.text) && (pageAbout || b.trail.some((h) => h && AGENT_TOPIC.test(h)) || AGENT_PARAGRAPH.test(b.text)))
@@ -136,22 +137,33 @@ export function candidatesFromPage(md: string, url: string): Candidate[] {
 const words = (s: string) => new Set(s.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []);
 
 // Near-duplicates: word sets overlapping 80% or more (Jaccard).
-export function nearDuplicate(a: string, b: string): boolean {
-  const x = words(a);
-  const y = words(b);
+const similar = (x: Set<string>, y: Set<string>) => {
   if (!x.size || !y.size) return false;
   let both = 0;
   for (const w of x) if (y.has(w)) both++;
   return both / (x.size + y.size - both) >= 0.8;
+};
+
+export function nearDuplicate(a: string, b: string): boolean {
+  return similar(words(a), words(b));
 }
+
+// Candidates looked at, at most: dedupe is quadratic, and a crawl step has
+// little CPU (svelte.dev's llms-full.txt gave 1,092 blocks; deduplicating
+// them took 3.5 s and the step hit the CPU limit).
+export const MAX_DEDUPE = 300;
 
 // Deduplicated, without unsafe passages (unsafePassage).
 export const safeCandidates = (cands: Candidate[]) => dedupe(cands.filter((c) => !unsafePassage(c.text, c.url)));
 
+// The first MAX_DEDUPE items, near-duplicates once (each word set built once).
 export function dedupe<T extends { text: string }>(items: T[]): T[] {
-  const out: T[] = [];
-  for (const it of items) if (!out.some((o) => nearDuplicate(o.text, it.text))) out.push(it);
-  return out;
+  const out: { it: T; w: Set<string> }[] = [];
+  for (const it of items.slice(0, MAX_DEDUPE)) {
+    const w = words(it.text);
+    if (!out.some((o) => similar(o.w, w))) out.push({ it, w });
+  }
+  return out.map((o) => o.it);
 }
 
 // A passage that could steer an agent off the product: piping into a
@@ -293,7 +305,8 @@ export async function findRunInstructions(
     const obj = await bucket.get(`pages/${p.content_hash}.md`);
     if (!obj) continue;
     const md = await obj.text();
-    cands.push(...(p.source_kind === 'llms' || p.source_kind === 'llms-full' ? candidatesFromLlms(md, p.url) : candidatesFromPage(md, p.url)));
+    // llms.txt whole; llms-full.txt (the whole docs in one file) like any page: only what is about agents.
+    cands.push(...(p.source_kind === 'llms' ? candidatesFromLlms(md, p.url) : candidatesFromPage(md, p.url)));
   }
   const records: LinkRecord[] = [];
   const rootUrls: string[] = [];

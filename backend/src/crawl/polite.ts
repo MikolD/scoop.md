@@ -89,6 +89,9 @@ export interface CrawlFetchOptions {
   // Told every URL of the redirect chain and how the fetch ended (link health,
   // src/links/links.ts). Not called when nothing was requested (a bad URL).
   onFetch?: (chain: string[], result: CrawlFetch) => void;
+  // Read the first `cap` bytes of a longer body instead of refusing it
+  // (page signals only need the start of a page).
+  truncate?: boolean;
 }
 
 export type CrawlFetch =
@@ -104,7 +107,7 @@ export type CrawlFetch =
       etag: string | null;
       lastModified: string | null;
     }
-  | { ok: false; url: string; status: number | null; reason: string; skipped?: boolean };
+  | { ok: false; url: string; status: number | null; reason: string; skipped?: boolean; location?: string };
 
 // Reads a body up to `cap` bytes; `over` when it is longer (the rest is never read).
 export async function readBytes(res: Response, cap: number): Promise<{ bytes: Uint8Array; over: boolean }> {
@@ -118,6 +121,8 @@ export async function readBytes(res: Response, cap: number): Promise<{ bytes: Ui
     size += value.byteLength;
     if (size > cap) {
       await reader.cancel();
+      // The part of this chunk that fits: a truncated read keeps exactly `cap` bytes.
+      parts.push(value.subarray(0, cap - (size - value.byteLength)));
       return { bytes: concat(parts), over: true };
     }
     parts.push(value);
@@ -187,7 +192,7 @@ export async function crawlFetch(url: string, o: CrawlFetchOptions): Promise<Cra
         return { redirect: null, result: { ok: false, url, status: res.status, reason: `HTTP ${res.status}` } };
       }
       const contentType = res.headers.get('content-type') || '';
-      if (Number(res.headers.get('content-length')) > cap) {
+      if (Number(res.headers.get('content-length')) > cap && !o.truncate) {
         await res.body?.cancel();
         return { redirect: null, result: { ok: true, notModified: false, url: target.href, status: res.status, contentType, text: '', over: true, etag, lastModified } };
       }
@@ -219,7 +224,9 @@ export async function crawlFetch(url: string, o: CrawlFetchOptions): Promise<Cra
       return done({ ok: false, url, status: h.status, reason: 'redirect to a URL that may not be fetched' });
     }
     if (next.href.length > MAX_URL) return done({ ok: false, url, status: h.status, reason: `redirect URL longer than ${MAX_URL}`, skipped: true });
-    if (normalizeSite(next.hostname) !== site) return done({ ok: false, url, status: h.status, reason: `redirects off site (${next.origin})`, skipped: true });
+    if (normalizeSite(next.hostname) !== site) {
+      return done({ ok: false, url, status: h.status, reason: `redirects off site (${next.origin})`, skipped: true, location: next.href });
+    }
     if (o.allowed && !o.allowed(next.pathname + next.search)) return done({ ok: false, url, status: h.status, reason: 'redirect target disallowed by robots.txt', skipped: true });
     current = next;
     chain.push(current.href);

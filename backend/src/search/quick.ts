@@ -24,7 +24,8 @@ import { askJev } from '../lib/jev.ts';
 import type { JevOptions } from '../lib/jev.ts';
 import { normalizeSite } from '../lib/ssrf.ts';
 import { isMultiTenant, registrable } from '../lib/domains.ts';
-import { fetchRobots, robotsFrom } from '../crawl/site.ts';
+import { robotsFrom } from '../crawl/site.ts';
+import { ALLOW_ALL, DISALLOW_ALL } from '../crawl/robots.ts';
 import { isLlmsFile, looksLikeText, twinUrl, verifyLlms } from '../crawl/discover.ts';
 import { gateSummary, listVerdict, pageSignals, scoreSignals } from '../crawl/gate.ts';
 import { candidatesFromLlms, dedupe, instructionAnswers, instructionQuestions, MAX_SHOWN, safeCandidates } from '../agents/instructions.ts';
@@ -235,12 +236,16 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   const started = Date.now();
   const budget = o.budgetMs ?? QUICK_BUDGET_MS;
   // One request per candidate, all at once; no politeness spacing for a handful of well-known files.
-  const limiter = new HostLimiter({ concurrency: 16, intervalMs: 0 });
+  // The docs search adds about 25 requests to the page's 10: enough slots that none waits for another.
+  const limiter = new HostLimiter({ concurrency: 48, intervalMs: 0 });
+  // Each fetch gets what is left of the budget, up to FETCH_MS.
+  const timeout = (share = 1) => Math.max(100, Math.min(FETCH_MS * share, budget - (Date.now() - started)));
   // Set when a fetch timed out or failed to connect: what this call found
   // then isn't cached, so a slow moment can't stand for an hour.
   let unreliable = false;
-  const get = async (url: string, cap: number, accept?: string) => {
-    const r = await crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, accept, timeoutMs: Math.min(FETCH_MS, budget) });
+  // `truncate`: a page read for its signals keeps its first PAGE_CAP bytes whatever its length.
+  const get = async (url: string, cap: number, accept?: string, truncate = false) => {
+    const r = await crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, accept, truncate, timeoutMs: timeout() });
     if (!r.ok && r.status === null && !r.skipped && !/^URL longer|may not be fetched|too many redirects/.test(r.reason)) unreliable = true;
     return r;
   };
@@ -290,7 +295,16 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   const robotsFor = (origin: string) => {
     let r = robotsMemo.get(origin);
     if (!r) {
-      r = fetchRobots(origin, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, timeoutMs: Math.min(FETCH_MS, budget) / 2 }).then(robotsFrom);
+      r = crawlFetch(`${origin}/robots.txt`, {
+        fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap: 500_000, timeoutMs: timeout(0.5),
+      }).then((f) => {
+        if (f.ok && !f.notModified) return robotsFrom({ state: 'ok', text: f.text });
+        // A host that moved elsewhere (robots.txt redirects to another domain):
+        // only its redirect will be read, never content from it.
+        if (!f.ok && f.skipped && f.location) return ALLOW_ALL;
+        if (!f.ok && f.status !== null && f.status >= 400 && f.status < 500) return ALLOW_ALL;
+        return DISALLOW_ALL;
+      });
       robotsMemo.set(origin, r);
     }
     return r;
@@ -302,7 +316,7 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   const pageFacts = async () => {
     if (listed || !probing) return null;
     if (!(await robotsFor(page.origin)).allowed(page.pathname + page.search)) return null;
-    const r = await get(pageUrl, PAGE_CAP, HTML);
+    const r = await get(pageUrl, PAGE_CAP, HTML, true);
     if (!r.ok || r.notModified || !r.text) return null;
     return pageSignals(r.text, r.url, r.contentType);
   };
@@ -315,15 +329,32 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
     const cached = await o.siteCache?.get(docsKey).catch(() => null);
     if (cached?.docs) return { cached, probed: [] };
     if (!probing) return { cached: null, probed: [] };
-    const probed = await Promise.all(docsCandidates(pageUrl).map(async (cand): Promise<Probed> => {
+    const look = async (cand: DocsCandidate) => {
       const b = new URL(cand.base);
       const robots = await robotsFor(b.origin);
       const path = b.pathname.replace(/\/$/, '');
-      const [r, llms, full] = await Promise.all([
-        robots.allowed(b.pathname) ? get(cand.base, PAGE_CAP, HTML) : null,
+      return Promise.all([
+        robots.allowed(b.pathname) ? get(cand.base, PAGE_CAP, HTML, true) : null,
         robots.allowed(`${path}/llms.txt`) ? probe([{ kind: 'llms-txt', url: `${cand.base}/llms.txt`, rank: 5 }]) : [],
         robots.allowed(`${path}/llms-full.txt`) ? probe([{ kind: 'llms-full', url: `${cand.base}/llms-full.txt`, rank: 25 }]) : [],
-      ]);
+      ] as const);
+    };
+    const probed = await Promise.all(docsCandidates(pageUrl).map(async (first): Promise<Probed> => {
+      let cand = first;
+      let [r, llms, full] = await look(cand);
+      // One redirect to another domain, only from a docs.<x> host to another
+      // docs host or docs path (docs.anthropic.com → platform.claude.com/docs/);
+      // every hop through the SSRF guard (crawlFetch). The docs root is where it ends.
+      const to = r && !r.ok ? r.location : undefined;
+      if (to && cand.via === 'subdomain' && /^docs\./i.test(new URL(cand.base).hostname)) {
+        const t = new URL(to);
+        // Another docs location: a docs host, or a docs path (docs.anthropic.com → platform.claude.com/docs/).
+        const docsPlace = DOCS_HOST.test(t.hostname) || DOCS_SEGMENT.test(t.pathname.split('/').filter(Boolean)[0] ?? '');
+        if (docsPlace && registrable(t.hostname) !== registrable(new URL(cand.base).hostname)) {
+          cand = { base: `${t.origin}${t.pathname.replace(/\/+$/, '')}`, via: 'subdomain' };
+          [r, llms, full] = await look(cand);
+        }
+      }
       const ok = Boolean(r && r.ok && !r.notModified && r.text);
       const html = ok && r!.ok && !r!.notModified && !looksLikeText(r!.contentType, r!.text);
       return {
@@ -464,7 +495,9 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   } else if (cachedDocs?.found) {
     docs = cachedDocs;
     rootElsewhere = true;
-  } else if (llmsHit?.verified && llmsHit.source.url === `${page.origin}/llms.txt`) {
+  } else if (llmsHit?.verified && llmsHit.source.url === `${page.origin}/llms.txt` && isDevDocs.verdict !== 'no') {
+    // The host's own llms.txt, unless the page was judged not to be a developer
+    // tool's (every Shopify store serves an llms.txt: allbirds.com is no docs).
     docs = { found: true, root: page.origin, via: 'llms', verdict: 'yes', method: 'llms' };
   } else {
     docs = { found: false, root: null, via: 'none', verdict: isDevDocs.verdict, method: isDevDocs.method };

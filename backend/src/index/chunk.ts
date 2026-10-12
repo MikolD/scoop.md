@@ -121,8 +121,24 @@ export function headingText(s: string): string {
   return stripPermalinks(text).slice(0, 200);
 }
 
-// The page title: the first level-1 heading outside code, else the first heading.
+// A YAML front matter `title:` (docs generators keep the page title there,
+// with the body starting at an H2: docs.deno.com's "Writing an HTTP Server"
+// opens with "## A "Hello World" server").
+export function frontMatterTitle(md: string): string | null {
+  if (!md.startsWith('---')) return null;
+  const end = md.indexOf('\n---', 3);
+  if (end < 0 || end > 8000) return null;
+  const m = /^title:[ \t]*(.{1,300})$/m.exec(md.slice(3, end));
+  if (!m) return null;
+  const t = m[1].trim().replace(/^(["'])(.*)\1$/, '$2').trim();
+  return t ? headingText(t) || null : null;
+}
+
+// The page title: front matter's title, else the first level-1 heading
+// outside code, else the first heading.
 export function pageTitle(md: string): string {
+  const fm = frontMatterTitle(md);
+  if (fm) return fm;
   let fence = '';
   let first = '';
   for (const line of md.split('\n')) {

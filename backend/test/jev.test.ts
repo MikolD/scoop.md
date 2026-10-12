@@ -372,7 +372,7 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.deepEqual(d.sources, [
     { kind: 'llms-txt', url: 'https://hono.dev/llms.txt', label: 'Hono (llms.txt)', bytes: new TextEncoder().encode(llms).length },
     { kind: 'page-md', url: 'https://hono.dev/docs/api/routing.md', label: 'This page: Routing', bytes: page.length },
-    { kind: 'llms-full', url: 'https://hono.dev/llms-full.txt', label: 'llms-full.txt at hono.dev', bytes: null },
+    { kind: 'llms-full', url: 'https://hono.dev/llms-full.txt', label: 'Hono full (llms-full.txt)', bytes: null },
   ]);
   assert.equal(jev.calls.length, 1);
   // llms-full.txt is offered only when there is nothing lighter.
@@ -488,7 +488,11 @@ test('GET /v1/sites/index: approved indexed sites with page counts, ETag and 304
   seed(raw);
   const r = await call(e, '/v1/sites/index');
   assert.equal(r.status, 200);
-  assert.deepEqual(r.json, { sites: [{ site: 'docs.example.dev', pages: 2 }, { site: 'manual.example', pages: 1 }] });
+  assert.deepEqual(r.json.sites, [{ site: 'docs.example.dev', pages: 2 }, { site: 'manual.example', pages: 1 }]);
+  // notDocs: the rejected site and the denylist's hosts.
+  for (const h of ['shop.example', 'amazon.com', 'www.amazon.com', 'amazon.co.uk', 'google.com', 'www.google.com', 'ebay.com']) assert.ok(r.json.notDocs.includes(h), h);
+  assert.ok(!r.json.notDocs.some((h: string) => h.includes('*')), 'no patterns');
+  assert.ok(!r.json.notDocs.includes('docs.example.dev'));
   assert.equal(r.headers.get('cache-control'), 'public, max-age=3600');
   assert.match(r.headers.get('etag')!, /^"[0-9a-f]{32}"$/);
   assert.equal(r.headers.get('access-control-allow-origin'), '*');

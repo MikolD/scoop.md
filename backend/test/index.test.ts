@@ -277,8 +277,8 @@ test('packages never exceed the budget and group chunks by page in document orde
   const md = buildIndexPackage({ site: 'ex.com', label: 'webhooks', chunks: pkgChunks(8, 100), budget: 60_000, links });
   assert.ok(md.startsWith('# ex.com docs for webhooks (via scoop.md)\n> Reference copied from public docs by scoop.md'));
   assert.equal(md.match(/^## Page 0$/gm)!.length, 1);
-  // A chunk that continues the previous one adds no heading of its own.
-  assert.ok(md.includes('## Part 0') && !md.includes('Part 4'));
+  // A page's first chunk, and a chunk that continues the previous one, add no heading of their own.
+  assert.ok(!md.includes('## Part'));
   assert.ok(md.indexOf('## Page 0') < md.indexOf('## Page 1'));
   // Each section carries its page's URL, so there is no separate Sources list.
   assert.match(md, /^## Page 0\nhttps:\/\/ex\.com\/p0\n/m);

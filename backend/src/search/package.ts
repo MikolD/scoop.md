@@ -15,6 +15,7 @@
 // related links) are left out.
 
 import { rewriteLinks } from '../links/links.ts';
+import { frontMatterTitle } from '../index/chunk.ts';
 import type { LinkState } from '../links/links.ts';
 
 export const DEFAULT_PACKAGE_BUDGET = 16_000;
@@ -82,6 +83,11 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 // Compact page text: no H1 repeating the title, no trailing spaces, at most
 // one blank line in a row outside code.
 export function compact(text: string, title: string): string {
+  // YAML front matter (title, dates, old URLs) is metadata, not content.
+  if (text.startsWith('---')) {
+    const end = text.indexOf('\n---', 3);
+    if (end >= 0 && end < 8000) text = text.slice(text.indexOf('\n', end + 1) + 1 || text.length);
+  }
   const out: string[] = [];
   let fence = '';
   let blank = false;
@@ -119,7 +125,9 @@ export function buildIndexPackage({
     const last = groups[groups.length - 1];
     let page = inOrder ? (last?.url === c.url ? last : undefined) : byUrl.get(c.url);
     if (!page) {
-      page = { url: c.url, title: inline(c.title) || c.url, chunks: [] };
+      // A page's first chunk may hold its front matter title (truer than an old stored title).
+      const fm = c.ord === 0 ? frontMatterTitle(c.text) : null;
+      page = { url: c.url, title: inline(fm ?? c.title) || c.url, chunks: [] };
       groups.push(page);
       byUrl.set(c.url, page);
     }
@@ -157,7 +165,7 @@ export function buildIndexPackage({
       if (!text) continue;
       // A chunk that doesn't follow the previous one, and doesn't start at a heading, says where it is.
       const heading = c.heading_path.split(' > ').pop()?.trim() ?? '';
-      if (c.ord !== prevOrd + 1 && !text.startsWith('#') && heading && heading !== g.title) text = `## ${inline(heading, 200)}\n\n${text}`;
+      if (c.ord !== 0 && c.ord !== prevOrd + 1 && !text.startsWith('#') && heading && heading !== g.title) text = `## ${inline(heading, 200)}\n\n${text}`;
       prevOrd = c.ord;
       const add = (parts.length ? 2 : 0) + text.length;
       if (size + add > remaining) continue;

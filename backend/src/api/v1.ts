@@ -32,6 +32,7 @@ import { addRefs, checkLinks, extractLinks, linkStates, normalizeLink, queueLink
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed, normalizeQuery } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
+import { denylistHosts } from '../crawl/gate.ts';
 import type { QuickDiscovery } from '../search/quick.ts';
 import { search } from '../search/search.ts';
 import type { SearchDeps } from '../search/search.ts';
@@ -471,7 +472,11 @@ const routes: Route[] = [
              WHERE COALESCE(s.approved, 1) = 1 AND COALESCE(s.status, '') != 'not_devtool'
              GROUP BY p.site ORDER BY p.site`,
           ).all<{ site: string; pages: number }>());
-        body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })) });
+        // And hosts that are not docs, for a "not docs" badge: sites the gate rejected, and the denylist's hosts.
+        const { results: rejected } = await retryD1(() =>
+          env.DB.prepare(`SELECT site FROM site_profiles WHERE status = 'not_devtool' ORDER BY site`).all<{ site: string }>());
+        const notDocs = [...new Set([...rejected.map((r) => r.site), ...denylistHosts()])].sort();
+        body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })), notDocs });
         etag = `"${(await sha256Hex(body)).slice(0, 32)}"`;
         await cache?.put(key, new Response(body, { headers: { etag, 'cache-control': `public, max-age=${SITES_INDEX_SECONDS}` } })).catch(() => {});
       }

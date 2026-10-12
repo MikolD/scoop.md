@@ -1450,3 +1450,38 @@ gives no signals to judge.
 A call in which any fetch timed out or failed to connect caches nothing at
 the site level: on a cold local workerd the first stripe.com call timed out
 everywhere and its empty answer was then served for an hour.
+
+## Live test findings (staging b043896)
+
+- **svelte.dev crawl failed** (rq_01M4RHMNFFWNAHZ6JRPMN96AWV): the
+  `agent-instructions` step hit "Worker exceeded CPU time limit" on its
+  first attempt and the retry ended in a Workflows internal error, which
+  failed the run after its 6 pages were indexed. The CPU went to
+  deduplicating candidates pairwise, rebuilding word sets for each pair:
+  svelte.dev's llms-full.txt (1.26 MB) gave 1,092 blocks and took 3.5 s.
+  Now word sets are built once, at most 300 candidates are compared (24 ms
+  for the same file), and llms-full.txt is read like any page (only its
+  passages about agents), since it is the whole docs in one file. A CPU
+  limit can't be caught, so the step has to stay small.
+- **hono.dev missing from /v1/sites/index**: it was first crawled on a
+  user's request (`source: requested`) and is still `approved: 0`; the
+  index lists approved sites only (requested sites are browsing interest
+  until an admin approves them). Approving it in the admin console adds it.
+  No page minimum applies.
+- **Package header title**: docs.deno.com keeps the page title in YAML
+  front matter (`title: "Writing an HTTP Server"`) and starts its body at
+  an H2, so the stored title was that H2. Titles now read front matter
+  first (page_index, pages); packages also take it from the page's first
+  chunk, so pages indexed before this are titled right, and front matter
+  itself is no longer copied into packages.
+- **allbirds.com llms.txt**: every Shopify store serves an llms.txt; the
+  host's own verified llms.txt only means docs when the page wasn't judged
+  not developer docs.
+- **Cross-domain docs redirect and long pages**: docs.anthropic.com
+  redirects to platform.claude.com/docs/ (not docs.claude.com as expected);
+  one such redirect is followed from a docs.<x> candidate to a docs host or
+  docs path, with the SSRF guard on each hop. twilio.com's pages are over
+  512 KB with a Content-Length: page reads for signals now keep the first
+  512 KB (`crawlFetch` `truncate`; an over-cap read now also keeps the bytes
+  up to the cap). The probe limiter allows 48 requests at once and each
+  fetch gets what is left of the 1.5 s, so the redirect's second round fits.

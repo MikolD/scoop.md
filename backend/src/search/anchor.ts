@@ -4,6 +4,7 @@
 // search on the page's title and headings.
 
 import { normalizePageUrl } from '../lib/urls.ts';
+import { frontMatterTitle } from '../index/chunk.ts';
 import type { PackageChunk } from './package.ts';
 import { search } from './search.ts';
 import type { SearchDeps } from './search.ts';
@@ -60,7 +61,12 @@ export async function anchorLookup(db: D1Database, site: string, pageUrl: string
     pages: Number(v?.n ?? 0),
     version: `${v?.n ?? 0}:${v?.v ?? ''}`,
     anchor: url && chunks.length
-      ? { url, title: chunks[0].page_title || chunks[0].title, chunks: chunks.map(({ url: u, title, ord, heading_path, text }) => ({ url: u, title, ord, heading_path, text })) }
+      ? {
+        url,
+        // The page's own title: its front matter's when it has one (pages indexed before titles read it kept their first heading).
+        title: (chunks[0].ord === 0 && frontMatterTitle(chunks[0].text)) || chunks[0].page_title || chunks[0].title,
+        chunks: chunks.map(({ url: u, title, ord, heading_path, text }) => ({ url: u, title, ord, heading_path, text })),
+      }
       : null,
   };
 }

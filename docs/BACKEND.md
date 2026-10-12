@@ -268,7 +268,9 @@ Every fetch goes through `crawlFetch` (the SSRF guard, a size cap, same-site red
 - `docs`: `{ found, root, via, verdict, method }`, the answer at the site level, for a page that may not be docs itself (a product's home page, a blog):
   - the page is docs (`isDevDocs` yes): `via: "page"`, `root` the page's docs home (its host on a docs host, else its first path segment when that names docs or holds llms files, else its host);
   - otherwise, within the same 1.5 s and the per-host probe budget, in parallel through `crawlFetch` and robots.txt: `docs.`, `developer.` and `developers.<registrable domain>` (`via: "subdomain"`; never on a hosting platform, which only gets its own host's paths) and `/docs`, `/developers`, `/developer`, `/api/docs` on the host (`via: "path"`), each with its llms files. First answer wins, in that order: a verified llms.txt (`method: "llms"`), then the gate's lists, then the candidate's signals, then Jev on up to 3 candidates' title, description and navigation (in the same request as the rest);
-  - else the host's own verified root llms.txt: `via: "llms"`, `root` the host;
+  - else the host's own verified root llms.txt: `via: "llms"`, `root` the host, unless the page was judged not developer docs (every Shopify store serves an llms.txt);
+  - a `docs.<x>` candidate may follow one redirect to another domain when it lands on a docs host or docs path (docs.anthropic.com → platform.claude.com/docs/), each hop through the SSRF guard; `root` is where it ends;
+  - a page read for its signals is read up to 512 KB even when longer (its Content-Length isn't a reason to skip it);
   - else `found: false`, `via: "none"`, with the page's verdict. `root` has no trailing slash (`https://docs.stripe.com`, `https://example.com/docs`). Cached per host for an hour.
   - stripe.com → `{ found: true, root: "https://docs.stripe.com", via: "subdomain", method: "llms" }`.
 - `llms`: `{ url, verified, fullUrl, fullVerified }` or null: llms.txt and llms-full.txt reported apart, each found or not (null) and verified or not. When the docs were found elsewhere, that root's files (a docs path without its own falls back to its host's).
@@ -281,8 +283,10 @@ Every fetch goes through `crawlFetch` (the SSRF guard, a size cap, same-site red
 The extension's toolbar badge: a compact list of every approved site with indexed pages, downloaded now and then (say hourly, and at startup) and checked locally, so no per-visit request ever leaves the browser.
 
 ```json
-{ "sites": [ { "site": "developers.cloudflare.com", "pages": 312 }, { "site": "hono.dev", "pages": 41 } ] }
+{ "sites": [ { "site": "developers.cloudflare.com", "pages": 312 }, { "site": "hono.dev", "pages": 41 } ],
+  "notDocs": [ "amazon.co.uk", "amazon.com", "shop.example", "www.amazon.com", "…" ] }
 ```
+- `notDocs`: hosts that are not docs, for a "not docs" badge: every site the gate rejected (`not_devtool`), and the gate's denylist as concrete hosts (each entry and its `www.`; `name.*` patterns on com, co.uk, de, fr, ca, com.au and co.jp; subdomain-only patterns left out). About 500 hosts, 8 KB.
 - Sorted by site. A requested site (`source: requested`) is left out until an admin approves it; a rejected (`not_devtool`) one always.
 - `ETag` (a hash of the body; `If-None-Match` → 304), `cache-control: public, max-age=3600`, and built once an hour in the Cache API. `etag` is exposed to CORS readers.
 

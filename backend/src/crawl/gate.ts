@@ -19,7 +19,7 @@
 
 import { DOMParser } from 'linkedom';
 import { normalizeSite } from '../lib/ssrf.ts';
-import { isMultiTenant } from '../lib/domains.ts';
+import { isMultiTenant, registrable } from '../lib/domains.ts';
 import { htmlToText } from '../lib/verify.ts';
 import { CallError, callModel, DEFAULT_MODEL, FALLBACK_MODEL, stripFences } from '../index/classify.ts';
 import { askJev, jevCostUsd } from '../lib/jev.ts';
@@ -86,6 +86,25 @@ function hostMatches(pattern: string, host: string): boolean {
 
 function underPath(prefix: string, path: string): boolean {
   return path === prefix || path.startsWith(prefix.endsWith('/') ? prefix : prefix + '/');
+}
+
+// The denylist as concrete hosts, for the extension's "not docs" badge
+// (GET /v1/sites/index): plain entries as given and with www.; "name.*"
+// entries on the most common TLDs; subdomain-only patterns ("*.x") left out.
+const COMMON_TLDS = ['com', 'co.uk', 'de', 'fr', 'ca', 'com.au', 'co.jp'];
+export function denylistHosts(): string[] {
+  const hosts = new Set<string>();
+  for (const entries of Object.values(DENY)) {
+    for (const e of entries) {
+      if (e.startsWith('*.')) continue;
+      const bases = e.endsWith('.*') ? COMMON_TLDS.map((t) => `${e.slice(0, -2)}.${t}`) : [e];
+      for (const h of bases) {
+        hosts.add(h);
+        if (registrable(h) === h) hosts.add(`www.${h}`);
+      }
+    }
+  }
+  return [...hosts].sort();
 }
 
 export function listVerdict(startUrl: string): GateVerdict | null {
