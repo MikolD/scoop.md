@@ -121,30 +121,37 @@ async function iconFor(chromeApi, verdict) {
       const canvas = new OffscreenCanvas(size, size);
       const ctx = canvas.getContext('2d');
       ctx.drawImage(bitmap, 0, 0, size, size);
-      const r = size * 0.3;
-      const cx = size - r;
-      const cy = size - r;
+      const r = size * 0.32;
+      const cx = size - r - 0.5;
+      const cy = size - r - 0.5;
       ctx.fillStyle = BADGE[verdict].color;
       ctx.strokeStyle = '#ffffff';
-      ctx.lineWidth = Math.max(1.5, size / 10);
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
-      if (verdict === 'docs') {
+      // A white halo, so the mark reads on the orange icon.
+      const shape = () => {
         ctx.beginPath();
-        ctx.arc(cx, cy, r, 0, Math.PI * 2);
-        ctx.fill();
+        if (verdict === 'docs') ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        else {
+          ctx.moveTo(cx, cy - r * 1.1);
+          ctx.lineTo(cx + r * 1.05, cy + r * 0.9);
+          ctx.lineTo(cx - r * 1.05, cy + r * 0.9);
+          ctx.closePath();
+        }
+      };
+      shape();
+      ctx.lineWidth = Math.max(1.5, size / 8);
+      ctx.stroke();
+      shape();
+      ctx.fill();
+      ctx.lineWidth = Math.max(1.5, size / 10);
+      if (verdict === 'docs') {
         ctx.beginPath();
         ctx.moveTo(cx - r * 0.5, cy);
         ctx.lineTo(cx - r * 0.1, cy + r * 0.4);
         ctx.lineTo(cx + r * 0.55, cy - r * 0.4);
         ctx.stroke();
       } else {
-        ctx.beginPath();
-        ctx.moveTo(cx, cy - r * 1.1);
-        ctx.lineTo(cx + r * 1.05, cy + r * 0.9);
-        ctx.lineTo(cx - r * 1.05, cy + r * 0.9);
-        ctx.closePath();
-        ctx.fill();
         ctx.beginPath();
         ctx.moveTo(cx, cy - r * 0.45);
         ctx.lineTo(cx, cy + r * 0.15);
