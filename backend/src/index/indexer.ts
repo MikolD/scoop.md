@@ -1,13 +1,14 @@
 // Indexes one page: chunk → embed → classify → write Vectorize, then D1
 // (page_index, chunks + FTS5, entities, topics) in one transaction. Idempotent
 // per content hash; a retry reuses the classification cached in R2, so it is
-// paid for once. Storage comes in through IndexDeps so the logic can be
+// paid for once. A message for unchanged content whose classification is
+// missing only classifies: page_index, entities, topics and the vectors' slot
+// metadata are updated, nothing is re-chunked. Storage comes in through IndexDeps so the logic can be
 // tested against node:sqlite and in-memory fakes.
 
 import { sha256Hex } from '../lib/ids.ts';
-import { likeEscape } from '../search/queries.ts';
 import { chunkMarkdown, pageTitle } from './chunk.ts';
-import { FAILED } from './classify.ts';
+import { ClassifyUnavailable, FAILED } from './classify.ts';
 import type { Classification, Classified, PageInput } from './classify.ts';
 import type { Embed } from './embed.ts';
 
@@ -20,7 +21,7 @@ export interface IndexMessage {
 export interface IndexDeps {
   db: D1Database;
   bucket: R2Bucket;
-  vectors: Pick<Vectorize, 'upsert' | 'deleteByIds'>;
+  vectors: Pick<Vectorize, 'upsert' | 'deleteByIds' | 'getByIds'>;
   embed: Embed;
   // Null when no OpenRouter key is configured: pages are indexed unclassified.
   classify: ((page: PageInput) => Promise<Classified>) | null;
@@ -32,7 +33,8 @@ export interface IndexDeps {
 
 export type IndexOutcome =
   | { status: 'unchanged' }
-  | { status: 'indexed'; slot: string; topicPath: string[]; chunks: number; model: string; costUsd: number; capped: boolean };
+  | { status: 'indexed'; slot: string; topicPath: string[]; chunks: number; model: string; costUsd: number; capped: boolean }
+  | { status: 'reclassified'; slot: string; topicPath: string[]; model: string; costUsd: number };
 
 // Failures a retry can't fix: the message is acknowledged and logged.
 export class PermanentError extends Error {}
@@ -43,9 +45,14 @@ export const DEFAULT_TOTAL_CAP_USD = 10;
 // Pages with this or FAILED are picked up again by the daily reclassify job.
 export const UNCLASSIFIED = 'none';
 export const NEEDS_CLASSIFYING = [UNCLASSIFIED, FAILED];
+// After this many FAILED results for the same content, the daily job stops trying.
+export const MAX_ATTEMPTS = 3;
 // index_costs row for the account-wide total.
 export const ALL_SITES = '*';
 const VECTOR_BATCH = 500;
+// IDs per Vectorize getByIds call.
+const GET_BATCH = 20;
+const EMPTY: Classification = { slot: 'other', topic_path: [], summary: '', tasks: [], entities: [] };
 
 export const pageKey = (hash: string) => `pages/${hash}.md`;
 export const classifyKey = (hash: string) => `classify/${hash}.json`;
@@ -73,36 +80,79 @@ async function addCost(db: D1Database, site: string, now: Date, cost: number) {
   await db.batch([site, ALL_SITES].map((s) => db.prepare(add).bind(s, capDay(now), cost)));
 }
 
+async function capsReached(deps: IndexDeps, site: string, now: Date): Promise<boolean> {
+  const [siteSpent, totalSpent] = await Promise.all([spentToday(deps.db, site, now), spentToday(deps.db, ALL_SITES, now)]);
+  return siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd;
+}
+
 // The cached result for this content, else a fresh call (cached when it succeeded).
 // Returns null when classification is skipped, with capped saying whether a cap did it.
-async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, contentHash: string, now: Date): Promise<{ result: Classified | null; capped: boolean; fresh: boolean }> {
+// Throws ClassifyUnavailable (after recording its cost) when the classifier is down.
+async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, contentHash: string, now: Date): Promise<{ result: Classified | null; capped: boolean }> {
   const cached = await deps.bucket.get(classifyKey(contentHash));
-  if (cached) return { result: await cached.json<Classified>(), capped: false, fresh: false };
-  if (!deps.classify) return { result: null, capped: false, fresh: false };
-  const [siteSpent, totalSpent] = await Promise.all([spentToday(deps.db, site, now), spentToday(deps.db, ALL_SITES, now)]);
-  if (siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd) return { result: null, capped: true, fresh: false };
-  const result = await deps.classify(page);
+  if (cached) return { result: await cached.json<Classified>(), capped: false };
+  if (!deps.classify) return { result: null, capped: false };
+  if (await capsReached(deps, site, now)) return { result: null, capped: true };
+  let result: Classified;
+  try {
+    result = await deps.classify(page);
+  } catch (e) {
+    if (e instanceof ClassifyUnavailable) await addCost(deps.db, site, now, e.costUsd);
+    throw e;
+  }
   await addCost(deps.db, site, now, result.costUsd);
   if (result.classification) await deps.bucket.put(classifyKey(contentHash), JSON.stringify(result));
-  return { result, capped: false, fresh: true };
+  return { result, capped: false };
+}
+
+// Recounts every prefix of the old and new topic paths from page_index, as two
+// index range counts on (site, topic): the topic itself, and topics in
+// [p + '/', p + '0'), which is exactly those starting with p + '/' ('0' follows
+// '/'). Runs after the page_index write in the same batch; zero rows are deleted.
+function topicRecount(db: D1Database, site: string, oldTopic: string | undefined, newPath: string[]): D1PreparedStatement[] {
+  const affected = new Set([...topicPrefixes(oldTopic ? oldTopic.split('/') : []), ...topicPrefixes(newPath)]);
+  const stmts = [...affected].map((p) =>
+    db.prepare(
+      `INSERT INTO topics (site, path, count)
+       SELECT ?1, ?2,
+         (SELECT COUNT(*) FROM page_index WHERE site = ?1 AND topic = ?2)
+         + (SELECT COUNT(*) FROM page_index WHERE site = ?1 AND topic >= ?2 || '/' AND topic < ?2 || '0')
+       WHERE true
+       ON CONFLICT (site, path) DO UPDATE SET count = excluded.count`,
+    ).bind(site, p));
+  stmts.push(db.prepare('DELETE FROM topics WHERE site = ? AND count = 0').bind(site));
+  return stmts;
+}
+
+async function readPage(deps: IndexDeps, url: string, contentHash: string) {
+  const obj = await deps.bucket.get(pageKey(contentHash));
+  if (!obj) throw new PermanentError(`no R2 object ${pageKey(contentHash)}`);
+  const markdown = await obj.text();
+  return { markdown, title: pageTitle(markdown) || new URL(url).pathname };
+}
+
+interface Existing {
+  content_hash: string;
+  model: string;
+  topic: string;
+  attempts: number;
 }
 
 export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<IndexOutcome> {
-  const { db, bucket, vectors, embed } = deps;
+  const { db, vectors, embed } = deps;
   const now = deps.now?.() ?? new Date();
   const { site, url, contentHash } = msg;
 
   const existing = await db
-    .prepare('SELECT content_hash, model, topic FROM page_index WHERE url = ?')
+    .prepare('SELECT content_hash, model, topic, attempts FROM page_index WHERE url = ?')
     .bind(url)
-    .first<{ content_hash: string; model: string; topic: string }>();
-  if (existing && existing.content_hash === contentHash && !NEEDS_CLASSIFYING.includes(existing.model)) return { status: 'unchanged' };
+    .first<Existing>();
+  if (existing && existing.content_hash === contentHash) {
+    if (!NEEDS_CLASSIFYING.includes(existing.model)) return { status: 'unchanged' };
+    return reclassifyPage(deps, msg, existing, now);
+  }
 
-  const obj = await bucket.get(pageKey(contentHash));
-  if (!obj) throw new PermanentError(`no R2 object ${pageKey(contentHash)}`);
-  const markdown = await obj.text();
-  const title = pageTitle(markdown) || new URL(url).pathname;
-
+  const { markdown, title } = await readPage(deps, url, contentHash);
   const chunks = chunkMarkdown(markdown);
   const urlKey = (await sha256Hex(url)).slice(0, 32);
   const rows = chunks.map((c) => ({ ...c, id: `${urlKey}-${c.ord}`, heading: headingTrail(title, c.headingPath) }));
@@ -110,7 +160,7 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
 
   // Classified last of the slow steps: if embedding fails, nothing was paid for.
   const { result, capped } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now);
-  const classification: Classification = result?.classification ?? { slot: 'other', topic_path: [], summary: '', tasks: [], entities: [] };
+  const classification = result?.classification ?? EMPTY;
   const model = result?.model ?? UNCLASSIFIED;
   const costUsd = result?.costUsd ?? 0;
 
@@ -138,30 +188,71 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
     ...classification.entities.map((e) =>
       db.prepare('INSERT INTO entities (site, kind, name, url) VALUES (?, ?, ?, ?)').bind(site, e.kind, e.name, url)),
     db.prepare(
-      `INSERT INTO page_index (url, site, content_hash, title, slot, topic, topic_path, summary, tasks, entities, model, cost_usd, indexed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO page_index (url, site, content_hash, title, slot, topic, topic_path, summary, tasks, entities, model, cost_usd, attempts, indexed_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (url) DO UPDATE SET site = excluded.site, content_hash = excluded.content_hash, title = excluded.title,
          slot = excluded.slot, topic = excluded.topic, topic_path = excluded.topic_path, summary = excluded.summary,
          tasks = excluded.tasks, entities = excluded.entities, model = excluded.model, cost_usd = excluded.cost_usd,
-         indexed_at = excluded.indexed_at`,
+         attempts = excluded.attempts, indexed_at = excluded.indexed_at`,
     ).bind(
       url, site, contentHash, title, classification.slot, topic, JSON.stringify(classification.topic_path),
       classification.summary, JSON.stringify(classification.tasks), JSON.stringify(classification.entities),
-      model, costUsd, now.toISOString(),
+      model, costUsd, model === FAILED ? 1 : 0, now.toISOString(),
     ),
+    ...topicRecount(db, site, existing?.topic, classification.topic_path),
   ];
-  // Counts for the old and new paths' prefixes are recounted from page_index
-  // (after the upsert above, in the same transaction), never adjusted by ±1.
-  const affected = new Set([...topicPrefixes(existing?.topic ? existing.topic.split('/') : []), ...topicPrefixes(classification.topic_path)]);
-  for (const p of affected) {
-    stmts.push(db.prepare(
-      `INSERT INTO topics (site, path, count)
-       SELECT ?, ?, COUNT(*) FROM page_index WHERE site = ? AND (topic = ? OR topic LIKE ? ESCAPE '\\')
-       ON CONFLICT (site, path) DO UPDATE SET count = excluded.count`,
-    ).bind(site, p, site, p, `${likeEscape(p)}/%`));
-  }
-  stmts.push(db.prepare('DELETE FROM topics WHERE site = ? AND count = 0').bind(site));
   await db.batch(stmts);
 
   return { status: 'indexed', slot: classification.slot, topicPath: classification.topic_path, chunks: rows.length, model, costUsd, capped };
+}
+
+// Same content, classification missing: caps are checked before anything is
+// read, and only the classification-derived data changes.
+async function reclassifyPage(deps: IndexDeps, msg: IndexMessage, existing: Existing, now: Date): Promise<IndexOutcome> {
+  const { db, vectors } = deps;
+  const { site, url, contentHash } = msg;
+  if (!deps.classify || (await capsReached(deps, site, now))) return { status: 'unchanged' };
+
+  const { markdown, title } = await readPage(deps, url, contentHash);
+  const { result } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now);
+  if (!result) return { status: 'unchanged' };
+  if (!result.classification) {
+    await db
+      .prepare('UPDATE page_index SET model = ?, cost_usd = ?, attempts = attempts + 1, indexed_at = ? WHERE url = ?')
+      .bind(FAILED, result.costUsd, now.toISOString(), url)
+      .run();
+    return { status: 'reclassified', slot: 'other', topicPath: [], model: FAILED, costUsd: result.costUsd };
+  }
+  const c = result.classification;
+
+  // Vectorize can't change metadata alone: each vector is upserted again with
+  // its stored values. Any missing from the index are embedded from D1.
+  const { results: chunks } = await db
+    .prepare('SELECT id, heading_path, text FROM chunks WHERE url = ? ORDER BY ord')
+    .bind(url)
+    .all<{ id: string; heading_path: string; text: string }>();
+  for (let i = 0; i < chunks.length; i += GET_BATCH) {
+    const batch = chunks.slice(i, i + GET_BATCH);
+    const found = new Map((await vectors.getByIds(batch.map((r) => r.id))).map((v) => [v.id, Array.from(v.values as ArrayLike<number>)]));
+    const missing = batch.filter((r) => !found.get(r.id)?.length);
+    if (missing.length) {
+      const embedded = await deps.embed(missing.map((r) => `${r.heading_path}\n\n${r.text}`), 'document');
+      missing.forEach((r, j) => found.set(r.id, embedded[j]));
+    }
+    await vectors.upsert(batch.map((r) => ({ id: r.id, values: found.get(r.id)!, metadata: { site, slot: c.slot, url, chunkId: r.id } })));
+  }
+
+  await db.batch([
+    db.prepare('DELETE FROM entities WHERE url = ?').bind(url),
+    ...c.entities.map((e) => db.prepare('INSERT INTO entities (site, kind, name, url) VALUES (?, ?, ?, ?)').bind(site, e.kind, e.name, url)),
+    db.prepare(
+      `UPDATE page_index SET slot = ?, topic = ?, topic_path = ?, summary = ?, tasks = ?, entities = ?, model = ?, cost_usd = ?,
+         attempts = 0, indexed_at = ? WHERE url = ?`,
+    ).bind(
+      c.slot, c.topic_path.join('/'), JSON.stringify(c.topic_path), c.summary, JSON.stringify(c.tasks), JSON.stringify(c.entities),
+      result.model, result.costUsd, now.toISOString(), url,
+    ),
+    ...topicRecount(db, site, existing.topic, c.topic_path),
+  ]);
+  return { status: 'reclassified', slot: c.slot, topicPath: c.topic_path, model: result.model, costUsd: result.costUsd };
 }

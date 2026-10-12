@@ -2,8 +2,6 @@
 
 import type { PackageChunk } from './package.ts';
 
-export const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
-
 // Chunks read for one topic package, before the size budget trims them.
 const TOPIC_CHUNKS = 400;
 
@@ -17,17 +15,18 @@ export async function siteTopics(db: D1Database, site: string): Promise<{ pages:
 
 // Chunks of the pages filed under a topic or anything below it, page by page in document order.
 export async function topicChunks(db: D1Database, site: string, topic: string): Promise<PackageChunk[]> {
-  // LIKE with %, _ and \ escaped. (substr would compare SQLite's character count with JS's
-  // UTF-16 length.) Topics are lowercase, so LIKE ignoring ASCII case changes nothing.
-  const prefix = `${likeEscape(topic)}/%`;
+  // Two index range scans on (site, topic): the topic itself, and [topic + '/',
+  // topic + '0'), which holds exactly the topics below it ('0' follows '/').
+  const select = `SELECT pi.topic AS topic, c.url AS url, c.title AS title, c.ord AS ord, c.heading_path AS heading_path, c.text AS text
+       FROM page_index pi JOIN chunks c ON c.url = pi.url`;
   const { results } = await db
     .prepare(
-      `SELECT c.url, c.title, c.ord, c.heading_path, c.text
-       FROM page_index pi JOIN chunks c ON c.url = pi.url
-       WHERE pi.site = ? AND (pi.topic = ? OR pi.topic LIKE ? ESCAPE '\\')
-       ORDER BY pi.topic, pi.url, c.ord LIMIT ${TOPIC_CHUNKS}`,
+      `${select} WHERE pi.site = ?1 AND pi.topic = ?2
+       UNION ALL
+       ${select} WHERE pi.site = ?1 AND pi.topic >= ?2 || '/' AND pi.topic < ?2 || '0'
+       ORDER BY topic, url, ord LIMIT ${TOPIC_CHUNKS}`,
     )
-    .bind(site, topic, prefix)
+    .bind(site, topic)
     .all<PackageChunk>();
   return results;
 }

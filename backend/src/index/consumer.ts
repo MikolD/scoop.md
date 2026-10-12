@@ -32,7 +32,8 @@ export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: Index
   for (const msg of batch.messages) {
     try {
       const outcome = await indexPage(deps, parseMessage(msg.body));
-      console.log(JSON.stringify({ queue: batch.queue, status: outcome.status, ...(outcome.status === 'indexed' ? { chunks: outcome.chunks, model: outcome.model, capped: outcome.capped } : {}) }));
+      const { topicPath: _, ...fields } = outcome as { topicPath?: string[] };
+      console.log(JSON.stringify({ queue: batch.queue, ...fields }));
       msg.ack();
     } catch (e) {
       const error = e instanceof Error ? e.message : String(e);

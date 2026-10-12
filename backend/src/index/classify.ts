@@ -136,61 +136,111 @@ export function parseClassification(raw: string, markdown?: string): Classificat
   return { slot: v.slot as Slot, topic_path, summary: clean(v.summary, 400), tasks, entities };
 }
 
+// A failed call: `invalid` when the model answered with unusable output (worth
+// recording as a failed classification), `transient` for everything a retry
+// might fix (timeouts, dropped connections, 429, 5xx, other HTTP errors).
+class CallError extends Error {
+  kind: 'invalid' | 'transient';
+  cost: number;
+
+  constructor(kind: 'invalid' | 'transient', message: string, cost: number) {
+    super(message);
+    this.kind = kind;
+    this.cost = cost;
+  }
+}
+
+// Every model failed with transient errors: the caller should retry later.
+// costUsd is what the attempts cost (or are estimated to have cost).
+export class ClassifyUnavailable extends Error {
+  costUsd: number;
+
+  constructor(message: string, costUsd: number) {
+    super(message);
+    this.costUsd = costUsd;
+  }
+}
+
 async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = fetch }: ClassifyOptions): Promise<{ content: string; cost: number }> {
   const user = userMessage(page);
+  // Charged when the call may have been billed but no usage came back.
   const estimate = estimateCost(model, SYSTEM.length + user.length);
-  const res = await fetchImpl(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      'content-type': 'application/json',
-      'http-referer': 'https://scoop.md',
-      'x-title': 'scoop.md indexer',
-    },
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: SYSTEM },
-        { role: 'user', content: user },
-      ],
-      response_format: { type: 'json_object' },
-      reasoning: { effort: 'low', exclude: true },
-      temperature: 0,
-      max_tokens: MAX_TOKENS,
-      usage: { include: true },
-    }),
-    signal: AbortSignal.timeout(TIMEOUT_MS),
-  }).catch((e: Error) => { throw Object.assign(e, { cost: estimate }); });
+  let res: Response;
+  try {
+    res = await fetchImpl(ENDPOINT, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        'content-type': 'application/json',
+        'http-referer': 'https://scoop.md',
+        'x-title': 'scoop.md indexer',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: 'system', content: SYSTEM },
+          { role: 'user', content: user },
+        ],
+        response_format: { type: 'json_object' },
+        reasoning: { effort: 'low', exclude: true },
+        temperature: 0,
+        max_tokens: MAX_TOKENS,
+        usage: { include: true },
+      }),
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+  } catch (e) {
+    // Timeout or dropped connection: the generation may have run and been billed.
+    throw new CallError('transient', `${model}: ${(e as Error).message}`, estimate);
+  }
   const body = (await res.json().catch(() => null)) as {
-    choices?: { message?: { content?: string } }[];
+    choices?: { message?: { content?: string | null } }[];
     usage?: { cost?: number };
     error?: { message?: string };
   } | null;
-  // No usage in the response (cut-off body, gateway error): charge the estimate.
   const reported = Number(body?.usage?.cost);
-  const cost = body?.usage && Number.isFinite(reported) ? reported : estimate;
-  if (!res.ok) throw Object.assign(new Error(`${model} answered ${res.status}: ${body?.error?.message ?? ''}`.trim()), { cost });
-  const content = body?.choices?.[0]?.message?.content;
-  if (typeof content !== 'string') throw Object.assign(new Error(`${model} returned no content`), { cost });
-  return { content, cost };
+  const usage = body?.usage && Number.isFinite(reported) ? reported : null;
+  if (!res.ok) {
+    // An error body (429, 4xx, most 5xx) means OpenRouter didn't bill the call;
+    // an unreadable 5xx (a gateway timeout page) might have been.
+    const cost = usage ?? (body === null && res.status >= 500 ? estimate : 0);
+    throw new CallError('transient', `${model} answered ${res.status}: ${body?.error?.message ?? ''}`.trim(), cost);
+  }
+  // A 200 whose body broke off mid-read, or that carries a provider error instead of choices.
+  if (body === null) throw new CallError('transient', `${model}: unreadable response body`, estimate);
+  if (body.error && !body.choices) throw new CallError('transient', `${model}: ${body.error.message ?? 'provider error'}`, usage ?? 0);
+  const content = body.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') throw new CallError('invalid', `${model} returned no content`, usage ?? estimate);
+  return { content, cost: usage ?? estimate };
 }
 
 // Tries each model in turn (default, then fallback) until one returns valid
-// output. Never throws: when all fail, the result has classification null.
+// output. When some model answered with output that failed validation, the
+// result is FAILED (classification null), recorded and retried by the daily
+// job. When every failure was transient it throws ClassifyUnavailable so the
+// queue retries with backoff.
 export async function classifyPage(page: PageInput, opts: ClassifyOptions): Promise<Classified> {
   const models = opts.models ?? [DEFAULT_MODEL, FALLBACK_MODEL];
   let costUsd = 0;
+  let invalid = false;
   const errors: string[] = [];
   for (const model of models) {
     try {
       const { content, cost } = await callModel(model, page, opts);
       costUsd += cost;
-      return { classification: parseClassification(content, page.markdown), model, costUsd };
+      try {
+        return { classification: parseClassification(content, page.markdown), model, costUsd };
+      } catch (e) {
+        throw new CallError('invalid', `${model}: ${(e as Error).message}`, 0);
+      }
     } catch (e) {
-      costUsd += Number((e as { cost?: number }).cost) || 0;
-      errors.push(`${model}: ${(e as Error).message}`);
-      console.warn(JSON.stringify({ classify: 'failed', model, error: (e as Error).message.slice(0, 300) }));
+      const err = e instanceof CallError ? e : new CallError('transient', `${model}: ${(e as Error).message}`, 0);
+      costUsd += err.cost;
+      invalid ||= err.kind === 'invalid';
+      errors.push(err.message);
+      console.warn(JSON.stringify({ classify: err.kind, model, error: err.message.slice(0, 300) }));
     }
   }
+  if (!invalid) throw new ClassifyUnavailable(`classifier unavailable (${errors.join('; ')})`, costUsd);
   return { classification: null, model: FAILED, costUsd, errors };
 }
