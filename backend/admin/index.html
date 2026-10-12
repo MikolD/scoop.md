@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>scoop.md admin</title>
+  <link rel="icon" href="icon32.png">
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="bar">
+    <a class="brand" href="#/">
+      <img src="icon32.png" alt="" width="24" height="24">
+      <span>scoop.md</span>
+      <span class="tag">admin</span>
+    </a>
+    <span id="env" class="env" hidden></span>
+    <button id="theme" class="icon" type="button" title="Switch light or dark" aria-label="Switch light or dark">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>
+    </button>
+  </header>
+  <nav class="nav" aria-label="Sections">
+    <a href="#/" data-nav="overview">Overview</a>
+    <a href="#/crawls" data-nav="crawls">Crawls</a>
+    <a href="#/seeds" data-nav="seeds">Seeds</a>
+    <a href="#/sites" data-nav="sites">Sites</a>
+    <a href="#/agent" data-nav="agent">Agent view</a>
+    <a href="#/library" data-nav="library">Shared library</a>
+    <a href="#/costs" data-nav="costs">Costs</a>
+  </nav>
+  <main id="view" aria-live="polite"></main>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

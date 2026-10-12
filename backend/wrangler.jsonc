@@ -27,6 +27,9 @@
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
     // OPENROUTER_API_KEY (indexing) also comes from .dev.vars locally.
   },
+  // The admin console's static UI (admin/), served only on admin hosts, after
+  // Basic auth: the Worker runs first for every request (src/admin/app.ts).
+  "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
   "d1_databases": [
     { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
   ],
@@ -35,13 +38,17 @@
     { "binding": "CRAWL", "bucket_name": "scoop-crawl-dev" }
   ],
   "workflows": [
-    { "name": "crawl-site-dev", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+    { "name": "crawl-site-dev", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
+    // Seed crawl batches started from the admin console (src/admin/batch-workflow.ts).
+    { "name": "crawl-batch-dev", "binding": "CRAWL_BATCH", "class_name": "CrawlBatch" }
   ],
   "ratelimits": [
     // Reads: 600 per minute per IP (docs/BACKEND.md §8). Hourly write limits live in D1.
     { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } },
     // Search: 60 per minute per IP; each query costs a Workers AI embedding unless cached.
-    { "name": "SEARCH_LIMITER", "namespace_id": "4110", "simple": { "limit": 60, "period": 60 } }
+    { "name": "SEARCH_LIMITER", "namespace_id": "4110", "simple": { "limit": 60, "period": 60 } },
+    // Admin console: failed Basic auth attempts, 10 per minute per IP, then a lockout (src/admin/auth.ts).
+    { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4120", "simple": { "limit": 10, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -61,7 +68,10 @@
   "env": {
     "staging": {
       "name": "scoop-api-staging",
-      "routes": [{ "pattern": "api-staging.scoop.md", "custom_domain": true }],
+      "routes": [
+        { "pattern": "api-staging.scoop.md", "custom_domain": true },
+        { "pattern": "admin-staging.scoop.md", "custom_domain": true }
+      ],
       "observability": {
         "enabled": true,
         // Invocation logs record the URL and request headers (install ID, client IP,
@@ -78,6 +88,7 @@
         "INDEX_DAILY_CAP_USD": "2",
         "INDEX_DAILY_TOTAL_CAP_USD": "10"
       },
+      "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" }
       ],
@@ -86,11 +97,13 @@
         { "binding": "CRAWL", "bucket_name": "scoop-crawl-staging" }
       ],
       "workflows": [
-        { "name": "crawl-site-staging", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+        { "name": "crawl-site-staging", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
+        { "name": "crawl-batch-staging", "binding": "CRAWL_BATCH", "class_name": "CrawlBatch" }
       ],
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
-        { "name": "SEARCH_LIMITER", "namespace_id": "4111", "simple": { "limit": 60, "period": 60 } }
+        { "name": "SEARCH_LIMITER", "namespace_id": "4111", "simple": { "limit": 60, "period": 60 } },
+        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4121", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -104,7 +117,10 @@
     },
     "production": {
       "name": "scoop-api",
-      "routes": [{ "pattern": "api.scoop.md", "custom_domain": true }],
+      "routes": [
+        { "pattern": "api.scoop.md", "custom_domain": true },
+        { "pattern": "admin.scoop.md", "custom_domain": true }
+      ],
       "observability": {
         "enabled": true,
         // Invocation logs record the URL and request headers (install ID, client IP,
@@ -120,6 +136,7 @@
         "INDEX_DAILY_CAP_USD": "2",
         "INDEX_DAILY_TOTAL_CAP_USD": "10"
       },
+      "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-production", "database_id": "dfce240b-45c4-4ca1-a887-66be730d2b22", "migrations_dir": "migrations" }
       ],
@@ -128,11 +145,13 @@
         { "binding": "CRAWL", "bucket_name": "scoop-crawl-production" }
       ],
       "workflows": [
-        { "name": "crawl-site", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+        { "name": "crawl-site", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
+        { "name": "crawl-batch", "binding": "CRAWL_BATCH", "class_name": "CrawlBatch" }
       ],
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } },
-        { "name": "SEARCH_LIMITER", "namespace_id": "4112", "simple": { "limit": 60, "period": 60 } }
+        { "name": "SEARCH_LIMITER", "namespace_id": "4112", "simple": { "limit": 60, "period": 60 } },
+        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4122", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [

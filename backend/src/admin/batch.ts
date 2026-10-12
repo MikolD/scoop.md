@@ -58,6 +58,8 @@ export interface TickDeps {
 }
 
 export const newBatchId = (now = Date.now()) => `cb_${ulid(now)}`;
+// The CrawlBatch Workflow instance driving a batch; each hand-over gets the next generation.
+export const batchInstanceId = (batchId: string, generation = 0) => (generation ? `${batchId}-${generation}` : batchId);
 
 export async function createBatch(
   db: D1Database,

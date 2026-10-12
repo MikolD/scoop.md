@@ -1,7 +1,10 @@
 // api.scoop.md Worker entry: CORS, read rate limiting, error mapping and the
 // one-line request log (docs/BACKEND.md §5, §8, §11), plus the index-pages
 // queue consumer, the daily reclassify cron and the CrawlSite Workflow class.
+// Admin hosts (admin.scoop.md) go to the console instead (src/admin/).
 
+import { handleAdmin } from './admin/app.ts';
+import { isAdminHost } from './admin/auth.ts';
 import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
@@ -12,12 +15,21 @@ import { ApiError, notFound } from './lib/errors.ts';
 import type { Env } from './env.ts';
 
 export { CrawlSite } from './crawl/workflow.ts';
+export { CrawlBatch } from './admin/batch-workflow.ts';
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const started = Date.now();
     const url = new URL(req.url);
     const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
+
+    // admin.scoop.md (and admin-staging): the console, behind Basic auth. Nothing below applies to it.
+    if (isAdminHost(url.hostname)) {
+      const res = await handleAdmin(req, env, url, ip);
+      console.log(JSON.stringify({ method: req.method, route: 'admin', status: res.status, ms: Date.now() - started }));
+      return res;
+    }
+
     const preflight = req.method === 'OPTIONS';
     const matched = preflight ? null : match(req, env, url, ip);
     const route = preflight ? 'preflight' : (matched?.name ?? 'unmatched');

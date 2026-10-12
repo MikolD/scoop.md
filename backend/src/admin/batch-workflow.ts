@@ -7,7 +7,7 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from 'cloudflare:workers';
 import { startCrawl } from '../crawl/start.ts';
 import type { Env } from '../env.ts';
-import { tickBatch } from './batch.ts';
+import { batchInstanceId, tickBatch } from './batch.ts';
 
 export interface BatchParams {
   batchId: string;
@@ -17,8 +17,6 @@ export interface BatchParams {
 const TICK_SECONDS = 15;
 const TICKS_PER_INSTANCE = 300;
 const DB: WorkflowStepConfig = { retries: { limit: 3, delay: '5 seconds', backoff: 'exponential' }, timeout: '2 minutes' };
-
-export const batchInstanceId = (batchId: string, generation = 0) => (generation ? `${batchId}-${generation}` : batchId);
 
 export class CrawlBatch extends WorkflowEntrypoint<Env, BatchParams> {
   async run(event: Readonly<WorkflowEvent<BatchParams>>, step: WorkflowStep): Promise<unknown> {

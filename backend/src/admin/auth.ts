@@ -18,7 +18,7 @@ export function parseBasic(header: string | null): { user: string; pass: string 
   if (!m) return null;
   let decoded: string;
   try {
-    decoded = new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(m[1]), (c) => c.charCodeAt(0)));
+    decoded = new TextDecoder('utf-8', { fatal: true, ignoreBOM: false }).decode(Uint8Array.from(atob(m[1]), (c) => c.charCodeAt(0)));
   } catch {
     return null;
   }
