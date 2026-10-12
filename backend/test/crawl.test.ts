@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { gzipSync } from 'node:zlib';
 import { matches, parseRobots } from '../src/crawl/robots.ts';
 import { parseSitemap } from '../src/crawl/sitemap.ts';
-import { docsRoot, llmsBases, llmsLinks, looksLikeClientShell, openApiLinks, twinUrl } from '../src/crawl/discover.ts';
+import { docsRoot, underRoot, llmsBases, llmsLinks, looksLikeClientShell, openApiLinks, twinUrl } from '../src/crawl/discover.ts';
 import { crawlFetch, HostLimiter, intervalFor } from '../src/crawl/polite.ts';
 import type { Clock } from '../src/crawl/polite.ts';
 import { classify, contentHash, needsIndexing, pageKey } from '../src/crawl/changes.ts';
@@ -123,6 +123,10 @@ test('twinUrl, docsRoot and openApiLinks', () => {
   assert.equal(docsRoot('', urls), '/docs');
   assert.equal(docsRoot('/d1/', urls), '/d1');
   assert.equal(docsRoot('', ['https://ex.com/a', 'https://ex.com/b']), '/');
+  assert.equal(underRoot('https://ex.com/3/library/os.html', '/3'), true);
+  assert.equal(underRoot('https://ex.com/3.md', '/3'), true);
+  assert.equal(underRoot('https://ex.com/3.11/', '/3'), false);
+  assert.equal(underRoot('https://ex.com/30', '/3'), false);
   assert.equal(docsRoot('', ['https://ex.com/api/a', 'https://ex.com/api/b', 'https://ex.com/payments']), '/'); // a section, not the docs
   assert.deepEqual(openApiLinks(['https://ex.com/openapi.json', 'https://ex.com/api/v1/swagger.yaml', 'https://ex.com/docs']), [
     'https://ex.com/openapi.json',

@@ -101,7 +101,8 @@ export function docsRoot(startPath: string, urls: string[]): string {
 export function underRoot(url: string, root: string): boolean {
   if (root === '/' || root === '') return true;
   const p = new URL(url).pathname;
-  return p === root || p.startsWith(root + '/') || p.startsWith(root + '.');
+  // `/docs.md` (the root's own twin) is in; `/3.11` is not under `/3`.
+  return p === root || p.startsWith(root + '/') || /^\.[a-z0-9]{1,5}$/i.test(p.slice(root.length));
 }
 
 // OpenAPI/Swagger documents linked from what we already fetched (no extra requests).
