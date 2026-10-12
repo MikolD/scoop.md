@@ -5,7 +5,8 @@
 
 import { decodeHTML } from 'entities/decode';
 import { ApiError } from './errors.ts';
-import { cleanText, markdownTitle, MAX_TITLE } from './skilltext.ts';
+import { cleanText, linkKey, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.ts';
+import type { Verified } from './skilltext.ts';
 import { assertFetchable, normalizeSite, siteOf } from './ssrf.ts';
 import type { Section } from './types.ts';
 
@@ -122,11 +123,15 @@ const DROPPED = new Set(['script', 'style', 'noscript', 'template']);
 
 const isAsciiLetter = (c: number) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 
+// ASCII-only lowercasing keeps every index aligned with the original string;
+// toLowerCase() can change the length ('İ' becomes two code units).
+export const asciiLower = (s: string) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+
 // HTML → plain text: drop non-content elements, replace every tag with a space
 // so adjacent blocks don't glue words together, decode all HTML5 entities.
 // A single linear scan; regexes here go quadratic on input like '<script ' × n.
 export function htmlToText(html: string): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const n = html.length;
   // Next closing tag per dropped element, so a missing one is searched for once.
   const nextClose = new Map<string, number>();
@@ -244,7 +249,7 @@ export function shingleHashes(text: string, seed: number): number[] {
 // so a crafted 2 MB page stays linear. <title> is looked for in <head> alone,
 // since SVG icons in the body carry <title> elements of their own.
 export function htmlTitle(html: string): string {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const head = lower.indexOf('</head');
   for (const [tag, end] of [['title', head < 0 ? lower.length : head], ['h1', lower.length]] as const) {
     let at = lower.indexOf(`<${tag}`);
@@ -259,6 +264,43 @@ export function htmlTitle(html: string): string {
   return '';
 }
 
+// <a href> links of a fetched page with their text, resolved against its URL.
+// indexOf scans with cached "next '>'" and "next '</a'" positions, so a run of
+// unterminated '<a ' tags stays linear.
+const HREF = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
+const MAX_TAG = 4096;
+const MAX_ANCHOR = 2000;
+// Anchors examined per page: real docs pages have a few hundred; this bounds
+// the work on a page of nothing but '<a href=…>' tags.
+const MAX_ANCHORS = 20_000;
+export function htmlLinks(html: string, base: string): Map<string, string> {
+  const lower = asciiLower(html);
+  const links = new Map<string, string>();
+  let gt = -2;
+  let close = -2;
+  let at = lower.indexOf('<a');
+  let examined = 0;
+  while (at !== -1 && links.size < MAX_SOURCE_LINKS && examined < MAX_ANCHORS) {
+    const next = lower[at + 2];
+    if (next !== undefined && /[\s>]/.test(next)) {
+      examined++;
+      if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
+      if (gt === -1) break;
+      if (close !== -1 && close < gt) close = lower.indexOf('</a', gt);
+      // Length checked before slicing: a run of '<a ' sharing one far '>' must not copy it each time.
+      const m = gt - at <= MAX_TAG ? HREF.exec(html.slice(at, gt)) : null;
+      const href = m && (m[1] ?? m[2] ?? m[3]);
+      const key = href && linkKey(decodeHTML(href), base);
+      if (key && !links.get(key)) {
+        const inner = close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 1 + MAX_ANCHOR));
+        links.set(key, cleanText(htmlToText(inner), MAX_LINK_TEXT));
+      }
+    }
+    at = lower.indexOf('<a', at + 2);
+  }
+  return links;
+}
+
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown: string, pageHtml: string): { ratio: number; count: number } {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -269,10 +311,11 @@ export function containment(sectionMarkdown: string, pageHtml: string): { ratio:
   return { ratio: hits / mine.length, count: mine.length };
 }
 
-// Resolves to the title read from the verified source (the HTML <title>/<h1>
-// for page-html, the Markdown H1 for page-md, '' otherwise), which the server
-// uses instead of any client-sent label (skilltext.ts).
-export async function verifySection(section: Section, site: string, index: number, opts: VerifyOptions = {}): Promise<string> {
+// Resolves to what the verified source says (skilltext.ts): its title (the
+// HTML <title>/<h1> for page-html, the Markdown H1 for page-md) and its links
+// (the fetched page's <a href>s, or the Markdown links of a verified file).
+// The server writes labels, title and related links from these alone.
+export async function verifySection(section: Section, site: string, index: number, opts: VerifyOptions = {}): Promise<Verified> {
   const where = `Section ${index + 1} (${section.url})`;
   if (siteOf(section.url) !== site) throw new ApiError('site_mismatch', `${where} is not on ${site}`);
   const src = await fetchSource(section.url, site, opts);
@@ -285,7 +328,7 @@ export async function verifySection(section: Section, site: string, index: numbe
     if (ratio < needed) {
       throw new ApiError('source_mismatch', `${where} matches ${Math.round(ratio * 100)}% of the live page; ${Math.round(needed * 100)}% required`);
     }
-    return htmlTitle(src.text);
+    return { title: htmlTitle(src.text), links: htmlLinks(src.text, section.url) };
   }
 
   if (isHtml(src.contentType, src.text)) throw new ApiError('source_unreachable', `${where} serves HTML, not a text file`);
@@ -293,19 +336,19 @@ export async function verifySection(section: Section, site: string, index: numbe
   if (section.content === null) {
     if (section.kind !== 'llms-full') throw new ApiError('invalid_request', `${where}: only llms-full sections may omit content`, 400);
     if (!src.over) throw new ApiError('source_mismatch', `${where} is small enough to include; send its content`);
-    return '';
+    return { title: '', links: new Map() };
   }
   if (src.over || normalizeText(src.text) !== normalizeText(section.content)) {
     throw new ApiError('source_mismatch', `${where} does not match the live file`);
   }
-  return section.kind === 'page-md' ? markdownTitle(section.content) : '';
+  return { title: section.kind === 'page-md' ? markdownTitle(section.content) : '', links: markdownLinks(section.content, section.url) };
 }
 
 // At most 6 sections per request (validation enforces the count). Text sections
 // are verified concurrently; page-html sections one at a time, since each holds
-// a whole page and its shingle set in memory. Resolves to each section's title.
-export async function verifyAll(sections: Section[], site: string, opts: VerifyOptions = {}): Promise<string[]> {
-  const titles: string[] = sections.map(() => '');
+// a whole page and its shingle set in memory. Resolves to what each section's source says.
+export async function verifyAll(sections: Section[], site: string, opts: VerifyOptions = {}): Promise<Verified[]> {
+  const titles: Verified[] = sections.map(() => ({ title: '', links: new Map() }));
   const htmlOneByOne = async () => {
     for (const [i, s] of sections.entries()) if (s.kind === 'page-html') titles[i] = await verifySection(s, site, i, opts);
   };

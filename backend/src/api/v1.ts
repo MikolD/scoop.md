@@ -214,9 +214,9 @@ const routes: Route[] = [
         { bucket: 'share:install', subject: install, limit: LIMITS.shareInstall },
         { bucket: 'share:ip', subject: ipSubject(ip), limit: LIMITS.shareIp },
       ]);
-      const titles = await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
-      // Labels, title and link text are written by the server, never taken from the client.
-      const { id, duplicate } = await store.add(withServerText(skill, titles), install);
+      const verified = await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
+      // Labels, title, related links and pageUrl come from the verified sources, never the client.
+      const { id, duplicate } = await store.add(withServerText(skill, verified), install);
       return json(duplicate ? 200 : 201, { id, status: 'verified', duplicate });
     },
   },

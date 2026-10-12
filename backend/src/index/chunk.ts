@@ -26,14 +26,72 @@ interface Section {
 
 // Fences are recognised at any indent: docs often nest them in list items.
 const FENCE = /^[ \t]*(`{3,}|~{3,})/;
-const HEADING = /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/;
+// Longer lines are never headings: keeps hostile input from costing more.
+const MAX_HEADING_LINE = 1024;
 
 export const estimateTokens = (s: string) => Math.ceil(s.length / CHARS_PER_TOKEN);
 
+// An ATX heading line ("## Text ##"), parsed by hand: the regex form
+// /^ {0,3}(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/ backtracks quadratically on
+// a long run of spaces. Lines over MAX_HEADING_LINE or holding a newline are
+// not headings.
+export function parseHeading(line: string): { level: number; text: string } | null {
+  if (line.length > MAX_HEADING_LINE || line.includes('\n')) return null;
+  let i = 0;
+  while (i < 3 && line[i] === ' ') i++;
+  let j = i;
+  while (j < line.length && line[j] === '#' && j - i < 7) j++;
+  const level = j - i;
+  if (level < 1 || level > 6 || (line[j] !== ' ' && line[j] !== '\t')) return null;
+  // Trimmed by index: /[ \t]+$/ is itself quadratic on a long inner run of spaces.
+  const blank = (c: string) => c === ' ' || c === '\t';
+  let a = j;
+  let b = line.length;
+  while (a < b && blank(line[a])) a++;
+  while (b > a && blank(line[b - 1])) b--;
+  // A closing run of #s goes when a space or tab precedes it.
+  let k = b;
+  while (k > a && line[k - 1] === '#') k--;
+  if (k > a && k < b && blank(line[k - 1])) {
+    b = k;
+    while (b > a && blank(line[b - 1])) b--;
+  }
+  return b > a ? { level, text: line.slice(a, b) } : null;
+}
+
+// Links and images keep their text: a single forward scan, since the regex
+// form /!?\[([^\]]*)\]\([^)]*\)/ is quadratic on a run of '['. A search for
+// ']' or ')' stops at the next '[', so no character is scanned more than twice.
+export function stripLinks(s: string): string {
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const image = s[i] === '!' && s[i + 1] === '[';
+    if (s[i] !== '[' && !image) {
+      out += s[i++];
+      continue;
+    }
+    const start = i + (image ? 2 : 1);
+    let j = start;
+    while (j < s.length && s[j] !== ']' && s[j] !== '[') j++;
+    if (s[j] === ']' && s[j + 1] === '(') {
+      let k = j + 2;
+      while (k < s.length && s[k] !== ')' && s[k] !== '[') k++;
+      if (s[k] === ')') {
+        out += s.slice(start, j);
+        i = k + 1;
+        continue;
+      }
+    }
+    out += s.slice(i, j);
+    i = j;
+  }
+  return out;
+}
+
 // Heading text without inline Markdown: links keep their text, emphasis and code markers go.
 export function headingText(s: string): string {
-  return s
-    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+  return stripLinks(s.slice(0, MAX_HEADING_LINE))
     .replace(/[*_`]/g, '')
     .replace(/\s+/g, ' ')
     .trim()
@@ -51,10 +109,10 @@ export function pageTitle(md: string): string {
       continue;
     }
     if (f) { fence = f[1]; continue; }
-    const h = HEADING.exec(line);
+    const h = parseHeading(line);
     if (!h) continue;
-    if (h[1].length === 1) return headingText(h[2]);
-    first ||= headingText(h[2]);
+    if (h.level === 1) return headingText(h.text);
+    first ||= headingText(h.text);
   }
   return first;
 }
@@ -88,12 +146,12 @@ function sections(md: string): Section[] {
       fence = { marker: f[1], lines: [line] };
       continue;
     }
-    const h = HEADING.exec(line);
+    const h = parseHeading(line);
     if (h) {
       flush();
-      const level = h[1].length;
+      const level = h.level;
       levels.length = level - 1;
-      levels[level - 1] = headingText(h[2]);
+      levels[level - 1] = headingText(h.text);
       out.push({ trail: levels.filter(Boolean), blocks: [{ text: line.trim(), fence: false }] });
       continue;
     }
@@ -134,7 +192,7 @@ export function chunkMarkdown(md: string, { minTokens = MIN_TOKENS, maxTokens = 
     // A new section continues the open chunk only while that chunk is still small.
     if (open && open.size >= min) open = null;
     // A chunk holding only headings so far ("## Webhooks" right before "### Verify") takes the deeper trail.
-    if (open && open.parts.every((p) => HEADING.test(p))) open.trail = s.trail;
+    if (open && open.parts.every((p) => parseHeading(p) !== null)) open.trail = s.trail;
     for (const b of s.blocks) {
       const pieces = b.fence ? [b.text] : splitProse(b.text, max);
       for (const p of pieces) {

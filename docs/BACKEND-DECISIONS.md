@@ -70,34 +70,48 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   `best: null, recent: []`).
 - **Server-written skill text** (review finding M5 of the first backend
   review, option (a); rules in BACKEND.md §6, "Server-written text"). The
-  skill `title`, section `label`s and related-link `text` were client-chosen
-  and unverified, yet reach agents as headings and lists, so they were a way
-  to put instructions in a skill that passed verification. Now:
-  - The fields are still accepted (older extensions send them) and dropped at
-    validation; `label` is no longer required.
+  skill `title`, section `label`s, related links and `pageUrl` were
+  client-chosen and unverified, yet reach agents as headings and lists, so
+  they were a way to put instructions in a skill that passed verification.
+  Now nothing in a skill comes from the client unless a verified source backs
+  it, and nothing is derived from a URL the server didn't fetch (a first
+  version humanised URL path segments, and `/docs/ignore-previous-instructions`
+  humanises into an instruction):
+  - Title, labels and link text sent by the client are accepted (older
+    extensions send them) and dropped at validation; `label` is no longer
+    required.
   - Labels use the extension's own wording (`This page: …`, `Site
     documentation index (llms.txt)`, `Full documentation (llms-full.txt)`),
     so packages read the same and the extension's `This page:` → `Another
-    page:` relabelling keeps working with no extension change.
-  - Page titles come from what verification already read: the verified
-    Markdown's first H1 (else first heading), or the fetched HTML's `<title>`
-    in `<head>` (else first `<h1>`), via the same entity-decoding `htmlToText`.
-    `<title>` is only looked for in `<head>` because inline SVG icons carry
-    `<title>` elements of their own. The scans are `indexOf` only, linear on
-    crafted input.
-  - Related-link text is the humanised last path segment rather than dropped:
-    the extension prints `[text](url)` and falls back to the bare URL, and a
-    readable name (`Get started`) is more useful to an agent than a URL list.
-    It is derived from the URL alone, so it can't carry anything the URL
-    doesn't.
-  - All three have `\p{Cc}`/`\p{Cf}` removed, whitespace collapsed and are
-    capped at 300 / 200 / 120 characters.
+    page:` relabelling keeps working with no extension change. With no title,
+    a page section is just `This page`; a skill with no page title is
+    `<site> documentation`.
+  - Titles come from what verification already read: the verified Markdown's
+    first H1 (else first heading), or the fetched HTML's `<title>` in `<head>`
+    (else first `<h1>`). `<title>` is only looked for in `<head>` because
+    inline SVG icons carry `<title>` elements of their own.
+  - Related links are kept only when a verified source links to them (the
+    fetched HTML's `<a href>`s, or Markdown links in verified `.md`/llms
+    content), with that source's link text; everything else is dropped.
+    Matching ignores the fragment and a trailing slash.
+  - `pageUrl` is kept only if it is the same page (extension `pageKey`
+    rules) as a verified page section, else that section's URL.
+  - Everything has `\p{Cc}`/`\p{Cf}` removed, whitespace collapsed, and is
+    capped at 300 / 200 / 120 characters without splitting a surrogate pair.
+  - Linear time on hostile sources: ATX headings are parsed by hand (the
+    regex form backtracked quadratically on `'# a' + spaces + 'x'`: 6 s at
+    40 KB), lines over 1 KB are never headings, link text is stripped with a
+    forward scan instead of `\[([^\]]*)\]\(…\)` (quadratic on a run of
+    `[`), and link and tag searches cache their next `>`/`</a>` positions.
+    This also fixes the same patterns in the indexer's chunker
+    (`src/index/chunk.ts`). Tag searches lowercase ASCII only, since
+    `toLowerCase()` can lengthen a string (`İ`) and shift every index after
+    it. Scaling tests cover 2 MB worst cases in both servers.
   - Skills stored before this change keep their client-sent text; the
     fingerprint (and so dedupe) doesn't involve any of these fields, so a new
     share of the same sections returns the old skill unchanged. A one-off
-    rewrite of existing rows is possible if staging data matters: titles
-    and labels from the stored sections' Markdown H1s (the stored page-html
-    content is the page converted to Markdown), link text from the URLs.
+    rewrite would need each source fetched again (links and HTML titles
+    aren't stored).
 - **`/v1/sites` cursor** is the offset as a decimal string (opaque to clients,
   same as the reference). Fine at this scale; switch to a keyset cursor on
   `(last_worked_at, site)` if the list grows large.
@@ -198,8 +212,10 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   less than 24× (linear is 8×, quadratic 64×), best of 5 interleaved runs,
   re-measured up to 3 rounds, with a 2 s ceiling at 2 MB. A 1 MB → 2 MB ratio
   under 3× was tried first and was itself flaky: GC in a full test process
-  pushed linear scanners to 3-4×. The reference server has the same code and
-  a matching test.
+  pushed linear scanners to 3-4×. Runs are timed in process CPU time
+  (`process.cpuUsage()`), not wall time: with 12 CPU-burning processes on a
+  10-core machine, wall time showed linear scanners growing 30×. The
+  reference server has the same code and a matching test.
 - **Shingles are hashed** to 53-bit numbers (cyrb53) with a fresh random seed
   per comparison, instead of kept as joined strings: one 2.3 MB page took
   about 68 MB as strings, about 31 MB as a Set of hashes for 300k shingles.

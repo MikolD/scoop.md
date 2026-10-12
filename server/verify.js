@@ -2,7 +2,7 @@
 // serves to an anonymous visitor. This is what keeps injected instructions and
 // private material out of the shared library.
 
-import { cleanText, markdownTitle, MAX_TITLE } from './skilltext.js';
+import { cleanText, linkKey, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.js';
 
 export const FETCH_CAP = 2_000_000;
 export const HTML_THRESHOLD = 0.85;
@@ -167,8 +167,11 @@ const isAsciiLetter = (c) => (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
 // HTML → plain text: drop non-content elements, replace every tag with a space
 // so adjacent blocks don't glue words together, decode entities. A single
 // linear scan; regexes here go quadratic on input like '<script ' × n.
+// ASCII-only lowercasing keeps indices aligned ('İ'.toLowerCase() is two code units).
+export const asciiLower = (s) => s.replace(/[A-Z]+/g, (m) => m.toLowerCase());
+
 export function htmlToText(html) {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const n = html.length;
   // Next closing tag per dropped element, so a missing one is searched for once.
   const nextClose = new Map();
@@ -285,7 +288,7 @@ export function shingleHashes(text, seed) {
 // The page's <title> (looked for in <head> only), else its first <h1>, as
 // plain text. indexOf scans only, so crafted input stays linear.
 export function htmlTitle(html) {
-  const lower = html.toLowerCase();
+  const lower = asciiLower(html);
   const head = lower.indexOf('</head');
   for (const [tag, end] of [['title', head < 0 ? lower.length : head], ['h1', lower.length]]) {
     let at = lower.indexOf(`<${tag}`);
@@ -300,6 +303,35 @@ export function htmlTitle(html) {
   return '';
 }
 
+// <a href> links of a fetched page with their text; linear (cached '>' and '</a').
+const HREF = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
+export function htmlLinks(html, base) {
+  const lower = asciiLower(html);
+  const links = new Map();
+  let gt = -2;
+  let close = -2;
+  let at = lower.indexOf('<a');
+  let examined = 0; // at most 20,000 anchors per page, as in the Worker
+  while (at !== -1 && links.size < MAX_SOURCE_LINKS && examined < 20_000) {
+    const next = lower[at + 2];
+    if (next !== undefined && /[\s>]/.test(next)) {
+      examined++;
+      if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
+      if (gt === -1) break;
+      if (close !== -1 && close < gt) close = lower.indexOf('</a', gt);
+      const m = gt - at <= 4096 ? HREF.exec(html.slice(at, gt)) : null;
+      const href = m && (m[1] ?? m[2] ?? m[3]);
+      const key = href && linkKey(decodeEntities(href), base);
+      if (key && !links.get(key)) {
+        const inner = close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 2001));
+        links.set(key, cleanText(htmlToText(inner), MAX_LINK_TEXT));
+      }
+    }
+    at = lower.indexOf('<a', at + 2);
+  }
+  return links;
+}
+
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown, pageHtml) {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -310,8 +342,8 @@ export function containment(sectionMarkdown, pageHtml) {
   return { ratio: hits / mine.length, count: mine.length };
 }
 
-// Resolves to the title read from the verified source (HTML <title>/<h1> for
-// page-html, the Markdown H1 for page-md, '' otherwise).
+// Resolves to what the verified source says: its title (HTML <title>/<h1> for
+// page-html, the Markdown H1 for page-md) and its links with their text.
 export async function verifySection(section, site, index, opts = {}) {
   const where = `Section ${index + 1} (${section.url})`;
   if (siteOf(section.url) !== site) throw new VerifyError('site_mismatch', `${where} is not on ${site}`);
@@ -325,7 +357,7 @@ export async function verifySection(section, site, index, opts = {}) {
     if (ratio < needed) {
       throw new VerifyError('source_mismatch', `${where} matches ${Math.round(ratio * 100)}% of the live page; ${Math.round(needed * 100)}% required`);
     }
-    return htmlTitle(src.text);
+    return { title: htmlTitle(src.text), links: htmlLinks(src.text, section.url) };
   }
 
   if (isHtml(src.contentType, src.text)) throw new VerifyError('source_unreachable', `${where} serves HTML, not a text file`);
@@ -333,10 +365,10 @@ export async function verifySection(section, site, index, opts = {}) {
   if (section.content === null) {
     if (section.kind !== 'llms-full') throw new VerifyError('invalid_request', `${where}: only llms-full sections may omit content`, 400);
     if (!src.over) throw new VerifyError('source_mismatch', `${where} is small enough to include; send its content`);
-    return '';
+    return { title: '', links: new Map() };
   }
   if (src.over || normalizeText(src.text) !== normalizeText(section.content)) {
     throw new VerifyError('source_mismatch', `${where} does not match the live file`);
   }
-  return section.kind === 'page-md' ? markdownTitle(section.content) : '';
+  return { title: section.kind === 'page-md' ? markdownTitle(section.content) : '', links: markdownLinks(section.content, section.url) };
 }

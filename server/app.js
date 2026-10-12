@@ -128,8 +128,8 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
       if (req.method === 'POST' && path === '/v1/skills') {
         const install = installId(req);
         const skill = validateSkill(await readJson(req), allowLocalhost);
-        const titles = await Promise.all(skill.sections.map((s, i) => verifySection(s, skill.site, i, { fetchImpl, allowLocalhost })));
-        const { skill: saved, duplicate } = await store.add({ ...withServerText(skill, titles), installId: install });
+        const verified = await Promise.all(skill.sections.map((s, i) => verifySection(s, skill.site, i, { fetchImpl, allowLocalhost })));
+        const { skill: saved, duplicate } = await store.add({ ...withServerText(skill, verified), installId: install });
         return send(req, res, duplicate ? 200 : 201, { id: saved.id, status: 'verified', duplicate });
       }
 

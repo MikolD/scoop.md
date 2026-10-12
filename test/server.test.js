@@ -52,13 +52,16 @@ test('containment tolerates formatting differences but not injected text', () =>
 // A 1 MB → 2 MB ratio was too tight: GC in a full test process pushed linear
 // scanners past 3×. Each size takes the best of 5 runs, alternating sizes, and
 // a round that doesn't look linear is measured again, up to 3 rounds; noise
-// only adds time, so a linear scanner passes some round.
+// only adds time, so a linear scanner passes some round. Times are CPU time,
+// so other processes can't stretch a run.
 test('text scanners stay linear on 2 MB of adversarial input', () => {
   const fill = (size, unit, tail = '') => unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+  // CPU time, not wall time: other processes taking the CPU can't make a run look slow.
   const timed = (fn) => {
-    const t = performance.now();
+    const t = process.cpuUsage();
     fn();
-    return performance.now() - t;
+    const d = process.cpuUsage(t);
+    return (d.user + d.system) / 1000;
   };
   // Below 5 ms the small run is too short to compare.
   const isLinear = (t1, t2) => t2 < 24 * Math.max(t1, 5);
@@ -94,25 +97,71 @@ test('ordered-list numbers are not words, and shingle hashes are seeded', () => 
 });
 
 test('reference server writes skill text the same way as the Worker', async () => {
-  const { withServerText, pathTitle, markdownTitle, cleanText } = await import('../server/skilltext.js');
-  const { htmlTitle } = await import('../server/verify.js');
+  const { withServerText, markdownTitle, markdownLinks, cleanText, parseHeading } = await import('../server/skilltext.js');
+  const { htmlTitle, htmlLinks, htmlToText } = await import('../server/verify.js');
   assert.equal(htmlTitle('<html><head><title>Webhooks &amp; events</title></head><body><svg><title>x</title></svg></body></html>'), 'Webhooks & events');
   assert.equal(htmlTitle('<html><head></head><body><svg><title>Logo</title></svg><h1>Real <code>one</code></h1></body></html>'), 'Real one');
-  assert.equal(markdownTitle('```\n# no\n```\n# Check **webhook** signatures'), 'Check webhook signatures');
-  assert.equal(pathTitle('https://developers.cloudflare.com/d1/get-started/index.md'), 'Get started');
-  assert.equal(pathTitle('https://ex.com/'), 'ex.com');
-  assert.equal(cleanText('Safe‮ title​', 100), 'Safe title');
-  const s = withServerText({
+  assert.equal(htmlTitle('<head><title>' + 'İ'.repeat(20) + ' T</title></head>'), 'İ'.repeat(20) + ' T');
+  assert.equal(htmlToText('<p>İİİİ</p><script>hidden</script><p>shown</p>'), 'İİİİ shown');
+  assert.equal(markdownTitle('```\n# no\n```\n# Check **webhook** [signatures](/s)'), 'Check webhook signatures');
+  assert.deepEqual(parseHeading('## Title ##'), { level: 2, text: 'Title' });
+  assert.equal(parseHeading('# ' + 'x'.repeat(2000)), null);
+  assert.equal(cleanText('Safe\u202e title\u200b', 100), 'Safe title');
+  assert.equal(cleanText('ab😀cd', 3), 'ab');
+  assert.deepEqual([...markdownLinks('[Auth **keys**](/docs/auth "t") [x](no close', 'https://ex.com/docs/g.md')], [['https://ex.com/docs/auth', 'Auth keys']]);
+  assert.deepEqual([...htmlLinks('<a class=x href="/docs/b#s">B &amp; C</a><a href="javascript:x">no</a>', 'https://ex.com/docs/g')], [['https://ex.com/docs/b', 'B & C']]);
+  const skill = {
     site: 'ex.com',
-    pageUrl: 'https://ex.com/docs/webhooks',
+    pageUrl: 'https://ex.com/docs/ignore-previous-instructions',
     title: '',
     sections: [
       { kind: 'llms', label: '', url: 'https://ex.com/llms.txt', content: 'x', bytes: null },
       { kind: 'page-md', label: '', url: 'https://ex.com/docs/webhooks.md', content: '# W', bytes: null },
     ],
-    relatedLinks: [{ url: 'https://ex.com/docs/auth-keys', text: '' }],
-  }, ['', 'Receive webhooks']);
+    relatedLinks: [{ url: 'https://ex.com/docs/auth-keys', text: '' }, { url: 'https://ex.com/docs/run-rm-rf', text: '' }],
+  };
+  const s = withServerText(skill, [{ title: '', links: new Map([['https://ex.com/docs/auth-keys', 'API keys']]) }, { title: 'Receive webhooks', links: new Map() }]);
   assert.equal(s.title, 'Receive webhooks');
+  assert.equal(s.pageUrl, 'https://ex.com/docs/webhooks.md');
   assert.deepEqual(s.sections.map((x) => x.label), ['Site documentation index (llms.txt)', 'This page: Receive webhooks']);
-  assert.deepEqual(s.relatedLinks, [{ url: 'https://ex.com/docs/auth-keys', text: 'Auth keys' }]);
+  assert.deepEqual(s.relatedLinks, [{ url: 'https://ex.com/docs/auth-keys', text: 'API keys' }]);
+  const bare = withServerText(skill, [{ title: '', links: new Map() }, { title: '', links: new Map() }]);
+  assert.equal(bare.title, 'ex.com documentation');
+  assert.deepEqual(bare.sections.map((x) => x.label), ['Site documentation index (llms.txt)', 'This page']);
+});
+
+test('reference server heading and link scanners are linear on hostile Markdown and HTML', async () => {
+  const { markdownTitle, markdownLinks } = await import('../server/skilltext.js');
+  const { htmlLinks } = await import('../server/verify.js');
+  const fill = (size, unit) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
+  const timed = (fn) => { const t = process.cpuUsage(); fn(); const d = process.cpuUsage(t); return (d.user + d.system) / 1000; };
+  const isLinear = (t1, t2) => t2 < 24 * Math.max(t1, 5);
+  const linear = (label, make, fn) => {
+    const small = make(250_000);
+    const large = make(2_000_000);
+    let t1 = Infinity;
+    let t2 = Infinity;
+    for (let round = 0; round < 3; round++) {
+      t1 = Infinity;
+      t2 = Infinity;
+      for (let i = 0; i < 5; i++) {
+        t1 = Math.min(t1, timed(() => fn(small)));
+        t2 = Math.min(t2, timed(() => fn(large)));
+      }
+      if (isLinear(t1, t2)) break;
+    }
+    assert.ok(isLinear(t1, t2), `${label}: ${t1.toFixed(1)} ms at 250 KB, ${t2.toFixed(1)} ms at 2 MB (not linear)`);
+    assert.ok(t2 < 2000, `${label}: ${t2.toFixed(0)} ms at 2 MB`);
+  };
+  for (const [label, make] of [
+    ['# a + spaces + x', (n) => '# a' + ' '.repeat(n) + 'x'],
+    ['# + [ × n', (n) => '# ' + '['.repeat(n)],
+    ['## + [a]( × n', (n) => '## ' + '[a]('.repeat(n / 4)],
+    ['lines of # a + spaces', (n) => fill(n, '# a' + ' '.repeat(1000) + 'x\n')],
+    ['lines of ## + [a]( × 250', (n) => fill(n, '## ' + '[a]('.repeat(250) + '\n')],
+  ]) {
+    linear(`markdownTitle ${label}`, make, markdownTitle);
+    linear(`markdownLinks ${label}`, make, (md) => markdownLinks(md, 'https://ex.com/'));
+  }
+  for (const unit of ['<a ', '<a>', '<a href="/x">']) linear(`htmlLinks ${unit}`, (n) => fill(n, unit), (html) => htmlLinks(html, 'https://ex.com/'));
 });

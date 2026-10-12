@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { containment, htmlToText, markdownToPlain, normalizeText, shingleHashes, verifySection, verifyAll } from '../src/lib/verify.ts';
 import type { Section } from '../src/lib/types.ts';
-import { fakeFetch } from './helpers.ts';
+import { assertLinear, fakeFetch, fillTo } from './helpers.ts';
 
 const SITE = 'docs.ex.com';
 const BASE = `https://${SITE}`;
@@ -166,47 +166,8 @@ test('verifyAll checks page-html sections one at a time', async () => {
 });
 
 // Worst cases for the text scanners: input built to make naive regexes
-// backtrack quadratically ('<script ' × n took 6 s at 160 KB before). Each is
-// checked for linear scaling rather than against a fixed time, so a busy
-// machine doesn't fail it: from 250 KB to 2 MB (8×) the time must grow less
-// than 24×. Linear is 8× (alone these run 3.5 ms → 28 ms), quadratic 64×. The
-// wide spread matters: from 1 MB to 2 MB, GC in a full test process pushed
-// linear scanners past 3× (18 → 61 ms). Each size takes the best of 5 runs,
-// alternating sizes, and a round that doesn't look linear is measured again,
-// up to 3 rounds; noise only ever adds time. A 2 s ceiling at 2 MB is the
-// backstop.
-const SMALL = 250_000;
-const TWO_MB = 2_000_000;
-const fillTo = (size: number, unit: string, tail = '') => unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
-const RUNS = 5;
-const MAX_GROWTH = 24;
-// Below this the small run is too short to compare; a quadratic scanner takes
-// seconds at 2 MB, far above MAX_GROWTH × this.
-const NOISE_MS = 5;
-const timed = (fn: () => unknown) => {
-  const t = performance.now();
-  fn();
-  return performance.now() - t;
-};
-function assertLinear(label: string, make: (size: number) => string, fn: (input: string) => unknown, ceilingMs = 2000) {
-  const small = make(SMALL);
-  const large = make(TWO_MB);
-  const linear = (t1: number, t2: number) => t2 < MAX_GROWTH * Math.max(t1, NOISE_MS);
-  let t1 = Infinity;
-  let t2 = Infinity;
-  for (let round = 0; round < 3; round++) {
-    t1 = Infinity;
-    t2 = Infinity;
-    for (let i = 0; i < RUNS; i++) {
-      t1 = Math.min(t1, timed(() => fn(small)));
-      t2 = Math.min(t2, timed(() => fn(large)));
-    }
-    if (linear(t1, t2)) break;
-  }
-  assert.ok(linear(t1, t2), `${label}: ${t1.toFixed(1)} ms at 250 KB, ${t2.toFixed(1)} ms at 2 MB (not linear)`);
-  assert.ok(t2 < ceilingMs, `${label}: ${t2.toFixed(0)} ms at 2 MB (ceiling ${ceilingMs} ms)`);
-}
-
+// backtrack quadratically ('<script ' × n took 6 s at 160 KB before), checked
+// with assertLinear (helpers.ts).
 test('htmlToText is linear on adversarial HTML', () => {
   for (const [label, unit] of [
     ['<script ×n', '<script '],

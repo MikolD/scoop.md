@@ -57,7 +57,7 @@ Check Cloudflare's current documentation for exact `wrangler` config syntax (D1,
 { "url": "https://tailwindcss.com/docs/editor-setup", "text": "Editor setup" }
 ```
 
-Same host as the skill's site, `http(s)` only, at most 100 per skill. `text` is **written by the server** from the URL's last path segment (§6); text in the request is ignored. At most 120 chars.
+Same host as the skill's site, `http(s)` only, at most 100 per skill. **Kept only if a verified source links to it** (§6), and `text` is that link's own text in the source; text in the request is ignored. At most 120 chars.
 
 ### Skill (as returned by the API)
 
@@ -138,7 +138,7 @@ Request:
 }
 ```
 
-`title`, each section's `label` and each related link's `text` may be sent but are ignored: the server writes them (§6, "Server-written text").
+`title`, each section's `label` and each related link's `text` may be sent but are ignored, related links no verified source links to are dropped, and `pageUrl` is kept only if it is one of the verified pages: the server writes all of this (§6, "Server-written text").
 
 Behaviour:
 1. Validate shape and limits (§8). `pageUrl` host must equal `site`.
@@ -201,17 +201,18 @@ The 85% threshold allows for the extension's HTML-to-Markdown conversion differi
 
 ### Server-written text
 
-Verification proves the section *content*, but a skill also carries text the client could choose freely: the skill `title`, each section `label` and each related link's `text`. All three reach agents (as the package's headings, Sources list and related-pages list), so the server never stores the client's. After verification it writes them:
+Verification proves the section *content*, but a skill also carries text the client could choose freely: the skill `title`, each section `label`, the related links and `pageUrl`. They reach agents (as the package's headings, Sources list and related-pages list), so the server never stores the client's, and never derives text from a URL it didn't fetch (a URL path can spell out instructions too). After verification it writes them:
 
 | Field | Server-written value |
 |---|---|
-| Section `label`, `page-md` / `page-html` | `This page: <title>`, where `<title>` is the first Markdown H1 of the verified content (else its first heading) for `page-md`, and the fetched page's `<title>` (from `<head>`), else its first `<h1>`, for `page-html`. If neither has one, the humanised last path segment of the section URL (below). |
+| Section `label`, `page-md` / `page-html` | `This page: <title>`, where `<title>` is the first Markdown H1 of the verified content (else its first heading) for `page-md`, and the fetched page's `<title>` (from `<head>`), else its first `<h1>`, for `page-html`. Just `This page` when there is none. |
 | Section `label`, `llms` | `Site documentation index (llms.txt)` |
 | Section `label`, `llms-full` | `Full documentation (llms-full.txt)` |
-| Skill `title` | The title of the first `page-md` or `page-html` section that has one, else the humanised last path segment of `pageUrl`. |
-| Related link `text` | The humanised last path segment of the link's URL: percent-decoded, a trailing `.md`/`.mdx`/`.html`/`.txt` dropped, an `index` segment replaced by the one before it, `-`, `_` and `+` turned into spaces, first letter capitalised (`/d1/get-started/index.md` → `Get started`); the hostname for the site root. |
+| Skill `title` | The title of the first `page-md` or `page-html` section that has one, else `<site> documentation`. |
+| Related links | Kept only when a verified source links to the same URL (fragment and trailing slash ignored): an `<a href>` in the fetched HTML of a `page-html` section, or a Markdown `[text](url)` in the verified content of a `page-md`, `llms` or `llms-full` section. `text` is that link's text in the source. Others are dropped. |
+| `pageUrl` | Kept when it is the same page as a verified `page-md` or `page-html` section (a trailing `.md`, `/index.md` or slash ignored, as the extension compares pages); otherwise the first such section's URL, or the first section's URL if there is none. |
 
-Every value has control and format characters (Unicode `Cc`, `Cf`: zero-width, bidi overrides) replaced by spaces, whitespace collapsed to single spaces, and is cut to 300 (title), 200 (label) or 120 (link text) characters. The `This page: ` prefix is what the extension uses to relabel a shared skill's page as `Another page: ` when the user is on a different page.
+Every value has control and format characters (Unicode `Cc`, `Cf`: zero-width, bidi overrides) replaced by spaces, whitespace collapsed to single spaces, and is cut to 300 (title), 200 (label) or 120 (link text) characters without splitting a surrogate pair. Reading titles and links must stay linear on hostile 2 MB sources (no backtracking regexes over unbounded input). The `This page: ` prefix is what the extension uses to relabel a shared skill's page as `Another page: ` when the user is on a different page.
 
 ### Fetch safety (SSRF)
 
