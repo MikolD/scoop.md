@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chunkMarkdown, estimateTokens, pageTitle } from '../src/index/chunk.ts';
-import { ClassifyUnavailable, classifyPage, estimateCost, MAX_INPUT, parseClassification, stripFences, userMessage } from '../src/index/classify.ts';
+import { CLASSIFY_BUDGET_MS, ClassifyUnavailable, classifyPage, estimateCost, MAX_INPUT, parseClassification, stripFences, userMessage } from '../src/index/classify.ts';
 import type { Classified, PageInput } from '../src/index/classify.ts';
 import { backoffSeconds, handleIndexBatch, parseMessage } from '../src/index/consumer.ts';
 import { ALL_SITES, classifyKey, indexPage, MAX_ATTEMPTS, pageKey, spentToday, UNAVAILABLE_FALLBACK_ATTEMPT, UNCLASSIFIED } from '../src/index/indexer.ts';
@@ -18,7 +18,7 @@ import type { PackageChunk } from '../src/search/package.ts';
 import { siteTopics, topicChunks } from '../src/search/queries.ts';
 import { cachedQueryEmbed, normalizeQuery } from '../src/search/embedcache.ts';
 import { rrf } from '../src/search/rrf.ts';
-import { ftsQuery, search } from '../src/search/search.ts';
+import { ftsQuery, LLMS_FULL_WEIGHT, search, sourceWeight } from '../src/search/search.ts';
 import { topicTree } from '../src/search/topics.ts';
 import { fakeD1, fakeR2 } from './helpers.ts';
 
@@ -751,7 +751,7 @@ test('consumer acks indexed and invalid messages, retries failures with backoff'
     console.error = errors;
     console.log = logs;
   }
-  assert.deepEqual(acked, [0, 1, 2]);
+  assert.deepEqual(acked.sort(), [0, 1, 2]);
   assert.deepEqual(retried, [{ i: 3, delaySeconds: 120 }]);
   assert.deepEqual([1, 2, 3, 8, 20].map(backoffSeconds), [30, 60, 120, 3600, 3600]);
   assert.throws(() => parseMessage({ site: 'ex.com', url: 'https://ex.com/a', contentHash: 'xyz' }), /sha256/);
@@ -819,4 +819,59 @@ test('one URL normaliser for queue messages and the admin route', () => {
   // The admin route calls the same function on its parsed URL.
   assert.equal(normalizePageUrl(new URL('https://Docs.Example.com/x.md#/route/')), 'https://docs.example.com/x.md#/route');
   assert.equal(normalizePageUrl(new URL('https://docs.example.com/x.md#section')), 'https://docs.example.com/x.md');
+});
+
+test('a batch runs its messages concurrently; a slow or failing one does not hold up the rest', async () => {
+  const { deps, put } = await setup();
+  const delays: Record<string, number> = { 'https://ex.com/slow': 300, 'https://ex.com/a': 50, 'https://ex.com/b': 50 };
+  deps.classify = async (p) => {
+    await new Promise((r) => setTimeout(r, delays[p.url] ?? 0));
+    if (p.url.endsWith('/boom')) throw new Error('boom');
+    return cls('guide', ['a', 'b']);
+  };
+  const msgs = [await put('https://ex.com/slow', '# Slow'), await put('https://ex.com/a', '# A'), await put('https://ex.com/boom', '# Boom'), await put('https://ex.com/b', '# B')];
+  const { batch, acked, retried } = fakeBatch(msgs);
+  const log = console.log;
+  const err = console.error;
+  console.log = () => {};
+  console.error = () => {};
+  const started = Date.now();
+  try { await handleIndexBatch(batch, deps); } finally { console.log = log; console.error = err; }
+  const ms = Date.now() - started;
+  assert.ok(ms < 300 + 50 + 50, `took ${ms} ms, so it wasn't sequential`);
+  assert.deepEqual(acked.slice(0, 2).sort(), [1, 3], 'fast messages acked before the slow one');
+  assert.deepEqual(acked.sort(), [0, 1, 3]);
+  assert.deepEqual(retried.map((r) => r.i), [2]);
+});
+
+test('the classification budget aborts slow calls and skips the fallback', async (t) => {
+  t.mock.method(console, 'warn', () => {});
+  assert.equal(CLASSIFY_BUDGET_MS, 60_000);
+  const calls: string[] = [];
+  const hang = async (_url: string, init: RequestInit) => {
+    calls.push(JSON.parse(String(init.body)).model);
+    return new Promise<Response>((_, reject) => init.signal!.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))));
+  };
+  const started = Date.now();
+  // A ref'd timer: AbortSignal.timeout's doesn't keep node:test's event loop alive.
+  const budget = new AbortController();
+  setTimeout(() => budget.abort(new DOMException('budget', 'TimeoutError')), 50);
+  const err = await classifyPage(page, { apiKey: 'k', fetchImpl: hang, signal: budget.signal }).then(() => null, (e) => e);
+  assert.ok(err instanceof ClassifyUnavailable);
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(calls, ['qwen/qwen3.7-flash'], 'no fallback call once the budget is gone');
+  assert.ok(err.costUsd > 0, 'the aborted call is charged the estimate');
+});
+
+test('llms-full.txt chunks are down-weighted below the pages they copy', async () => {
+  const { deps, put, d1 } = await setup([cls('guide', ['d1', 'all']), cls('limits', ['d1', 'limits'])]);
+  assert.equal(sourceWeight('https://developers.cloudflare.com/d1/llms-full.txt'), LLMS_FULL_WEIGHT);
+  assert.equal(sourceWeight('https://developers.cloudflare.com/d1/limits/index.md'), 1);
+  // The full file mentions the terms more often, so bm25 alone ranks it first.
+  await indexPage(deps, await put('https://developers.cloudflare.com/d1/llms-full.txt', '# D1\n\nD1 database size limit. The D1 database size limit is 10 GB. Size limit, size limit, database limit.'));
+  await indexPage(deps, await put('https://developers.cloudflare.com/d1/limits/index.md', '# Limits\n\nMaximum database size: 10 GB.'));
+  const hits = await search({ db: d1 }, { q: 'd1 database size limit', limit: 5 });
+  assert.equal(hits.length, 2);
+  assert.equal(hits[0].url, 'https://developers.cloudflare.com/d1/limits/index.md');
+  assert.ok(hits[1].url.endsWith('llms-full.txt'), 'still searchable');
 });

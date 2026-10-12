@@ -265,8 +265,14 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   surplus IDs from a longer old version are deleted. Vectors are written
   before D1: if D1 fails the retry redoes both, and search drops vector hits
   whose chunk row doesn't exist.
-- **Retries:** messages are handled one at a time (classifying takes 5-20 s),
-  at most 3 consumer invocations at once (`max_concurrency`); failures
+- **Retries:** a batch holds at most 3 messages (`max_batch_size`), handled
+  concurrently with `Promise.allSettled`, each acked or retried on its own, so
+  one slow or failing page can't hold up or fail the others (handled one at a
+  time, a batch of 5 took ~150 s in `wrangler dev` and was sometimes cancelled
+  as hung). Classification has a 60 s wall-clock budget per page across both
+  models (an `AbortSignal` passed to every OpenRouter call; no fallback call
+  once it's spent); running out is a transient failure. At most 3 consumer
+  invocations run at once (`max_concurrency`); failures
   `retry()` with 30 s × 2^(attempt−1) up to an hour, `max_retries` 6, then go
   to the dead-letter queue `index-pages-dlq-<env>` (nothing consumes it; it's
   for inspection). Bad messages (missing fields, non-http(s) URL, URL not on
@@ -365,7 +371,16 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   SQL export, drop `chunks_fts` and its two triggers first, then recreate them
   from migration 0003 and run `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')`.
 - **Hybrid ranking:** top 50 from FTS5 and top 50 from Vectorize (filtered by
-  `site`/`slot` metadata), fused with reciprocal-rank fusion (k = 60). Scores
+  `site`/`slot` metadata), fused with reciprocal-rank fusion (k = 60).
+  Chunks from an `llms-full.txt` URL are multiplied by 0.3 after fusion: the
+  file repeats a site's whole documentation, so it matches nearly every query
+  and outranked the pages it was copied from (the D1 one is 597 KB). Weighting
+  at query time was chosen over skipping the file at index time because it
+  doesn't depend on the order pages arrive in, and the file stays searchable
+  for sites that publish nothing else. With all 50 fused candidates read
+  back and re-sorted, a down-weighted chunk makes room for the next ones. On
+  the D1 docs, "d1 database size limit" had an llms-full chunk at #2; it is
+  now #10. Scores
   are RRF scores, comparable only within one response. If embedding or
   Vectorize fails, results are FTS5 only (logged). Site and slot filters are
   re-checked against D1, since vector metadata can lag a re-index.

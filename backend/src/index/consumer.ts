@@ -1,7 +1,7 @@
 // Queue consumer for `index-pages`. One message per changed page:
-// { site, url, contentHash }. Messages are handled one at a time (classifying
-// takes seconds each); each is acked on success, retried with exponential
-// backoff on failure, and acked and logged when retrying can't help.
+// { site, url, contentHash }. A batch's messages run concurrently; each is
+// acked on success, retried with exponential backoff on failure, and acked
+// and logged when retrying can't help.
 
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
@@ -29,22 +29,26 @@ export function parseMessage(body: unknown): IndexMessage {
 // 30 s, 60 s, 2 min, … capped at an hour. `attempts` starts at 1.
 export const backoffSeconds = (attempts: number) => Math.min(3600, 30 * 2 ** Math.max(0, attempts - 1));
 
+// A batch's messages run concurrently, each acked or retried on its own, so
+// one slow or failing page can't hold up or fail the others.
 export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: IndexDeps): Promise<void> {
-  for (const msg of batch.messages) {
-    try {
-      const outcome = await indexPage(deps, parseMessage(msg.body), { attempt: msg.attempts });
-      const { topicPath: _, ...fields } = outcome as { topicPath?: string[] };
-      console.log(JSON.stringify({ queue: batch.queue, ...fields }));
+  await Promise.allSettled(batch.messages.map((msg) => handleMessage(batch.queue, msg, deps)));
+}
+
+async function handleMessage(queue: string, msg: Message<unknown>, deps: IndexDeps): Promise<void> {
+  try {
+    const outcome = await indexPage(deps, parseMessage(msg.body), { attempt: msg.attempts });
+    const { topicPath: _, ...fields } = outcome as { topicPath?: string[] };
+    console.log(JSON.stringify({ queue, ...fields }));
+    msg.ack();
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    if (e instanceof PermanentError) {
+      console.error(JSON.stringify({ queue, status: 'dropped', error }));
       msg.ack();
-    } catch (e) {
-      const error = e instanceof Error ? e.message : String(e);
-      if (e instanceof PermanentError) {
-        console.error(JSON.stringify({ queue: batch.queue, status: 'dropped', error }));
-        msg.ack();
-      } else {
-        console.error(JSON.stringify({ queue: batch.queue, status: 'retry', attempts: msg.attempts, error }));
-        msg.retry({ delaySeconds: backoffSeconds(msg.attempts) });
-      }
+    } else {
+      console.error(JSON.stringify({ queue, status: 'retry', attempts: msg.attempts, error }));
+      msg.retry({ delaySeconds: backoffSeconds(msg.attempts) });
     }
   }
 }
