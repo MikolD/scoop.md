@@ -120,26 +120,28 @@ function urlEnd(text, from, { inLink = false } = {}) {
 
 // Calls on(kind, url, start, end, label) for each http(s) URL in a text
 // piece: 'link' ([label](url "title"), not images), 'auto' (<url>), 'bare'.
-function scan(text, on) {
+export function scan(text, on) {
   let i = 0;
   while (i < text.length) {
     const rest = text.slice(i);
     const m = rest.match(/!?\[([^\]\n]*)\]\(\s*<?(?=https?:\/\/)|<(?=https?:\/\/[^\s>]+>)|\bhttps?:\/\//);
     if (!m) return;
     const at = i + m.index;
-    if (m[0].startsWith('<') && !m[0].startsWith('<[')) {
-      const end = text.indexOf('>', at);
-      on('auto', text.slice(at + 1, end), at, end + 1);
-      i = end + 1;
+    if (m[0].startsWith('<')) {
+      const end = text.indexOf('>', at) + 1; // the lookahead guarantees a '>'
+      on('auto', text.slice(at + 1, end - 1), at, end);
+      i = Math.max(end, at + 1);
     } else if (m[0].includes('[')) {
       const urlStart = at + m[0].length;
       const angled = m[0].endsWith('<');
       const urlStop = angled ? text.indexOf('>', urlStart) : urlEnd(text, urlStart, { inLink: true });
+      // <url> must close on the same run of non-space characters; otherwise it's not a link.
+      if (urlStop < 0 || (angled && /[\s<]/.test(text.slice(urlStart, urlStop)))) { i = Math.max(urlStart, at + 1); continue; }
       const tail = text.slice(angled ? urlStop + 1 : urlStop).match(/^\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)/);
-      if (!tail) { i = urlStart; continue; }
+      if (!tail) { i = Math.max(urlStart, at + 1); continue; }
       const end = (angled ? urlStop + 1 : urlStop) + tail[0].length;
       if (!m[0].startsWith('!')) on('link', text.slice(urlStart, urlStop), at, end, m[1]);
-      i = end;
+      i = Math.max(end, at + 1);
     } else {
       const end = urlEnd(text, at);
       on('bare', text.slice(at, end), at, end);

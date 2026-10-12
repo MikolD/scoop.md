@@ -1078,3 +1078,35 @@ test('the popup only links http(s) addresses read back from a package', () => wi
   assert.equal(p.$('instructions-list').children.length, 1);
   assert.equal(p.$('instructions-list').querySelector('a'), null);
 }));
+
+// Runs cases in a worker: fails (naming the case) if any doesn't finish in time.
+async function scanTerminates(cases, ms) {
+  const { Worker } = await import('node:worker_threads');
+  const worker = new Worker(new URL('./helpers/links-fuzz-worker.js', import.meta.url), { workerData: { cases } });
+  let current = -1;
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no end after ${ms} ms, at case ${current}: ${JSON.stringify(cases[current])}`)), ms);
+      worker.on('message', (m) => { if (m.done) { clearTimeout(timer); resolve(); } else current = m.i; });
+      worker.on('error', (e) => { clearTimeout(timer); reject(e); });
+    });
+  } finally {
+    await worker.terminate();
+  }
+}
+
+test('links: an unclosed <url> in a link destination ends the scan (both review repros)', async () => {
+  const repros = ['Call `init()`) and see [the guide](<https://docs.acme.com/guide', ') [x](<https://a.com'];
+  await scanTerminates(repros, 2000);
+  assert.deepEqual(collectLinks([repros[0]]), ['https://docs.acme.com/guide'], 'still seen as a bare URL');
+  assert.deepEqual(collectLinks([repros[1]]), ['https://a.com']);
+  assert.equal(unlink('[a](<https://a.com/x>) and [b](<https://b.com/y z>)', new Set()), 'a and [b](<`https://b.com/y` z>)');
+});
+
+test('links: fuzz: 2,000 random mixes of []()<>, backticks, URLs and text always end and always advance', async () => {
+  let seed = 20261012;
+  const rand = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+  const parts = ['[', ']', '(', ')', '<', '>', '`', '``', '```', '\n', ' ', '!', '"', "'", 'text', 'https://a.dev/x', 'http://b.org/(y)', '<https://c.io', '](', '](<', '<code>', '</code>', '<pre>', '</pre>', '    ', '- ', '~~~', '.', ',', '[t](<https://d.dev/z', '[u](https://e.dev/(w'];
+  const cases = Array.from({ length: 2000 }, () => Array.from({ length: 1 + rand(40) }, () => parts[rand(parts.length)]).join(''));
+  await scanTerminates(cases, 20_000);
+});
