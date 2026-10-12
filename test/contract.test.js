@@ -350,3 +350,35 @@ test('reports and takedown', async () => {
   assert.notEqual(best.json.skill?.id, skillA);
   assert.equal(best.json.skill?.id, skillB, 'falls back to the next confirmed skill');
 });
+
+// ---- Usage telemetry (docs/TELEMETRY.md) -------------------------------------
+
+const telemetry = (events, extra = {}) => ({ installId: INSTALL_A, sessionId: `contract-${NONCE}`, client: { extVersion: '0.3.0' }, events, ...extra });
+const tev = (name, props = {}, seq = 1) => ({ name, ts: Date.now(), seq, props });
+
+test('events: a valid batch is accepted with 202; unknown events and private hosts are dropped', async () => {
+  const r = await call('POST', '/v1/events', {
+    install: null,
+    body: telemetry([tev('popup_open'), tev('scoop_start', { site: 'docs.stripe.com' }, 2), tev('scoop_start', { site: 'localhost' }, 3), tev('no_such_event', {}, 4)]),
+  });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  assert.deepEqual(r.json, { accepted: 2, dropped: 2 });
+});
+
+test('events: the website posts page views as text/plain (a beacon, no preflight)', async () => {
+  const r = await call('POST', '/v1/events', {
+    install: null,
+    headers: { 'content-type': 'text/plain;charset=UTF-8', origin: 'https://scoop.md' },
+    body: { source: 'site', sessionId: `site-${NONCE}`, events: [tev('page_view', { path: '/privacy', referrerHost: 'news.ycombinator.com' })] },
+  });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  assert.equal(r.json.accepted, 1);
+});
+
+test('events: envelope errors and caps', async () => {
+  expectError(await call('POST', '/v1/events', { install: null, body: telemetry([tev('popup_open')], { installId: 'nope' }) }), 400, 'invalid_request');
+  expectError(await call('POST', '/v1/events', { install: null, body: telemetry([]) }), 400, 'invalid_request');
+  expectError(await call('POST', '/v1/events', { install: null, body: telemetry(Array.from({ length: 101 }, (_, i) => tev('popup_open', {}, i))) }), 400, 'invalid_request');
+  expectError(await call('POST', '/v1/events', { install: null, body: telemetry([tev('error', { message: 'x'.repeat(70_000) })]) }), 413, 'too_large');
+  expectError(await call('POST', '/v1/events', { install: null, body: '{nope' }), 400, 'invalid_request');
+});

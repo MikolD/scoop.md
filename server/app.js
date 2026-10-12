@@ -6,12 +6,22 @@ import { timingSafeEqual } from 'node:crypto';
 import { VerifyError, normalizeSite, siteOf, assertFetchable, verifySection } from './verify.js';
 import { pageHash, withServerText } from './skilltext.js';
 import { summary, publicSkill } from './store.js';
+import { isPrivateHost } from '../extension/lib/hosts.js';
 
 const MAX_BODY = 6_000_000;
 const MAX_SECTION = 2_000_000;
 const KINDS = new Set(['page-md', 'llms', 'llms-full', 'page-html']);
 const REASONS = new Set(['malicious', 'wrong', 'copyright', 'other']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Usage events (docs/TELEMETRY.md): the names backend/src/telemetry/schema.ts accepts, by source.
+// The reference server checks the envelope and the caps, and keeps events in memory.
+export const EVENT_NAMES = {
+  extension: new Set(['install', 'update', 'browser_update', 'active_daily', 'telemetry_opt_out', 'telemetry_opt_in', 'popup_open', 'popup_close',
+    'scoop_start', 'scoop_result', 'copy', 'rebuild', 'share_result', 'vote', 'report', 'settings_change', 'options_open', 'error']),
+  site: new Set(['page_view', 'cta_click', 'uninstall', 'uninstall_reason']),
+};
+const MAX_EVENTS_BODY = 64 * 1024;
+const MAX_SKEW_MS = 7 * 86_400_000;
 
 const fail = (code, message, status) => new VerifyError(code, message, status);
 const bad = (message) => fail('invalid_request', message, 400);
@@ -34,12 +44,12 @@ function send(req, res, status, body, cache) {
   res.end(body === undefined ? '' : JSON.stringify(body));
 }
 
-async function readJson(req) {
+async function readJson(req, max = MAX_BODY) {
   let size = 0;
   const chunks = [];
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > MAX_BODY) throw fail('too_large', 'Request body is over 6 MB', 413);
+    if (size > max) throw fail('too_large', `Request body is over ${max === MAX_BODY ? '6 MB' : `${max / 1024} KB`}`, 413);
     chunks.push(chunk);
   }
   try {
@@ -174,6 +184,24 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
         if (!store.hasSite(site)) throw fail('not_found', 'No skills for this site', 404);
         const b = store.best(site);
         return send(req, res, 200, { site, best: b && summary(b), recent: store.recent(site).map(summary) }, true);
+      }
+
+      if (req.method === 'POST' && path === '/v1/events') {
+        const body = await readJson(req, MAX_EVENTS_BODY);
+        const source = body.source ?? 'extension';
+        if (!EVENT_NAMES[source]) throw bad('source must be extension or site');
+        if (source === 'extension' && !UUID.test(body.installId ?? '')) throw bad('installId must be a UUID v4');
+        if (typeof body.sessionId !== 'string' || !/^[\w-]{1,64}$/.test(body.sessionId)) throw bad('sessionId must be 1–64 letters, digits, - or _');
+        if (!Array.isArray(body.events) || !body.events.length) throw bad('events must be a non-empty array');
+        if (body.events.length > 100) throw bad('events has over 100 items');
+        const now = Date.now();
+        const kept = body.events.filter((e) => {
+          const site = e?.props?.site;
+          return EVENT_NAMES[source].has(e?.name) && Math.abs(Number(e.ts) - now) <= MAX_SKEW_MS &&
+            (site === undefined || (typeof site === 'string' && site.includes('.') && !isPrivateHost(site)));
+        });
+        store.events = [...(store.events ?? []), ...kept.map((e) => ({ ...e, source, installId: body.installId ?? null }))].slice(-10_000);
+        return send(req, res, 202, { accepted: kept.length, dropped: body.events.length - kept.length });
       }
 
       if (req.method === 'POST' && path === '/v1/reports') {

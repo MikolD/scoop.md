@@ -81,3 +81,12 @@ test('every usage event the backend accepts is disclosed on the privacy page and
   const store = readFileSync(ext('STORE.md'), 'utf8');
   for (const s of ['| Location | Yes', '| Web history | Yes', '| User activity | Yes', '`alarms`', 'Send usage statistics']) assert.ok(store.includes(s), s);
 });
+
+test('the reference server accepts the same event names as the backend', async () => {
+  const { EVENT_NAMES } = await import('../server/app.js');
+  const schema = readFileSync(new URL('../backend/src/telemetry/schema.ts', import.meta.url), 'utf8');
+  for (const source of ['extension', 'site']) {
+    const names = [...schema.matchAll(new RegExp(`^ {2}(\\w+): \\['${source}'`, 'gm'))].map((m) => m[1]).sort();
+    assert.deepEqual([...EVENT_NAMES[source]].sort(), names, source);
+  }
+});
