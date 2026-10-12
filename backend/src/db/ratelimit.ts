@@ -1,4 +1,5 @@
-// Hourly write limits (docs/BACKEND.md §8). Cloudflare's rate limiting binding
+// Hourly write limits (docs/BACKEND.md §8), and daily ones for crawl
+// requests. Cloudflare's rate limiting binding
 // only supports 10 s and 60 s periods, so per-hour limits use fixed-window
 // counters in D1. Keys are HMAC-SHA256(RATE_KEY, bucket:hour:subject), so a
 // stored key can't be brute-forced back to an IP without the secret, and past
@@ -53,4 +54,40 @@ export async function checkHourly(db: D1Database, secret: string | undefined, li
     err.retryAfter = Math.ceil(((hour + 1) * HOUR_MS - now) / 1000);
     throw err;
   }
+}
+
+const DAY_MS = 86_400_000;
+
+// Daily limits (UTC days) in daily_counters (migrations/0008_crawl_requests.sql),
+// same keying as the hourly ones. Every limit is counted, then any over its
+// limit throws 429 with Retry-After until the next UTC midnight. A limit with
+// subject '' is global (one counter for everyone). Past days are deleted on
+// every check.
+export async function checkDaily(db: D1Database, secret: string | undefined, limits: HourlyLimit[], now = Date.now()): Promise<void> {
+  if (!secret) throw new Error('RATE_KEY is not set');
+  const day = new Date(now).toISOString().slice(0, 10);
+  const keys = await Promise.all(limits.map((l) => hmacHex(secret, `${l.bucket}:${day}:${l.subject}`)));
+  const results = await db.batch([
+    db.prepare('DELETE FROM daily_counters WHERE day < ?').bind(day),
+    ...keys.map((key) =>
+      db
+        .prepare('INSERT INTO daily_counters (key, day, count) VALUES (?, ?, 1) ON CONFLICT (key, day) DO UPDATE SET count = count + 1 RETURNING count')
+        .bind(key, day),
+    ),
+  ]);
+  const over = limits.some((l, i) => ((results[i + 1].results as { count: number }[])[0]?.count ?? 0) > l.limit);
+  if (over) {
+    const err = new ApiError('rate_limited', 'Too many crawl requests today; try again tomorrow', 429);
+    err.retryAfter = Math.max(1, Math.ceil((Math.floor(now / DAY_MS + 1) * DAY_MS - now) / 1000));
+    throw err;
+  }
+}
+
+// How much of a daily limit is used (for the admin console), without counting.
+export async function dailyCount(db: D1Database, secret: string | undefined, bucket: string, subject: string, now = Date.now()): Promise<number> {
+  if (!secret) return 0;
+  const day = new Date(now).toISOString().slice(0, 10);
+  const key = await hmacHex(secret, `${bucket}:${day}:${subject}`);
+  const row = await db.prepare('SELECT count FROM daily_counters WHERE key = ? AND day = ?').bind(key, day).first<{ count: number }>();
+  return row?.count ?? 0;
 }

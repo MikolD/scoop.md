@@ -66,6 +66,8 @@ export interface CrawlRunRow {
   embed_cost_usd: number;
   pages_indexed: number;
   costs_tracked: number; // 0: from before migration 0007, indexing costs unknown
+  // Where the Workflow is (migrations/0008_crawl_requests.sql): gate | discover | fetch | browser | done.
+  phase: string | null;
 }
 
 // A run's spend, broken down. Per page is over the pages it stored (new +
@@ -235,6 +237,7 @@ export class CrawlStore {
         .prepare(
           `UPDATE crawl_runs SET gate_decision = ?2, gate_category = ?3, gate_method = ?4, gate_reason = ?5, gate_cost_usd = ?6,
              status = CASE WHEN ?7 THEN 'rejected' ELSE status END,
+             phase = CASE WHEN ?7 THEN 'done' ELSE 'discover' END,
              finished_at = CASE WHEN ?7 THEN ?8 ELSE finished_at END,
              error = CASE WHEN ?7 THEN ?5 ELSE error END
            WHERE id = ?1`,

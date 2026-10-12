@@ -61,4 +61,6 @@ export interface Env {
   TELEMETRY_API_SAMPLE?: string;
   TELEMETRY_DAILY_MAX?: string;
   TELEMETRY_API_DAILY_MAX?: string;
+  // Crawl requests from the extension that may start a crawl per UTC day, for everyone (default 300).
+  CRAWL_REQUESTS_DAILY_MAX?: string;
 }

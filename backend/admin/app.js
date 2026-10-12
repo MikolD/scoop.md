@@ -67,9 +67,9 @@ function duration(a, b) {
   return s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.floor(s / 60)}m ${Math.round(s % 60)}s` : `${Math.floor(s / 3600)}h ${Math.round((s % 3600) / 60)}m`;
 }
 
-const ACTIVE = new Set(['queued', 'running', 'starting', 'crawling', 'waiting', 'busy']);
+const ACTIVE = new Set(['queued', 'running', 'starting', 'crawling', 'waiting', 'busy', 'indexing']);
 const PILL = {
-  queued: 'running', running: 'running', starting: 'running', crawling: 'running', waiting: '', busy: 'running',
+  queued: 'running', running: 'running', starting: 'running', crawling: 'running', waiting: '', busy: 'running', indexing: 'running',
   complete: 'complete', ready: 'complete',
   rejected: 'rejected', not_devtool: 'rejected', cancelled: 'rejected', empty: 'rejected',
   failed: 'failed', error: 'failed', blocked: 'failed',
@@ -174,6 +174,7 @@ function route() {
 const VIEWS = {
   '': overview, crawls, runs: runDetail, batches: batchDetail, seeds, sites: (r) => (r.parts[1] ? siteDetail(r) : sites(r)),
   page: pageDetail, agent, library: (r) => (r.parts[1] ? librarySite(r) : library(r)), skills: skillDetail, costs, telemetry,
+  requests: crawlRequests,
 };
 const NAV = { '': 'overview', runs: 'crawls', batches: 'crawls', page: 'sites', skills: 'library' };
 
@@ -341,6 +342,12 @@ async function overview() {
         stat(fmtInt(o.backlog.unclassified), 'indexed unclassified'),
         stat(fmtInt(o.backlog.classifyFailed), 'classification failed')),
       h('p', { class: 'meta small' }, 'Unclassified and failed pages are picked up by the daily reclassify job (04:17 UTC).')),
+      card(h('span', {}, 'Crawl requests ', h('a', { href: '#/requests', class: 'small' }, 'open')), h('div', { class: 'stats' },
+        stat(fmtInt(o.crawlRequests.started), `crawls started today of ${fmtInt(o.crawlRequests.capPerDay)} cap`, meter(o.crawlRequests.started, o.crawlRequests.capPerDay)),
+        stat(fmtInt(o.crawlRequests.total), 'requests today'),
+        stat(fmtInt(o.crawlRequests.byOutcome.joined), 'joined a running crawl'),
+        stat(fmtInt(o.crawlRequests.byOutcome.recent), 'answered from a recent crawl'),
+        stat(fmtInt(o.crawlRequests.byOutcome.rejected), 'not a devtool site'))),
       card(h('span', {}, 'Crawls ', h('a', { href: '#/crawls', class: 'small' }, 'open')), h('div', { class: 'stats' },
         stat(fmtInt(o.runs.queued), 'queued'),
         stat(fmtInt(o.runs.running), 'running'),
@@ -359,6 +366,45 @@ async function overview() {
         { label: 'AI spend', get: (r) => fmtUsd(r.costUsd), cls: 'num' },
         { label: `of ${fmtUsd(o.aiSpend.siteCapUsd, 2)} per site`, get: (r) => meter(r.costUsd, o.aiSpend.siteCapUsd) },
       ], o.aiSpend.bySite, 'No AI spend today.')),
+    ],
+  };
+}
+
+// ---- Crawl requests (from the extension) --------------------------------------
+
+async function crawlRequests(r) {
+  const site = r.params.get('site') ?? '';
+  const qs = new URLSearchParams();
+  if (site) qs.set('site', site);
+  if (r.params.get('cursor')) qs.set('cursor', r.params.get('cursor'));
+  const d = await api(`crawl-requests?${qs}`);
+  const active = d.requests.some((x) => ACTIVE.has(x.state));
+  const siteIn = h('input', { id: 'requests-site', type: 'search', placeholder: 'site', value: site });
+  const filter = h('form', {
+    onsubmit: (e) => {
+      e.preventDefault();
+      location.hash = `#/requests${siteIn.value.trim() ? `?site=${enc(siteIn.value.trim())}` : ''}`;
+    },
+  }, h('label', { class: 'field' }, 'Site', siteIn), h('button', { class: 'btn ghost', type: 'submit' }, 'Filter'));
+  return {
+    live: active,
+    nodes: [
+      h('div', { class: 'head' }, h('h1', {}, 'Crawl requests'), active ? h('span', { class: 'live' }, `refreshing every ${REFRESH_MS / 1000}s`) : null),
+      h('p', { class: 'meta small' },
+        `Asked for by the extension on sites the library hadn't crawled. At most ${d.capPerDay} may start a crawl per UTC day (CRAWL_REQUESTS_DAILY_MAX); 5 per install and 15 per IP.`),
+      card('Requests', filter, table([
+        { label: 'Request', get: (x) => h('span', { class: 'mono', title: x.id }, shortId(x.id)) },
+        { label: 'Site', get: (x) => siteLink(x.site) },
+        { label: 'Page', get: (x) => h('span', { class: 'mono small', title: x.url }, x.url.length > 60 ? `${x.url.slice(0, 59)}…` : x.url), cls: 'hide-sm' },
+        { label: 'Outcome', get: (x) => x.outcome },
+        { label: 'State', get: (x) => [pill(x.state), x.state === 'running' || x.state === 'indexing' ? h('span', { class: 'meta small' }, ` ${x.phase}`) : null] },
+        { label: 'Pages', get: (x) => `${fmtInt(x.pagesIndexed)}/${fmtInt(x.pagesFound)} indexed`, cls: 'nowrap' },
+        { label: 'Install', get: (x) => h('span', { class: 'mono', title: 'first 8 hex characters of the install ID HMAC' }, x.install) },
+        { label: 'Run', get: (x) => (x.runId ? runLink(x.runId) : '') },
+        { label: 'Cost', get: (x) => (x.costs ? costCell(x.costs) : ''), cls: 'num' },
+        { label: 'Asked', get: (x) => time(x.createdAt), cls: 'nowrap' },
+        { label: 'Reason', get: (x) => (x.reason ? h('span', { class: x.state === 'rejected' ? 'warn small' : 'err small' }, x.reason) : ''), cls: 'hide-sm' },
+      ], d.requests, 'No crawl requests yet.'), pager(d.next, r.params, '#/requests')),
     ],
   };
 }

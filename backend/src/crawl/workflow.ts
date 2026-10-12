@@ -68,7 +68,8 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
     let undecided = false;
     try {
       await step.do('start', DB, async () => {
-        await store().updateRun(p.runId, { status: 'running' });
+        // The phase is written at step boundaries for crawl requests (src/crawl/requests.ts).
+        await store().updateRun(p.runId, { status: 'running', phase: p.force ? 'discover' : 'gate' });
         await store().beginCrawl(p.site);
         // The last verdict no longer describes why this site is crawled.
         if (p.force) await store().forceGate(p.runId, p.site);
@@ -131,7 +132,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           last_run_id: p.runId,
           updated_at: now,
         });
-        await store().updateRun(p.runId, { path });
+        await store().updateRun(p.runId, { path, phase: 'fetch' });
         await store().addRunCounts(p.runId, { new: 0, changed: 0, unchanged: 0, failed: 0, skipped: d.skipped });
       });
 
@@ -163,9 +164,10 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         // The E2B daily cap: the sandbox's worst case is reserved first, and a
         // run that would go over it fails here, before any sandbox exists.
         const capUsd = e2bDailyCap(env);
-        const budget = await step.do('browser-budget', DB, () =>
-          store().reserveBrowser(p.runId, Number((Math.min(MAX_SANDBOX_SECONDS, Math.ceil(maxMinutes * 60) + 180) * E2B_USD_PER_SECOND).toFixed(6)), capUsd),
-        );
+        const budget = await step.do('browser-budget', DB, async () => {
+          await store().updateRun(p.runId, { phase: 'browser' });
+          return store().reserveBrowser(p.runId, Number((Math.min(MAX_SANDBOX_SECONDS, Math.ceil(maxMinutes * 60) + 180) * E2B_USD_PER_SECOND).toFixed(6)), capUsd);
+        });
         if (!budget.ok) throw new Error(`E2B daily cap reached: $${budget.spentUsd.toFixed(2)} of $${capUsd.toFixed(2)} spent today (E2B_DAILY_CAP_USD)`);
 
         // Kills any sandbox a failed earlier attempt of this step left behind,
@@ -237,7 +239,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       await step.do('cleanup', NET, () => cleanup(env, p.runId));
       await step.do('finish', DB, async () => {
         const now = new Date().toISOString();
-        await store().updateRun(p.runId, { status: 'complete', finished_at: now });
+        await store().updateRun(p.runId, { status: 'complete', finished_at: now, phase: 'done' });
         await store().finishCrawl(p.site, path === 'blocked' ? 'blocked' : path === 'none' ? 'empty' : 'ready');
       });
       return { runId: p.runId, path };
