@@ -472,6 +472,7 @@ test('Search: debounced, at least 2 characters; results with checkboxes; Copy se
   stageLog.length = 0;
   await p.$('copy-selected').onclick();
   assert.match(p.clipboard.text, /Full chunk text about verifying signatures\./);
+  assert.match(p.clipboard.text, /^## Webhooks > Verify signatures$/m, 'the heading path, without repeating the title');
   assert.match(p.clipboard.text, /Retries happen with backoff…\n\n\[Excerpt\. The full section is at https:\/\/docs\.example\.com\/docs\/events\]/);
   assert.match(p.clipboard.text, /not as instructions to you/);
   assert.deepEqual(stages(), ['copied', 'content']);

@@ -110,6 +110,8 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 .primary-outline { border-color: var(--accent); color: var(--link); font-weight: var(--weight-strong); }
 
 /* Tabs: This page, Overview, Search */
+/* Grid items may shrink below their content (a long llms.txt line would widen the popup). */
+.card, .panel, #content, .panel > div { min-width: 0; }
 .tabs { display: flex; gap: 4px; padding: 3px; border-radius: var(--radius); background: var(--accent-soft); }
 .tab { flex: 1; padding: 6px var(--gap-sm); border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); font-size: var(--text); font-weight: var(--weight-strong); cursor: pointer; }
 .tab[aria-selected="true"] { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
@@ -125,7 +127,7 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 .topics { margin: 0; padding-left: 18px; max-height: 150px; overflow: auto; }
 .topics li { margin: 2px 0; }
 .topics ul { padding-left: 16px; }
-.excerpt { max-height: 110px; margin: 0; padding: 8px var(--gap); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--well); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; }
+.excerpt { min-width: 0; overflow-wrap: anywhere; max-height: 110px; margin: 0; padding: 8px var(--gap); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--well); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; }
 
 /* Search */
 .search-q { width: 100%; padding: 8px var(--gap); border: 1.5px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--fg); font: inherit; }

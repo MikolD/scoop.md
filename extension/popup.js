@@ -624,7 +624,8 @@ $('copy-selected').onclick = async () => {
   if (!site || !chosen.length) return;
   const sections = chosen.map((h) => ({
     kind: 'index',
-    label: [h.title, h.heading_path].filter(Boolean).join(' › ').slice(0, 200) || h.url,
+    // The heading path usually starts with the page title already.
+    label: (h.heading_path?.startsWith(h.title ?? '\u0000') ? h.heading_path : [h.title, h.heading_path].filter(Boolean).join(' › ')).slice(0, 200) || h.url,
     url: h.url,
     content: h.text?.trim() || `${h.snippet ?? ''}\n\n[Excerpt. The full section is at ${h.url}]`,
   }));
