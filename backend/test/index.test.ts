@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chunkMarkdown, estimateTokens, pageTitle } from '../src/index/chunk.ts';
+import { chunkMarkdown, estimateTokens, headingText, pageTitle, stripPermalinks } from '../src/index/chunk.ts';
 import { CLASSIFY_BUDGET_MS, ClassifyUnavailable, classifyPage, estimateCost, MAX_INPUT, parseClassification, stripFences, userMessage } from '../src/index/classify.ts';
 import type { Classified, PageInput } from '../src/index/classify.ts';
 import { backoffSeconds, handleIndexBatch, parseMessage } from '../src/index/consumer.ts';
@@ -879,4 +879,43 @@ test('llms-full.txt chunks are down-weighted below the pages they copy', async (
   assert.equal(hits.length, 2);
   assert.equal(hits[0].url, 'https://developers.cloudflare.com/d1/limits/index.md');
   assert.ok(hits[1].url.endsWith('llms-full.txt'), 'still searchable');
+});
+
+test('permalink markers are stripped from titles and heading paths (Sphinx ¶, §, 🔗, a lone #), never a real #', () => {
+  // Read the Docs serves Sphinx pages as Markdown with the ¶ links kept.
+  const md = [
+    '# Uploading Files [¶](#uploading-files "Link to this heading")',
+    '',
+    'Words here. '.repeat(400),
+    '',
+    '## A Gentle Introduction ¶',
+    '',
+    'More words here. '.repeat(400),
+    '',
+    '### Using C# §',
+    '',
+    'Even more words. '.repeat(400),
+  ].join('\n');
+  assert.equal(pageTitle(md), 'Uploading Files');
+  const trails = chunkMarkdown(md).map((c) => c.headingPath.join(' > '));
+  assert.ok(trails.includes('Uploading Files > A Gentle Introduction > Using C#'), trails.join(' | '));
+  assert.ok(trails.every((t) => !/[¶§]/.test(t)), trails.join(' | '));
+
+  for (const [given, want] of [
+    ['Title ¶', 'Title'],
+    ['Title¶', 'Title'],
+    ['Title §', 'Title'],
+    ['Title 🔗', 'Title'],
+    ['Title 🔗\uFE0F', 'Title'],
+    ['Title #', 'Title'],
+    ['Title ¶ #', 'Title'],
+    ['# Title', 'Title'], // VuePress puts the anchor first
+    ['¶ Title', 'Title'],
+    ['C#', 'C#'],
+    ['F# and C#', 'F# and C#'],
+    ['Section 5 § 2', 'Section 5 § 2'],
+    ['¶', ''],
+    ['#', ''],
+  ]) assert.equal(stripPermalinks(given), want, given);
+  assert.equal(headingText('**Bold** title [¶](#x)'), 'Bold title');
 });

@@ -96,6 +96,8 @@ per-IP share limit (429). Reset with:
 
 ```sh
 npx wrangler d1 execute DB --local --command "DELETE FROM rate_counters"
+# crawl requests have daily limits (15 starts per IP per UTC day):
+npx wrangler d1 execute DB --local --command "DELETE FROM daily_counters"
 ```
 
 ## Crawling sites

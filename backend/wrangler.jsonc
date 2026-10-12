@@ -32,7 +32,10 @@
     "TELEMETRY_DAILY_MAX": "2000000",
     "TELEMETRY_API_DAILY_MAX": "200000",
     // Crawl requests from the extension that may start a crawl, per UTC day, for everyone.
-    "CRAWL_REQUESTS_DAILY_MAX": "300"
+    "CRAWL_REQUESTS_DAILY_MAX": "300",
+    // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
+    "ONDEMAND_E2B_SHARE": "0.5",
+    "ONDEMAND_INDEX_SHARE": "0.5"
     // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
@@ -114,7 +117,10 @@
         "TELEMETRY_DAILY_MAX": "2000000",
         "TELEMETRY_API_DAILY_MAX": "200000",
         // Crawl requests from the extension that may start a crawl, per UTC day, for everyone.
-        "CRAWL_REQUESTS_DAILY_MAX": "300"
+        "CRAWL_REQUESTS_DAILY_MAX": "300",
+        // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
+        "ONDEMAND_E2B_SHARE": "0.5",
+        "ONDEMAND_INDEX_SHARE": "0.5"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -177,7 +183,10 @@
         "TELEMETRY_DAILY_MAX": "2000000",
         "TELEMETRY_API_DAILY_MAX": "200000",
         // Crawl requests from the extension that may start a crawl, per UTC day, for everyone.
-        "CRAWL_REQUESTS_DAILY_MAX": "300"
+        "CRAWL_REQUESTS_DAILY_MAX": "300",
+        // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
+        "ONDEMAND_E2B_SHARE": "0.5",
+        "ONDEMAND_INDEX_SHARE": "0.5"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [

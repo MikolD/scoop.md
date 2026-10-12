@@ -102,6 +102,8 @@ All responses are JSON (`content-type: application/json; charset=utf-8`) unless 
 |---|---|---|
 | 400 | `invalid_request` | Malformed JSON, missing or invalid fields, bad install ID |
 | 404 | `not_found` | Unknown skill or site |
+| 404 | `not_indexed` | `GET /v1/packages?url=`: the site has no index yet |
+| 409 | `conflict` | Admin crawl of a site that already has one queued or running |
 | 410 | `removed` | Skill removed by takedown |
 | 413 | `too_large` | Body over 6 MB, or any section over its limit |
 | 422 | `source_unreachable` | A source URL can't be fetched publicly (non-2xx, timeout, HTML shell where text was expected) |
@@ -172,6 +174,54 @@ Request: `{ "skillId": "sk_…", "reason": "malicious" | "wrong" | "copyright" |
 
 #### `POST /v1/events`
 Usage telemetry from the extension and scoop.md: up to 100 events, 64 KB. Answers `202 {accepted, dropped}`. Catalog, limits and storage: docs/TELEMETRY.md.
+
+### Crawl requests (on-demand crawls)
+
+When a user opens the popup on a docs site the library hasn't crawled, the extension asks the backend to crawl it and shows progress while it waits. Implementation: `backend/src/crawl/requests.ts`; table `crawl_requests` (migration 0008).
+
+#### `GET /v1/sites/:site/status`
+Public, `cache-control: public, max-age=15, s-maxage=15`. Never 404: an unknown site answers 200 with `indexed: false, status: "new"`. Private hosts (IP literals, `localhost`, `.local`, `.internal`, …) → 400 `invalid_request`.
+
+```json
+{ "site": "docs.example.dev", "indexed": true, "status": "ready", "crawling": false, "pages": 87,
+  "lastCrawledAt": "2026-10-12T07:16:18.000Z",
+  "request": { "id": "rq_…", "state": "complete", "phase": "done", "pagesFound": 55, "pagesIndexed": 55 } }
+```
+- `status`: `new | ready | not_devtool | blocked | failed | empty` (the last finished crawl's outcome). A site whose first crawl finished but has no page indexed yet is still `new`.
+- `indexed`: `status` is `ready` and `pages` (indexed pages) > 0.
+- `crawling`: true while a crawl runs **and** until the latest request is complete (its pages still in the index queue count as crawling). A re-crawl keeps the previous final `status`, with `crawling: true`.
+- `request`: the site's most recent crawl request in the last 7 days, or null.
+
+#### `POST /v1/crawl-requests`
+Request: `{ "url": "<the page the user is on>" }` (≤ 1024 chars). Requires `X-Scoop-Install`; same CORS as other writes; the URL passes the same SSRF and site normalisation as any fetch (private host → 400). The site is the URL's host.
+- The crawl's **scope** is its start URL: the URL's first path segment when the URL has a deeper path (e.g. `/d1/`), else the site root. Joins and the cooldown are per scope.
+- **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started, at most 100 pages and 10 minutes. The requested page itself is always crawled, first (its `.md` twin if it has one, else its HTML; on a client-rendered site the browser crawl starts there). When another scope of the same site is crawling, the request waits instead (still 202, `queued`) and its crawl starts after that one, when the request is next polled.
+- **200** with the full request view (below), without starting anything, when:
+  - the site is on the gate's denylist, or `not_devtool`: `state: "rejected"` with `reason` (nothing is counted);
+  - a crawl of the same scope is queued or running, or another request already waits for it: the request joins it;
+  - the scope was crawled completely in the last 7 days: answered from that crawl (`complete`, or `indexing` while its pages are still being indexed).
+- **429** `rate_limited` with `Retry-After` (until 00:00 UTC):
+  - past the daily limits on requests that start or queue a crawl: 5 per install ID and 15 per IP subject (IPv4, or IPv6 /48), checked first; then `CRAWL_REQUESTS_DAILY_MAX` (default 300) overall, counted only when a crawl really starts (or queues) and given back with the others when none does;
+  - message `"busy, try again later"` when requested crawls have used their share of today's caps (`ONDEMAND_E2B_SHARE` of `E2B_DAILY_CAP_USD`, `ONDEMAND_INDEX_SHARE` of `INDEX_DAILY_TOTAL_CAP_USD`, default 0.5 each), or past the overall limit;
+  - every request, whatever it does, is also limited to 60 per hour per install and 300 per hour per IP (each one writes a row).
+- **Requested sites need approval for cross-site search.** A requested crawl of a site off the gate's allowlist must pass the gate's AI check (signals alone can reject but not admit). A site first crawled this way is `source: requested`, `approved: false`: its own endpoints (status, profile, topics, packages by `url`, `q` or `topic`, site-scoped search) work, but `GET /v1/search` without `site` leaves it out until an admin approves it. An admin can also reject it (`not_devtool`, its index deleted).
+- A requested crawl of a host whose robots.txt can't be fetched (5xx, unreachable) fails without making a profile public.
+- Every answered request is recorded (install ID only as an HMAC) and kept 90 days.
+
+#### `GET /v1/crawl-requests/:id`
+Public; the ID (`rq_` + ULID, 80 random bits) is the capability. 404 if unknown.
+
+```json
+{ "id": "rq_…", "site": "developers.cloudflare.com", "state": "indexing", "phase": "index",
+  "pagesFound": 55, "pagesIndexed": 39, "path": "markdown", "reason": null, "etaSeconds": 128 }
+```
+- `state`: `queued | running | indexing | complete | rejected | failed`. `reason` for `failed` is one of `crawl failed`, `this site needs a browser and that's unavailable right now`, `busy, try again later`; for `rejected` it is the gate's reason. `indexing`: the crawl finished but some of its new or changed pages are still in the index queue (the run's `pages_indexed` < pages stored); `complete` once they are all indexed (or 30 minutes after the crawl finished, so a page lost to the dead-letter queue can't hold it forever).
+- `phase`: `gate | discover | fetch | browser | index | done`, written by the Workflow at step boundaries (`crawl_runs.phase`); `index` is derived.
+- `pagesFound`: pages stored or confirmed unchanged so far; `pagesIndexed` counts unchanged pages (indexed by an earlier crawl).
+- `etaSeconds`: a rough guide for a progress message (0 when final).
+
+#### `GET /v1/packages?site=<site>&url=<page url>`
+A package anchored on the page the user is on: that page's indexed chunks first (matched by normalised URL, without a trailing slash, or as its `.md` / `/index.md` twin, or the HTML page of a `.md` URL), then the most related chunks from the same site by hybrid search on the page's title and headings; within `budget` (default 60,000 characters), same Markdown format and fencing as the `q`/`topic` packages. A page that isn't indexed gets related chunks from its URL's path words. 404 `not_indexed` when the site has no index; 400 `site_mismatch` when `url` isn't on `site`; `url`, `q` and `topic` are exclusive.
 
 #### `DELETE /v1/admin/skills/:id`
 Takedown. Requires `Authorization: Bearer <ADMIN_TOKEN>` (Workers secret; compare in constant time). Marks the skill removed (keep the row for audit, delete the R2 object). `200 { "ok": true }`. Wrong or missing token → `404` (don't reveal the endpoint).
@@ -248,6 +298,8 @@ Ties break by `createdAt` descending. If none qualify, return `null`; the extens
 | `POST /v1/skills` | 20 per hour per install ID, and 60 per hour per IP | 429 |
 | Feedback and reports | 120 per hour per install ID | 429 |
 | Reads | 600 per minute per IP | 429 |
+| `POST /v1/crawl-requests` that would start a crawl | 5 per install ID, 15 per IP subject, `CRAWL_REQUESTS_DAILY_MAX` (300) overall, per UTC day | 429 |
+| `POST /v1/crawl-requests`, any outcome | 60 per hour per install ID, 300 per hour per IP | 429 |
 
 Use Cloudflare's rate limiting binding or a D1/Durable Object counter. Rate limit by install ID **and** IP, so rotating install IDs doesn't bypass the limit.
 

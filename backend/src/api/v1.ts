@@ -14,7 +14,8 @@ import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { startCrawl } from '../crawl/start.ts';
-import { DEFAULT_REQUESTS_DAILY_MAX, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
+import { DEFAULT_REQUESTS_DAILY_MAX, ondemandShare, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
+import { e2bDailyCap } from '../crawl/e2b.ts';
 import { anchoredChunks } from '../search/anchor.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
@@ -430,7 +431,11 @@ const routes: Route[] = [
           { bucket: 'crawlreq-any:ip', subject: ipSubject(ip), limit: LIMITS.crawlRequestIp },
         ]);
         const r = await requestCrawl(
-          { db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE, rateKey: env.RATE_KEY, dailyMax: requestsDailyMax(env) },
+          {
+            db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE, rateKey: env.RATE_KEY, dailyMax: requestsDailyMax(env),
+            e2bCapUsd: e2bDailyCap(env), indexTotalCapUsd: indexDeps(env).totalCapUsd,
+            e2bShare: ondemandShare(env.ONDEMAND_E2B_SHARE), indexShare: ondemandShare(env.ONDEMAND_INDEX_SHARE),
+          },
           { pageUrl, site, install, ip },
         );
         usage.state = r.body.state;
@@ -448,7 +453,8 @@ const routes: Route[] = [
     name: '/v1/crawl-requests/:id',
     // Public: the ID is unguessable (80 random bits).
     handler: async ({ params, env }) => {
-      const view = await requestView(env.DB, params[0]);
+      // A request waiting for another scope of its site starts its crawl here once the site is free.
+      const view = await requestView(env.DB, params[0], new Date(), { db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE });
       if (!view) throw notFound('No such crawl request');
       return json(200, view);
     },

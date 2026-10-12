@@ -16,7 +16,7 @@ export interface StartDeps {
 // The new run's ID, or null when the site already has a queued or running crawl.
 export async function startCrawl(deps: StartDeps, crawl: NewCrawl, runId = newId('cr')): Promise<string | null> {
   const crawls = new CrawlStore(deps.db, deps.bucket);
-  if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl, new Date(), crawl.force))) return null;
+  if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl, new Date(), crawl.force, crawl.requested))) return null;
   try {
     await deps.workflow.create({ id: runId, params: { runId, ...crawl } });
   } catch (e) {

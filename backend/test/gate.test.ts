@@ -337,3 +337,30 @@ test('POST /v1/admin/crawl: force skips the gate and is recorded on the run', as
   assert.equal(((await plain.json()) as { forced: boolean }).forced, false);
   assert.equal(created[1].params.force, false);
 });
+
+test('requested crawls (requireAi): signals alone never admit a site off the allowlist; they can still reject; the allowlist admits', async () => {
+  const docs = () => fakeFetch({
+    'https://acme.dev/docs/getting-started': html(fixture('docs.html')),
+    'https://acme.dev/llms.txt': () => new Response('# Acme\n\n- [Quickstart](https://acme.dev/docs/quickstart.md): first steps\n', { headers: { 'content-type': 'text/plain' } }),
+  });
+  // Signals say crawl; with no model a requested crawl can't go ahead.
+  await assert.rejects(
+    gateSite('https://acme.dev/docs/getting-started', NO_ROBOTS, { fetchImpl: docs().impl, limiter: fast(), ai: null, requireAi: true }),
+    (e: Error) => e instanceof GateUndecided && /requested crawl needs the AI check/.test(e.message),
+  );
+  // With a model, the model decides (and is asked even though the signals were clear).
+  const or = openRouter([JSON.stringify({ isDevtool: true, category: 'devtool-docs', confidence: 0.9, reason: 'API documentation.' })]);
+  const v = await gateSite('https://acme.dev/docs/getting-started', NO_ROBOTS, { fetchImpl: docs().impl, limiter: fast(), ai: ai(or.impl), requireAi: true });
+  assert.deepEqual([v.decision, v.method], ['crawl', 'ai']);
+  assert.equal(or.calls.length, 1);
+  // Signals can still reject on their own, at no AI cost.
+  const shop = fakeFetch({ 'https://sheepish.example/': html(fixture('shopify-product.html')) });
+  const r = await gateSite('https://sheepish.example/', NO_ROBOTS, { fetchImpl: shop.impl, limiter: fast(), ai: null, requireAi: true });
+  assert.deepEqual([r.decision, r.method], ['reject', 'signals']);
+  // An unreadable start page with llms.txt: no longer enough for a requested crawl.
+  const llmsOnly = fakeFetch({ 'https://acme.dev/llms.txt': () => new Response('# Acme\n\n- [A](https://acme.dev/a.md)\n'.repeat(3), { headers: { 'content-type': 'text/plain' } }) });
+  await assert.rejects(gateSite('https://acme.dev/', NO_ROBOTS, { fetchImpl: llmsOnly.impl, limiter: fast(), ai: null, requireAi: true }), GateUndecided);
+  // The allowlist still admits without any check.
+  const listed = await gateSite('https://developers.cloudflare.com/d1/', NO_ROBOTS, { fetchImpl: fakeFetch({}).impl, limiter: fast(), ai: null, requireAi: true });
+  assert.deepEqual([listed.decision, listed.method], ['crawl', 'allowlist']);
+});

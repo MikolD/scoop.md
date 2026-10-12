@@ -382,3 +382,60 @@ test('events: envelope errors and caps', async () => {
   expectError(await call('POST', '/v1/events', { install: null, body: telemetry([tev('error', { message: 'x'.repeat(70_000) })]) }), 413, 'too_large');
   expectError(await call('POST', '/v1/events', { install: null, body: '{nope' }), 400, 'invalid_request');
 });
+
+// On-demand crawl requests (docs/BACKEND.md §5, "Crawl requests"). Against
+// wrangler dev the fixture site (localhost) may already have been crawled by an
+// earlier run, so the first request may be answered (200) instead of started (202).
+const VIEW_KEYS = ['etaSeconds', 'id', 'pagesFound', 'pagesIndexed', 'path', 'phase', 'reason', 'site', 'state'];
+const STATES = new Set(['queued', 'running', 'indexing', 'complete', 'rejected', 'failed']);
+const PHASES = new Set(['gate', 'discover', 'fetch', 'browser', 'index', 'done']);
+
+test('site status: unknown sites are new (never 404); private hosts are refused', async () => {
+  const r = await call('GET', '/v1/sites/never-crawled.example/status', { install: null });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(r.json, { site: 'never-crawled.example', indexed: false, status: 'new', crawling: false, pages: 0, lastCrawledAt: null, request: null });
+  assert.match(r.headers.get('cache-control') ?? '', /max-age=15/);
+  for (const host of ['10.0.0.1', 'printer.local']) expectError(await call('GET', `/v1/sites/${host}/status`, { install: null }), 400, 'invalid_request');
+});
+
+test('crawl requests: install ID and a public URL required; the first request queues a crawl, the next joins it; GET by id', async () => {
+  expectError(await call('POST', '/v1/crawl-requests', { install: null, body: { url: `${DOCS}/docs/guide` } }), 400, 'invalid_request');
+  for (const url of ['https://10.0.0.1/docs', 'https://printer.local/docs', 'ftp://docs.example.dev/', 'not a url']) {
+    expectError(await call('POST', '/v1/crawl-requests', { body: { url } }), 400, 'invalid_request');
+  }
+  const first = await call('POST', '/v1/crawl-requests', { body: { url: `${DOCS}/docs/guide` } });
+  assert.ok(first.status === 202 || first.status === 200, JSON.stringify(first.json));
+  if (first.status === 202) {
+    assert.deepEqual(Object.keys(first.json).sort(), ['etaSeconds', 'id', 'site', 'state']);
+    assert.equal(first.json.state, 'queued');
+  } else {
+    assert.deepEqual(Object.keys(first.json).sort(), VIEW_KEYS);
+  }
+  assert.match(first.json.id, /^rq_[0-9A-Z]{26}$/);
+  assert.equal(first.json.site, 'localhost');
+
+  if (first.status === 202) {
+    // Straight after: the crawl is still queued or running, so this joins it.
+    const second = await call('POST', '/v1/crawl-requests', { install: INSTALL_B, body: { url: `${DOCS}/docs/auth` } });
+    assert.equal(second.status, 200, JSON.stringify(second.json));
+    assert.deepEqual(Object.keys(second.json).sort(), VIEW_KEYS);
+    assert.ok(['queued', 'running'].includes(second.json.state), second.json.state);
+  }
+
+  const got = await call('GET', `/v1/crawl-requests/${first.json.id}`, { install: null });
+  assert.equal(got.status, 200);
+  assert.deepEqual(Object.keys(got.json).sort(), VIEW_KEYS);
+  assert.ok(STATES.has(got.json.state), got.json.state);
+  assert.ok(PHASES.has(got.json.phase), got.json.phase);
+  assert.ok(Number.isInteger(got.json.etaSeconds) && got.json.etaSeconds >= 0);
+  expectError(await call('GET', '/v1/crawl-requests/rq_00000000000000000000000000', { install: null }), 404, 'not_found');
+
+  const status = await call('GET', '/v1/sites/localhost/status', { install: null });
+  assert.equal(status.status, 200);
+  assert.ok(status.json.request, JSON.stringify(status.json));
+});
+
+test('page-anchored packages: a site with no index is not_indexed', async () => {
+  const r = await call('GET', `/v1/packages?site=never-indexed.example&url=${encodeURIComponent('https://never-indexed.example/docs/x')}`, { install: null });
+  expectError(r, 404, 'not_indexed');
+});

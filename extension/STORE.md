@@ -79,6 +79,8 @@ Certifications to tick:
 - I do not use or transfer user data for purposes that are unrelated to my item's single purpose.
 - I do not use or transfer user data to determine creditworthiness or for lending purposes.
 
+Crawl requests: when the user asks for an unknown docs site to be crawled, the extension sends the page URL (with its path) and the install ID to `POST /v1/crawl-requests`. This reveals which documentation page the user was reading; the library stores the URL with an HMAC of the install ID (not the ID) for 90 days. Disclose under "Web history" / "Website content" as appropriate.
+
 Note for the privacy policy: shared packages are public (anyone can fetch them from the library and the scoop.md website), and the library itself only keeps content it could fetch anonymously from the cited URL (see docs/BACKEND.md §6).
 
 ## Store artwork

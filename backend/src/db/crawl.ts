@@ -16,6 +16,8 @@ export interface SiteProfileRow {
   // (migrations/0004_crawl_state.sql, 0005_devtool_gate.sql).
   status: string;
   crawl_state: string; // idle | crawling
+  source: string; // admin | requested (migrations/0009_requested_sites.sql)
+  approved: number; // 0: requested, not yet approved: left out of cross-site search
   docs_root: string;
   has_llms: number;
   has_llms_full: number;
@@ -66,6 +68,7 @@ export interface CrawlRunRow {
   embed_cost_usd: number;
   pages_indexed: number;
   costs_tracked: number; // 0: from before migration 0007, indexing costs unknown
+  requested: number; // 1: started by a crawl request (migrations/0009_requested_sites.sql)
   // Where the Workflow is (migrations/0008_crawl_requests.sql): gate | discover | fetch | browser | done.
   phase: string | null;
 }
@@ -121,7 +124,7 @@ export class CrawlStore {
   // never ran its fail step) are marked failed in the same batch, so they stop
   // showing as active.
   // `forced`: an admin skipped the devtool gate.
-  async createRun(id: string, site: string, startUrl: string, now = new Date(), forced = false): Promise<boolean> {
+  async createRun(id: string, site: string, startUrl: string, now = new Date(), forced = false, requested = false): Promise<boolean> {
     const since = new Date(now.getTime() - STALE_RUN_HOURS * 3_600_000).toISOString();
     const [, inserted] = await this.db.batch([
       this.db
@@ -132,12 +135,12 @@ export class CrawlStore {
         .bind(site, since, now.toISOString()),
       this.db
         .prepare(
-          `INSERT INTO crawl_runs (id, site, start_url, started_at, status, forced)
-           SELECT ?1, ?2, ?3, ?4, 'queued', ?5
+          `INSERT INTO crawl_runs (id, site, start_url, started_at, status, forced, requested)
+           SELECT ?1, ?2, ?3, ?4, 'queued', ?5, ?6
            WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE site = ?2 AND status IN ('queued', 'running'))
            RETURNING id`,
         )
-        .bind(id, site, startUrl, now.toISOString(), forced ? 1 : 0),
+        .bind(id, site, startUrl, now.toISOString(), forced ? 1 : 0, requested ? 1 : 0),
     ]);
     return (inserted.results as unknown[]).length === 1;
   }
@@ -147,15 +150,18 @@ export class CrawlStore {
   // spend (runs started this UTC day, reservations included) stays within
   // `capUsd`. One statement, so two runs can't both squeeze under the cap.
   // The real cost replaces the reservation when the sandbox stops.
-  async reserveBrowser(id: string, usd: number, capUsd: number, now = new Date()): Promise<{ ok: boolean; spentUsd: number }> {
+  // `requestedCapUsd`: for a requested run, the on-demand share of the cap,
+  // checked against today's requested runs only (both limits must hold).
+  async reserveBrowser(id: string, usd: number, capUsd: number, now = new Date(), requestedCapUsd?: number): Promise<{ ok: boolean; spentUsd: number }> {
     const day = now.toISOString().slice(0, 10);
     const reserved = await this.db
       .prepare(
         `UPDATE crawl_runs SET cost_usd = ?2
          WHERE id = ?1 AND (SELECT COALESCE(SUM(cost_usd), 0) FROM crawl_runs WHERE started_at >= ?3 AND id != ?1) + ?2 <= ?4
+           AND (?5 IS NULL OR (SELECT COALESCE(SUM(cost_usd), 0) FROM crawl_runs WHERE started_at >= ?3 AND requested = 1 AND id != ?1) + ?2 <= ?5)
          RETURNING id`,
       )
-      .bind(id, usd, day, capUsd)
+      .bind(id, usd, day, capUsd, requestedCapUsd ?? null)
       .first<{ id: string }>();
     const spent = await this.db.prepare('SELECT COALESCE(SUM(cost_usd), 0) AS s FROM crawl_runs WHERE started_at >= ?').bind(day).first<{ s: number }>();
     return { ok: reserved !== null, spentUsd: spent?.s ?? 0 };
@@ -191,20 +197,44 @@ export class CrawlStore {
 
   // A crawl of `site` started: the public status (the last finished crawl's
   // outcome) stays as it is. A site seen for the first time is 'new'.
-  async beginCrawl(site: string, now = new Date()): Promise<void> {
+  // `requested`: the crawl was asked for by a user (crawl requests). A site
+  // seen for the first time then gets source 'requested' and is approved only
+  // when `approved` (on the gate's allowlist); an existing profile keeps its
+  // source and approval.
+  async beginCrawl(site: string, now = new Date(), requested?: { approved: boolean }): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO site_profiles (site, status, crawl_state, updated_at) VALUES (?1, 'new', 'crawling', ?2)
+        `INSERT INTO site_profiles (site, status, crawl_state, updated_at, source, approved) VALUES (?1, 'new', 'crawling', ?2, ?3, ?4)
          ON CONFLICT (site) DO UPDATE SET crawl_state = 'crawling', updated_at = excluded.updated_at`,
       )
-      .bind(site, now.toISOString())
+      .bind(site, now.toISOString(), requested ? 'requested' : 'admin', requested && !requested.approved ? 0 : 1)
       .run();
+  }
+
+  // Admin decision on a requested site: approve (include it in cross-site
+  // search) or reject (not_devtool, and its index purged by the caller).
+  async approveSite(site: string, now = new Date()): Promise<boolean> {
+    const r = await this.db.prepare(`UPDATE site_profiles SET approved = 1, updated_at = ?2 WHERE site = ?1`).bind(site, now.toISOString()).run();
+    return r.meta.changes === 1;
+  }
+
+  async rejectSite(site: string, now = new Date()): Promise<boolean> {
+    const at = now.toISOString();
+    const r = await this.db
+      .prepare(
+        `UPDATE site_profiles SET status = 'not_devtool', approved = 0, crawl_state = 'idle', updated_at = ?2,
+           gate_method = 'admin', gate_category = 'other', gate_reason = 'rejected by an admin', gate_confidence = 1, gate_checked_at = ?2
+         WHERE site = ?1`,
+      )
+      .bind(site, at)
+      .run();
+    return r.meta.changes === 1;
   }
 
   // Discovery facts. Never touches status, crawl_state or last_crawled_at,
   // which describe the last finished crawl.
   async putProfile(
-    p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at' | `gate_${string}`>,
+    p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at' | `gate_${string}` | 'source' | 'approved'>,
   ): Promise<void> {
     const cols = Object.keys(p) as (keyof typeof p)[];
     await this.db

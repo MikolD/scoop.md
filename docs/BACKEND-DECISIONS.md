@@ -969,3 +969,155 @@ What a crawl costs, so the average per crawl and per page is known over time.
   path (markdown, html, browser, or rejected for runs the gate turned away).
   A message dropped as permanent (missing R2 object) keeps its run at "still
   indexing"; it shows up as indexed n/m.
+
+## Crawl requests (on-demand crawls from the extension)
+
+`src/crawl/requests.ts`, migration `0008_crawl_requests.sql`, spec in
+BACKEND.md §5 "Crawl requests".
+
+- **Two-phase counting, starts only** (review H1, L5). Rejections (denylist,
+  `not_devtool`), joins and recent answers count nothing. Otherwise the
+  per-install and per-IP daily counters are bumped and checked first; only
+  when both pass is the global counter bumped, and if that goes over
+  `CRAWL_REQUESTS_DAILY_MAX`, or the crawl then doesn't start (a lost race),
+  all three are given back. So a flood from one IP can't eat the global
+  budget: 400 requests from one IP leave it at 15 (tested). A request that
+  waits for another scope counts as a start, since its crawl will run.
+  Because every POST still writes a `crawl_requests` row, all of them are also
+  limited hourly (60 per install, 300 per IP). Limited requests (429) are not
+  recorded. IPv6 counts by /48 for these limits (a site's usual allocation).
+- **Daily windows get their own table** (`daily_counters`, keyed like
+  `rate_counters` with an HMAC of `bucket:day:subject`): `rate_counters`
+  prunes every past hour on each check, which would delete a day's counts.
+  The global limit is one counter with an empty subject. `Retry-After` runs to
+  00:00 UTC.
+- **Install IDs are stored as HMACs** (`RATE_KEY`, `crawl-request:` prefix),
+  so the admin view can group requests by install (first 8 hex characters
+  shown) without the ID itself being kept.
+- **Where a requested crawl starts.** The page's first path segment when the
+  page is deeper than one segment (`developers.cloudflare.com/d1/get-started`
+  → `/d1/`, `docs.python.org/3/library/os.html` → `/3/`), so a 100-page crawl
+  covers the product the user is reading rather than the whole host; else the
+  site root. The profile is still per host.
+- **Scopes** (review L1). A request's scope is its start URL; scopes compare
+  by site and path (`www.` and a trailing slash ignored). A request joins a
+  queued/running crawl of its own scope, and is answered from a complete
+  crawl of its own scope in the last 7 days. While another scope of the site
+  crawls (one crawl per site at a time), it is recorded as `waiting` (no run)
+  and reported `queued`; the first poll of any waiting request after the
+  site is free starts the oldest waiting scope's crawl and points every
+  request waiting for that scope at it. A waiting request older than 6 hours
+  is `failed` ("busy, try again later"). A lost start race with nothing
+  running falls back to the scope's (or site's) last complete crawl (L3).
+- **Checks run cheapest first**: the gate's lists (a denylisted site is
+  rejected before anything is counted), then `not_devtool`, scope join and
+  cooldown, then the spend share, then the counters (review M3).
+- **Spend share** (M3). Requested runs are marked (`crawl_runs.requested`).
+  At request time, today's requested sandbox spend (reservations included)
+  must be under `ONDEMAND_E2B_SHARE` × `E2B_DAILY_CAP_USD`, and requested
+  runs' AI spend (their pages' classification and their gate checks) under
+  `ONDEMAND_INDEX_SHARE` × `INDEX_DAILY_TOTAL_CAP_USD`; both default to 0.5,
+  leaving half of each cap to admin crawls. Past either, 429 "busy". In the
+  Workflow, a requested run's sandbox reservation must also fit the share
+  (as well as the full cap), so runs already admitted can't overshoot it.
+- **Approval for requested sites** (M2, the owner's default). A requested
+  crawl passes the gate with `requireAi`: allowlisted sites are admitted;
+  otherwise the signals can reject but only the AI check admits (no key, or
+  its cap reached, fails the run as busy). A site first seen through a
+  request gets `source = 'requested'` and `approved = 0` (`1` when
+  allowlisted); an existing profile keeps its source and approval. Unapproved
+  sites serve their own endpoints but are filtered out of `/v1/search`
+  without `site` (a post-filter on the fused hits). Admin: Approve (sets
+  `approved`) and Reject (status `not_devtool`, gate method `admin`, and the
+  site's chunks, vectors, entities, topics, page_index rows and page rows
+  deleted; refused with 409 while a crawl of it runs; R2 Markdown, which is
+  content-addressed and may be shared, stays). The Overview shows the
+  pending count; Sites has a "pending" filter.
+- **Public reasons** (M1). A failed request's `reason` is one of three fixed
+  strings (`crawl failed`, `this site needs a browser and that's unavailable
+  right now`, `busy, try again later`), chosen from the run's error; the
+  error itself is shown only in the admin console. Gate rejection reasons are
+  passed through as they are.
+- **Unreachable hosts** (L4). A requested crawl whose robots.txt is
+  unreachable (5xx, network) stops right after the robots step: the run fails
+  and the profile's status stays as it was (`new` for a first crawl, so not
+  public) instead of becoming `blocked`.
+- **Retention** (L2). Crawl requests are deleted after 90 days by the hourly
+  cron: a page address is browsing interest even with the install ID
+  hashed. The privacy page says so.
+- **`not_devtool` is final for requests**: an admin can still force a crawl.
+- **State comes from the run, not the request row.** `crawl_requests.state`
+  records what the request did (`started`, `joined`, `recent`, `rejected`);
+  the live state is computed on every read: run `queued` → `queued`
+  (phase `gate`); `running` → `running` with the stored phase; `rejected` →
+  `rejected` with the gate's reason; `failed` → `failed` with the error;
+  `complete` → `indexing` (phase `index`) while the run's `pages_indexed` is
+  below the pages it stored, else `complete`. Two escape hatches: a run still
+  queued/running after 6 hours is `failed` ("crawl abandoned"), and a crawl
+  finished more than 30 minutes ago is `complete` even if a page never got
+  indexed (a dead-lettered message). A run from before cost tracking
+  (migration 0007) can't count indexed pages and is `complete`.
+- **Phase** is written by the Workflow at step boundaries (`start`: `gate`, or
+  `discover` when forced; the gate's verdict: `discover`, or `done` when
+  rejected; `profile`: `fetch`; `browser-budget`: `browser`; `finish`:
+  `done`). A failed run keeps the phase it failed in. `index` is never stored.
+- **`pagesIndexed` includes unchanged pages**, which an earlier crawl
+  indexed, so a re-crawl's progress reads naturally; it equals `pagesFound`
+  once complete.
+- **`etaSeconds` is a rough guide**: about 1.2 s a page to fetch and 8 s a page
+  to index (classification dominates; 10–12 s measured locally with one
+  consumer), assuming 60 pages until the count is known. The D1 docs (55
+  pages) took about 1 minute to fetch and about 10 minutes to index locally.
+- **Anchored packages** match the page by its normalised URL, without a
+  trailing slash, as its `.md` or `/index.md` twin, or the HTML page of a `.md`
+  URL (crawled pages are stored under whichever URL the crawl planned). The
+  related search uses the page title plus its section headings (≤ 200
+  characters) and leaves out the anchor's own chunks. A page that isn't indexed
+  gets a package from its URL's path words, so the popup still has something
+  useful. `not_indexed` (404) only when the site has no indexed page at all.
+- **Site status** reports `pages` as indexed pages (`page_index`) and
+  `indexed` = `ready` and `pages > 0`; private hosts are 400 (checked like a
+  fetch target) so the endpoint never confirms anything about internal names.
+  A `ready` profile with no indexed page is reported `new` (a first crawl
+  finishes before its pages are indexed), and `crawling` stays true until the
+  latest request is `complete`: the run ends, and `crawl_state` goes idle,
+  while its pages are still in the index queue. Found by the extension's real
+  run, which saw `ready`, `indexed: false`, `crawling: false` mid-indexing.
+- **The requested page is crawled first** (`priorityUrl`, passed from the
+  request through `startCrawl` to discovery): its `.md` twin when one answers
+  (the site's twin pattern first, then the other; a `.md` URL is used as is),
+  else the page's own HTML (`page-html`), at the head of the plan, ahead of
+  llms.txt and exempt from the skip list, so a 100-page crawl that starts at
+  the product root can't miss it. On a site that needs the browser, the
+  browser crawl starts at it. Off-site, robots-disallowed or over-long
+  requested URLs are ignored. A Markdown site whose requested page has no
+  twin and only renders client-side gets a `page-html` attempt that fails
+  (too few words); the rest of the crawl is unaffected. Live on
+  docs.python.org: without it, `/3/library/os.html` wasn't among the 21
+  pages the `/3/` crawl reached and its package fell back to path words.
+- **Markdown by content negotiation.** Some servers (Read the Docs, e.g.
+  flask.palletsprojects.com) answer our `Accept: text/markdown` with Markdown.
+  When the start page comes back as Markdown, discovery follows its Markdown
+  links (under the docs root, minus the skip list) as `page-html` sources,
+  which `fetchPlanned` keeps as `page-md`. Before this, the start page was fed
+  to the HTML extractor, found no `<a>` links, and a live Flask crawl planned
+  two pages; it now plans 30 of 30.
+- **`extractPage` never throws.** linkedom builds no document element for
+  input without an `<html>` tag (an empty body, a comment, a fragment, plain
+  text), and the extractor then threw, failing the whole crawl in discovery
+  (seen live on Flask). Such input is wrapped in a document, and any error
+  extracts to nothing (0 words): a failed page, not a failed crawl.
+- **Telemetry**: `api_crawl_request` through the existing API-usage path,
+  with the request's state as both `props.state` and the row's `outcome`
+  (`rate_limited` for 429s). The status and polling endpoints are not
+  recorded (the popup polls them).
+- **Reference server**: keeps the shapes in memory; it can't crawl, so a
+  request stays `queued`, and `?url=` packages are always `not_indexed`.
+  Rate limits are left to the Worker, as for the other writes.
+- **Permalink markers** are stripped from page titles and heading trails in
+  `headingText` (`src/index/chunk.ts`), which the indexer, skill titles and the
+  crawler's stored page titles all use: a trailing `¶`, `§` or `🔗` (Sphinx
+  serves `# Title [¶](#title)`, whose link text survives link stripping), a
+  `#` standing apart at the end, and the same markers leading the text
+  (VuePress). A `#` attached to a word (`C#`, `F#`) is kept. A scan, not a
+  regex, since heading text comes from the site.

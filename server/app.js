@@ -2,7 +2,7 @@
 // Dependency-free Node; rate limiting is left to the production Worker.
 
 import { createServer } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { VerifyError, normalizeSite, siteOf, assertFetchable, verifySection } from './verify.js';
 import { pageHash, withServerText } from './skilltext.js';
 import { summary, publicSkill } from './store.js';
@@ -122,6 +122,21 @@ function validateSkill(body, allowLocalhost) {
   return { site, pageUrl, title: '', sections, relatedLinks };
 }
 
+// Crawl requests (docs/BACKEND.md §5): the reference server can't crawl, so a
+// request stays queued; it keeps the contract's shapes and rules in memory.
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+const requestId = () => `rq_${[...randomBytes(26)].map((b) => CROCKFORD[b % 32]).join('')}`;
+const requestView = (r) => ({ id: r.id, site: r.site, state: 'queued', phase: 'gate', pagesFound: 0, pagesIndexed: 0, path: null, reason: null, etaSeconds: 300 });
+
+// A site the API may talk about: 400 for private hosts, as for any fetch.
+function publicSite(raw, allowLocalhost) {
+  let site;
+  try { site = normalizeSite(decodeURIComponent(raw)); } catch { throw bad('Invalid site'); }
+  if (!/^[a-z0-9.-]{1,253}$/.test(site)) throw bad('Invalid site');
+  assertFetchable(`https://${site}/`, { allowLocalhost });
+  return site;
+}
+
 function adminOk(req, token) {
   if (!token) return false;
   const given = Buffer.from(String(req.headers.authorization || ''));
@@ -185,6 +200,44 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
         if (!store.hasSite(site)) throw fail('not_found', 'No skills for this site', 404);
         const b = store.best(site);
         return send(req, res, 200, { site, best: b && summary(b), recent: store.recent(site).map(summary) }, true);
+      }
+
+      if (req.method === 'GET' && (hit = m(/^\/v1\/sites\/([^/]+)\/status$/))) {
+        const site = publicSite(hit[1], allowLocalhost);
+        const latest = [...(store.crawlRequests?.values() ?? [])].filter((r) => r.site === site).at(-1);
+        const v = latest && requestView(latest);
+        res.setHeader('cache-control', 'public, max-age=15, s-maxage=15');
+        return send(req, res, 200, {
+          site, indexed: false, status: 'new', crawling: Boolean(latest), pages: 0, lastCrawledAt: null,
+          request: v ? { id: v.id, state: v.state, phase: v.phase, pagesFound: v.pagesFound, pagesIndexed: v.pagesIndexed } : null,
+        });
+      }
+
+      if (req.method === 'POST' && path === '/v1/crawl-requests') {
+        installId(req);
+        const body = await readJson(req);
+        const raw = str(body?.url, 'url', 1024);
+        const target = assertFetchable(raw, { allowLocalhost });
+        target.hash = pageHash(target.hash);
+        const site = siteOf(target.href);
+        if (site === 'scoop.md' || site.endsWith('.scoop.md')) throw bad('scoop.md itself cannot be crawled');
+        store.crawlRequests ??= new Map();
+        const joined = [...store.crawlRequests.values()].some((r) => r.site === site);
+        const r = { id: requestId(), site, url: target.href };
+        store.crawlRequests.set(r.id, r);
+        if (joined) return send(req, res, 200, requestView(r));
+        return send(req, res, 202, { id: r.id, site, state: 'queued', etaSeconds: 300 });
+      }
+
+      if (req.method === 'GET' && (hit = m(/^\/v1\/crawl-requests\/(rq_[0-9A-Z]{26})$/))) {
+        const r = store.crawlRequests?.get(hit[1]);
+        if (!r) throw fail('not_found', 'No such crawl request', 404);
+        return send(req, res, 200, requestView(r));
+      }
+
+      if (req.method === 'GET' && path === '/v1/packages' && url.searchParams.has('url')) {
+        // The reference server has no index.
+        throw fail('not_indexed', `${normalizeSite(url.searchParams.get('site'))} has no index yet`, 404);
       }
 
       if (req.method === 'POST' && path === '/v1/events') {

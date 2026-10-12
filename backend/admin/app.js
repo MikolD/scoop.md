@@ -347,7 +347,8 @@ async function overview() {
         stat(fmtInt(o.crawlRequests.total), 'requests today'),
         stat(fmtInt(o.crawlRequests.byOutcome.joined), 'joined a running crawl'),
         stat(fmtInt(o.crawlRequests.byOutcome.recent), 'answered from a recent crawl'),
-        stat(fmtInt(o.crawlRequests.byOutcome.rejected), 'not a devtool site'))),
+        stat(fmtInt(o.crawlRequests.byOutcome.rejected), 'not a devtool site'),
+        stat(h('a', { href: '#/sites?status=pending' }, fmtInt(o.pendingApproval)), 'sites pending approval'))),
       card(h('span', {}, 'Crawls ', h('a', { href: '#/crawls', class: 'small' }, 'open')), h('div', { class: 'stats' },
         stat(fmtInt(o.runs.queued), 'queued'),
         stat(fmtInt(o.runs.running), 'running'),
@@ -371,6 +372,19 @@ async function overview() {
 }
 
 // ---- Crawl requests (from the extension) --------------------------------------
+
+// Approve / Reject for a site first crawled on a user's request: approve adds
+// it to cross-site search; reject marks it not_devtool and purges its index.
+function approvalButtons(site) {
+  const approve = h('button', { class: 'btn sm', type: 'button' }, 'Approve');
+  const reject = h('button', { class: 'btn ghost sm danger', type: 'button' }, 'Reject');
+  approve.onclick = () => act(approve, () => api(`sites/${enc(site)}/approve`, { method: 'POST' }), `${site} approved for search`);
+  reject.onclick = () => {
+    if (!confirm(`Reject ${site}? It is marked not a devtool site and its index is deleted.`)) return;
+    act(reject, () => api(`sites/${enc(site)}/reject`, { method: 'POST' }), (r) => `${site} rejected; ${r.purged.pages} pages removed`);
+  };
+  return h('span', { class: 'row' }, approve, reject);
+}
 
 async function crawlRequests(r) {
   const site = r.params.get('site') ?? '';
@@ -403,7 +417,8 @@ async function crawlRequests(r) {
         { label: 'Run', get: (x) => (x.runId ? runLink(x.runId) : '') },
         { label: 'Cost', get: (x) => (x.costs ? costCell(x.costs) : ''), cls: 'num' },
         { label: 'Asked', get: (x) => time(x.createdAt), cls: 'nowrap' },
-        { label: 'Reason', get: (x) => (x.reason ? h('span', { class: x.state === 'rejected' ? 'warn small' : 'err small' }, x.reason) : ''), cls: 'hide-sm' },
+        { label: 'Reason', get: (x) => (x.error || x.reason ? h('span', { class: x.state === 'rejected' ? 'warn small' : 'err small', title: x.error ?? '' }, x.error ?? x.reason) : ''), cls: 'hide-sm' },
+        { label: 'Search', get: (x) => (x.siteApproved === false && x.state !== 'rejected' ? approvalButtons(x.site) : x.siteApproved ? 'approved' : ''), cls: 'nowrap' },
       ], d.requests, 'No crawl requests yet.'), pager(d.next, r.params, '#/requests')),
     ],
   };
@@ -598,7 +613,7 @@ async function sites(r) {
   if (q) qs.set('q', q);
   if (r.params.get('cursor')) qs.set('cursor', r.params.get('cursor'));
   const d = await api(`sites?${qs}`);
-  const statusSel = h('select', { id: 'sites-status' }, ['', 'ready', 'crawling', 'not_devtool', 'failed', 'empty', 'blocked', 'new'].map((s) => h('option', { value: s, selected: s === status }, s || 'any status')));
+  const statusSel = h('select', { id: 'sites-status' }, ['', 'ready', 'crawling', 'pending', 'not_devtool', 'failed', 'empty', 'blocked', 'new'].map((s) => h('option', { value: s, selected: s === status }, s || 'any status')));
   const qIn = h('input', { id: 'sites-q', type: 'search', placeholder: 'filter by name', value: q });
   return {
     live: d.sites.some((s) => s.crawling),
@@ -622,6 +637,7 @@ async function sites(r) {
           { label: 'Indexed', get: (s) => fmtInt(s.indexed), cls: 'num' },
           { label: 'llms.txt', get: (s) => (s.hasLlms ? 'yes' : ''), cls: 'hide-sm' },
           { label: 'Last crawl', get: (s) => (s.lastRun ? h('span', { class: 'row' }, time(s.lastRun.startedAt), pill(s.lastRun.status)) : ''), cls: 'nowrap' },
+          { label: 'Search', get: (s) => (!s.approved && s.status !== 'not_devtool' ? approvalButtons(s.site) : ''), cls: 'nowrap' },
         ], d.sites, 'No sites match.'),
         pager(d.next, r.params, '#/sites')),
     ],
@@ -651,6 +667,7 @@ async function siteDetail(r) {
     nodes: [
       h('p', { class: 'crumbs' }, h('a', { href: '#/sites' }, 'Sites'), ' / site'),
       h('div', { class: 'head' }, h('h1', { class: 'mono' }, site), p ? pill(p.status) : null, p?.crawling ? pill('crawling') : null,
+        p && !p.approved && p.status !== 'not_devtool' ? h('span', { class: 'row' }, h('span', { class: 'pill' }, 'pending approval'), approvalButtons(site)) : null,
         h('span', { class: 'grow' }),
         h('a', { class: 'btn ghost sm', href: `#/agent?site=${enc(site)}` }, 'Agent view'),
         h('a', { class: 'btn ghost sm', href: `#/library/${enc(site)}` }, 'Shared skills')),

@@ -108,6 +108,14 @@ const events = [
       re-fetches every source itself, without cookies, and rejects anything that doesn't match what the site serves
       publicly.
     </p>
+    <h3>When you ask for a site to be crawled</h3>
+    <p>
+      On a docs site the library doesn't know yet, the popup can ask it to crawl the site. That request sends the
+      address of the page you are on (its path included), so it shows which documentation page you were reading,
+      together with your install ID. The library stores the page address with a keyed hash of the install ID, never the
+      install ID itself, and starts a crawl of that site's public documentation. The pages it crawls are fetched by the
+      library without your cookies.
+    </p>
     <h3>When you vote or report</h3>
     <ul>
       <li>"It worked" or "It didn't": the scoop's ID, your vote and your install ID.</li>
@@ -185,6 +193,11 @@ const events = [
       </li>
       <li><strong>Votes</strong>: scoop ID, install ID, the vote and when it was cast. One per install; a new vote replaces the old one.</li>
       <li><strong>Reports</strong>: as submitted, until they are resolved and for our records afterwards.</li>
+      <li>
+        <strong>Crawl requests</strong>: the page address you asked from, the site, a keyed hash of your install ID
+        (requests from one install can be grouped, but the hash can't be turned back into the ID), what the request led
+        to and when. Kept for 90 days, then deleted. The site's crawled documentation is kept like any other.
+      </li>
       <li>
         <strong>Request logs</strong>: method, route, status, duration and extension version. No IP addresses, install
         IDs or content.
