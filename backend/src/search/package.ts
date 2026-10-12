@@ -1,6 +1,8 @@
 // Agent-ready Markdown packages built from indexed chunks: header, sources,
 // the untrusted-reference note (same wording as extension/lib/package.js),
-// then chunks grouped by page, never over the character budget.
+// then chunks grouped by page, never over the character budget. Each chunk's
+// text sits inside a code fence longer than any backtick run in it, so page
+// text can't close the fence and forge headings or sections of its own.
 
 export const DEFAULT_PACKAGE_BUDGET = 60_000;
 export const MIN_PACKAGE_BUDGET = 2_000;
@@ -33,9 +35,27 @@ export interface PackageInput {
 export const inline = (s: string, max = 200) =>
   s.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/[`<[\]]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 
+// A URL printed as <url>: only http(s), and nothing that could end the brackets or the line.
+export function safeUrl(url: string): string | null {
+  if (/[\s\p{Cc}\p{Cf}<>]/u.test(url)) return null;
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' || u.protocol === 'http:' ? url : null;
+  } catch {
+    return null;
+  }
+}
+
+export function fenced(text: string): string {
+  const longest = Math.max(0, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}markdown\n${text}\n${fence}`;
+}
+
 export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAGE_BUDGET, now = new Date() }: PackageInput): string {
   const pages = new Map<string, { title: string; chunks: PackageChunk[] }>();
   for (const c of chunks) {
+    if (!safeUrl(c.url)) continue;
     const page = pages.get(c.url) ?? { title: inline(c.title) || c.url, chunks: [] };
     page.chunks.push(c);
     pages.set(c.url, page);
@@ -52,20 +72,20 @@ export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAG
     '',
     '',
   ].join('\n');
-  const source = (url: string, title: string) => `- ${title}: ${url}\n`;
+  const source = (url: string, title: string) => `- ${title}: <${url}>\n`;
   // A page's Sources line is counted with its body, so only included pages are listed.
   let remaining = budget - head.length;
 
   const included: string[] = [];
   const body: string[] = [];
   for (const [url, page] of pages) {
-    const pageHead = `\n---\n\n## ${page.title}\n\nSource: ${url}\n`;
+    const pageHead = `\n---\n\n## ${page.title}\n\nSource: <${url}>\n`;
     const line = source(url, page.title);
     const parts: string[] = [];
     let size = pageHead.length + line.length;
     // Within a page, chunks read in document order.
     for (const c of [...page.chunks].sort((a, b) => a.ord - b.ord)) {
-      const part = `\n### ${inline(c.heading_path, 300) || page.title}\n\n${c.text.trim()}\n`;
+      const part = `\n### ${inline(c.heading_path, 300) || page.title}\n\n${fenced(c.text.trim())}\n`;
       if (size + part.length > remaining) continue;
       parts.push(part);
       size += part.length;

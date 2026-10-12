@@ -14,12 +14,15 @@ export function parseMessage(body: unknown): IndexMessage {
   if (typeof b.url !== 'string' || typeof b.site !== 'string' || typeof b.contentHash !== 'string') {
     throw new PermanentError('message needs site, url and contentHash strings');
   }
-  let urlSite: string;
-  try { urlSite = siteOf(b.url); } catch { throw new PermanentError('url is not a URL'); }
+  // One spelling per page: parsed, fragment dropped, re-serialised.
+  let u: URL;
+  try { u = new URL(b.url); } catch { throw new PermanentError('url is not a URL'); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new PermanentError('url is not http(s)');
+  u.hash = '';
   const site = normalizeSite(b.site);
-  if (urlSite !== site) throw new PermanentError('url is not on site');
+  if (siteOf(u.href) !== site) throw new PermanentError('url is not on site');
   if (!HEX64.test(b.contentHash)) throw new PermanentError('contentHash is not a sha256 hex digest');
-  return { site, url: b.url, contentHash: b.contentHash };
+  return { site, url: u.href, contentHash: b.contentHash };
 }
 
 // 30 s, 60 s, 2 min, … capped at an hour. `attempts` starts at 1.

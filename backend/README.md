@@ -11,7 +11,9 @@ repo root is the dependency-free reference implementation of the same contract.
 - Indexing and search (M4): page Markdown in **R2** (`SKILLS`, `pages/<sha256>.md`),
   index tables + FTS5 in **D1**, chunk vectors in **Vectorize** (`VECTORS`),
   embeddings from **Workers AI** (`AI`), page classification via **OpenRouter**,
-  work arriving on the **Queue** `index-pages` (`INDEX_QUEUE`)
+  work arriving on the **Queue** `index-pages-<env>` (`INDEX_QUEUE`), failures
+  ending in `index-pages-dlq-<env>`, and a daily **cron** re-enqueueing pages
+  still waiting for a classification
 
 ## Layout
 
@@ -65,7 +67,7 @@ account, fractions of a cent). D1, R2 and the queue stay local. Put
 npm run db:migrate:local
 npx wrangler dev --port 8791
 curl -X POST http://127.0.0.1:8791/v1/admin/index -H "Authorization: Bearer local-admin-token" \
-  -d '{"url":"https://docs.stripe.com/webhooks.md"}'            # add "queue": true to go through index-pages
+  -d '{"url":"https://docs.stripe.com/webhooks.md"}'            # add "queue": true to go through index-pages-dev
 curl 'http://127.0.0.1:8791/v1/search?q=verify+webhook+signature&site=docs.stripe.com'
 curl  http://127.0.0.1:8791/v1/sites/docs.stripe.com/topics
 curl 'http://127.0.0.1:8791/v1/packages?site=docs.stripe.com&q=verify+webhook+signature'
@@ -74,11 +76,12 @@ curl 'http://127.0.0.1:8791/v1/packages?site=docs.stripe.com&q=verify+webhook+si
 `npx wrangler dev --local` (what CI runs) needs no login: the remote bindings
 are off, search answers from FTS5 alone and indexing fails at the embedding step.
 
-The dev index was created with:
+The dev index was created with (it also has a `url` metadata index from
+before that was dropped from the plan; harmless):
 
 ```sh
 npx wrangler vectorize create scoop-chunks-dev --dimensions=1024 --metric=cosine
-for p in site slot url; do npx wrangler vectorize create-metadata-index scoop-chunks-dev --property-name=$p --type=string; done
+for p in site slot; do npx wrangler vectorize create-metadata-index scoop-chunks-dev --property-name=$p --type=string; done
 ```
 
 Local state persists in `.wrangler/state`. Each contract run makes about a dozen
@@ -126,16 +129,19 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    filterable):
    ```sh
    npx wrangler vectorize create scoop-chunks-staging --dimensions=1024 --metric=cosine
-   for p in site slot url; do
+   for p in site slot; do
      npx wrangler vectorize create-metadata-index scoop-chunks-staging --property-name=$p --type=string
    done
    npx wrangler queues create index-pages-staging
+   npx wrangler queues create index-pages-dlq-staging
    npx wrangler secret put OPENROUTER_API_KEY --env staging
    ```
-   Production is the same with `scoop-chunks-production` and the queue
-   `index-pages`. The `AI` binding needs nothing created. `INDEX_DAILY_CAP_USD`
-   (default 2) caps classifier spend per site per UTC day. A deploy fails while
-   the index or queue named in `wrangler.jsonc` doesn't exist.
+   Production is the same with `scoop-chunks-production`, `index-pages-production`
+   and `index-pages-dlq-production`. The `AI` binding and the daily cron
+   (`17 4 * * *` UTC) need nothing created. Classifier spend caps per UTC day:
+   `INDEX_DAILY_CAP_USD` per site (default 2) and `INDEX_DAILY_TOTAL_CAP_USD`
+   for the account (default 10). A deploy fails while the index or queue named
+   in `wrangler.jsonc` doesn't exist (a missing dead-letter queue is created).
 8. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
    D1, Workers Routes, Queues and Vectorize edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
    variable `BACKEND_DEPLOY=1` to switch the deploy jobs on.

@@ -1,12 +1,13 @@
 // api.scoop.md Worker entry: CORS, read rate limiting, error mapping and the
 // one-line request log (docs/BACKEND.md §5, §8, §11), plus the index-pages
-// queue consumer.
+// queue consumer and the daily reclassify cron.
 
 import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
 import { handleIndexBatch } from './index/consumer.ts';
 import { indexDeps } from './index/deps.ts';
+import { reclassify } from './index/reclassify.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import type { Env } from './env.ts';
 
@@ -61,5 +62,11 @@ export default {
   // index-pages: one message per changed page from the crawler (src/index/consumer.ts).
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
     await handleIndexBatch(batch, indexDeps(env));
+  },
+
+  // Daily: re-enqueue a bounded batch of pages still waiting for a classification.
+  async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    if (!env.OPENROUTER_API_KEY) return;
+    console.log(JSON.stringify({ cron: 'reclassify', queued: await reclassify(env.DB, env.INDEX_QUEUE) }));
   },
 } satisfies ExportedHandler<Env>;

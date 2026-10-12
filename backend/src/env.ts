@@ -18,6 +18,7 @@ export interface Env {
   ALLOW_ANY_EXTENSION?: string;
   ALLOW_LOCALHOST?: string;
   VERSION?: string;
-  // Classifier spend cap per site per UTC day, in USD (default 2).
+  // Classifier spend caps per UTC day, in USD: per site (default 2) and for the account (default 10).
   INDEX_DAILY_CAP_USD?: string;
+  INDEX_DAILY_TOTAL_CAP_USD?: string;
 }

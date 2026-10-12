@@ -26,18 +26,40 @@ export interface Classification {
   entities: Entity[];
 }
 
+// classification is null (model FAILED) when every model failed; the page is
+// then indexed unclassified and the daily reclassify job tries again.
 export interface Classified {
-  classification: Classification;
+  classification: Classification | null;
   model: string;
   // OpenRouter's usage.cost summed over every attempt, failed ones included.
   costUsd: number;
+  errors?: string[];
 }
+
+export const FAILED = 'failed';
 
 export const DEFAULT_MODEL = 'qwen/qwen3.7-flash';
 export const FALLBACK_MODEL = 'openai/gpt-6-luna';
 export const MAX_INPUT = 60_000;
 const ENDPOINT = 'https://openrouter.ai/api/v1/chat/completions';
 const TIMEOUT_MS = 90_000;
+// Reasoning models can spend thousands of tokens thinking even at effort "low".
+export const MAX_TOKENS = 8000;
+
+// USD per token, about twice OpenRouter's listed prices (2026-10). Used only
+// when a response carries no usage.cost (timeouts, dropped connections), so
+// the cost cap errs high rather than counting those calls as free.
+const PRICES: Record<string, { input: number; output: number }> = {
+  [DEFAULT_MODEL]: { input: 0.06e-6, output: 0.26e-6 },
+  [FALLBACK_MODEL]: { input: 0.2e-6, output: 1e-6 },
+};
+const UNKNOWN_PRICE = { input: 1e-6, output: 5e-6 };
+
+// Upper-bound cost of one call: the whole prompt in, max_tokens out.
+export function estimateCost(model: string, inputChars: number): number {
+  const p = PRICES[model] ?? UNKNOWN_PRICE;
+  return (inputChars / 4) * p.input + MAX_TOKENS * p.output;
+}
 
 const SCHEMA = `{
   "slot": one of ${SLOTS.map((s) => `"${s}"`).join(', ')},
@@ -82,12 +104,14 @@ export function stripFences(s: string): string {
   return s.trim().replace(/^```[\w-]*\s*\n?/, '').replace(/\n?```\s*$/, '').trim();
 }
 
-const clean = (s: string, max: number) => s.replace(/\s+/g, ' ').trim().slice(0, max);
+// Control and format characters (zero-width, bidi overrides) are dropped before anything is stored.
+const clean = (s: string, max: number) => s.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
 const topicName = (s: string) => clean(s, 60).toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}._-]/gu, '').replace(/^-+|-+$/g, '');
 
 // Validates and normalises model output. Throws on anything that doesn't fit the
-// schema's required shape; over-long lists are cut and malformed entities dropped.
-export function parseClassification(raw: string): Classification {
+// schema's required shape; over-long lists are cut, and malformed entities and
+// entities whose name doesn't appear in the page (when given) are dropped.
+export function parseClassification(raw: string, markdown?: string): Classification {
   const v = JSON.parse(stripFences(raw)) as Record<string, unknown>;
   if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('not a JSON object');
   if (!SLOTS.includes(v.slot as Slot)) throw new Error(`invalid slot: ${String(v.slot)}`);
@@ -104,13 +128,17 @@ export function parseClassification(raw: string): Classification {
     if (entities.length === 15) break;
     if (!e || typeof e !== 'object') continue;
     const { kind, name } = e as Record<string, unknown>;
-    if (!ENTITY_KINDS.includes(kind as EntityKind) || typeof name !== 'string' || !name.trim()) continue;
-    entities.push({ kind: kind as EntityKind, name: clean(name, 200) });
+    if (!ENTITY_KINDS.includes(kind as EntityKind) || typeof name !== 'string') continue;
+    const n = clean(name, 200);
+    if (!n || (markdown !== undefined && !markdown.includes(n))) continue;
+    entities.push({ kind: kind as EntityKind, name: n });
   }
   return { slot: v.slot as Slot, topic_path, summary: clean(v.summary, 400), tasks, entities };
 }
 
 async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = fetch }: ClassifyOptions): Promise<{ content: string; cost: number }> {
+  const user = userMessage(page);
+  const estimate = estimateCost(model, SYSTEM.length + user.length);
   const res = await fetchImpl(ENDPOINT, {
     method: 'POST',
     headers: {
@@ -123,29 +151,32 @@ async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = f
       model,
       messages: [
         { role: 'system', content: SYSTEM },
-        { role: 'user', content: userMessage(page) },
+        { role: 'user', content: user },
       ],
       response_format: { type: 'json_object' },
       reasoning: { effort: 'low', exclude: true },
       temperature: 0,
-      max_tokens: 8000,
+      max_tokens: MAX_TOKENS,
       usage: { include: true },
     }),
     signal: AbortSignal.timeout(TIMEOUT_MS),
-  });
+  }).catch((e: Error) => { throw Object.assign(e, { cost: estimate }); });
   const body = (await res.json().catch(() => null)) as {
     choices?: { message?: { content?: string } }[];
     usage?: { cost?: number };
     error?: { message?: string };
   } | null;
-  const cost = Number(body?.usage?.cost) || 0;
+  // No usage in the response (cut-off body, gateway error): charge the estimate.
+  const reported = Number(body?.usage?.cost);
+  const cost = body?.usage && Number.isFinite(reported) ? reported : estimate;
   if (!res.ok) throw Object.assign(new Error(`${model} answered ${res.status}: ${body?.error?.message ?? ''}`.trim()), { cost });
   const content = body?.choices?.[0]?.message?.content;
   if (typeof content !== 'string') throw Object.assign(new Error(`${model} returned no content`), { cost });
   return { content, cost };
 }
 
-// Tries each model in turn (default, then fallback) until one returns valid output.
+// Tries each model in turn (default, then fallback) until one returns valid
+// output. Never throws: when all fail, the result has classification null.
 export async function classifyPage(page: PageInput, opts: ClassifyOptions): Promise<Classified> {
   const models = opts.models ?? [DEFAULT_MODEL, FALLBACK_MODEL];
   let costUsd = 0;
@@ -154,12 +185,12 @@ export async function classifyPage(page: PageInput, opts: ClassifyOptions): Prom
     try {
       const { content, cost } = await callModel(model, page, opts);
       costUsd += cost;
-      return { classification: parseClassification(content), model, costUsd };
+      return { classification: parseClassification(content, page.markdown), model, costUsd };
     } catch (e) {
       costUsd += Number((e as { cost?: number }).cost) || 0;
       errors.push(`${model}: ${(e as Error).message}`);
       console.warn(JSON.stringify({ classify: 'failed', model, error: (e as Error).message.slice(0, 300) }));
     }
   }
-  throw Object.assign(new Error(`classification failed (${errors.join('; ')})`), { costUsd });
+  return { classification: null, model: FAILED, costUsd, errors };
 }

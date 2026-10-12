@@ -241,35 +241,62 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
 
 ## Indexing and search (M4)
 
-- **Pipeline:** `index-pages` message `{ site, url, contentHash }` → read
-  `pages/<contentHash>.md` from R2 (`SKILLS` bucket) → classify (OpenRouter) →
-  chunk → embed (Workers AI) → Vectorize upsert → one D1 batch (a transaction)
-  replacing the page's `chunks`, `entities`, `page_index` row and topic counts.
-  The consumer never reads the crawler's `pages` table; the message and R2 are
-  the whole contract.
+- **Pipeline:** `index-pages-<env>` message `{ site, url, contentHash }` →
+  read `pages/<contentHash>.md` from R2 (`SKILLS` bucket) → chunk → embed
+  (Workers AI) → classify (OpenRouter) → Vectorize upsert → one D1 batch (a
+  transaction) replacing the page's `chunks`, `entities`, `page_index` row and
+  topic counts. Classification comes after embedding so that a failure there
+  costs nothing. The consumer never reads the crawler's `pages` table; the
+  message and R2 are the whole contract. The message URL is normalised (parsed,
+  fragment dropped, `href`), so one page has one spelling.
+- **Classification cache:** a successful result is stored at
+  `classify/<contentHash>.json` in R2 before anything else is written, and
+  read back first on every attempt, so a retry after a Vectorize or D1 failure
+  (or a re-sent message) never pays for the same content twice. Failed results
+  aren't cached.
 - **Idempotency:** a message is skipped when `page_index.content_hash` already
   equals `contentHash` (and the page was classified). Chunk IDs are
   `sha256(url)[0:32]-<ord>`, so re-indexing overwrites vectors in place;
   surplus IDs from a longer old version are deleted. Vectors are written
   before D1: if D1 fails the retry redoes both, and search drops vector hits
   whose chunk row doesn't exist.
-- **Retries:** messages are handled one at a time (classifying takes 5-20 s);
-  failures `retry()` with 30 s × 2^(attempt−1) up to an hour, `max_retries` 6.
-  Bad messages (missing fields, URL not on `site`, non-hex hash) and a missing
-  R2 object are acked and logged instead: retrying can't fix them. No
-  dead-letter queue yet (a DLQ named in config is created on deploy).
-- **Cost cap:** `index_costs(site, day)` sums OpenRouter `usage.cost` per site
-  per UTC day, failed attempts included. Once a site reaches
-  `INDEX_DAILY_CAP_USD` (default $2), its pages are still chunked, embedded and
-  searchable but not classified: `slot` `other`, no topics or entities, `model`
-  `none`. Such rows don't count as indexed for the idempotency check, so the
-  next message for that page classifies it. The check runs before each call, so
-  concurrent consumers can overshoot by one call each (well under a cent).
+- **Retries:** messages are handled one at a time (classifying takes 5-20 s),
+  at most 3 consumer invocations at once (`max_concurrency`); failures
+  `retry()` with 30 s × 2^(attempt−1) up to an hour, `max_retries` 6, then go
+  to the dead-letter queue `index-pages-dlq-<env>` (nothing consumes it; it's
+  for inspection). Bad messages (missing fields, non-http(s) URL, URL not on
+  `site`, non-hex hash) and a missing R2 object are acked and logged instead:
+  retrying can't fix them. Classification failures are not retried (see
+  below), so retries are only for Workers AI, Vectorize and D1 errors.
+- **Cost caps:** `index_costs(site, day)` sums OpenRouter `usage.cost` per
+  site per UTC day, failed attempts included, plus an account-wide row with
+  site `*`. When a response has no usage (timeout, dropped connection, cut-off
+  body, gateway error) the call is charged an estimate: prompt characters / 4
+  at the input price plus all 8,000 `max_tokens` at the output price, from a
+  per-model table at about twice OpenRouter's listed prices (unknown models
+  priced higher still). Once a site reaches `INDEX_DAILY_CAP_USD` (default $2)
+  or the account reaches `INDEX_DAILY_TOTAL_CAP_USD` (default $10), pages are
+  still chunked, embedded and searchable but not classified: `slot` `other`,
+  no topics or entities, `model` `none`. The check runs before each call, so
+  up to 3 concurrent consumers can overshoot by one call each (about a tenth
+  of a cent).
+- **Unclassified pages:** `model` is `none` (cap reached, or no
+  `OPENROUTER_API_KEY`: indexing works without the key) or `failed` (both
+  models failed, for any reason: invalid output, HTTP errors, timeouts). Such
+  rows don't count as indexed for the idempotency check, and a daily cron
+  (`17 4 * * *` UTC, after the caps reset) re-enqueues the 200 oldest of them
+  (`src/index/reclassify.ts`); the rest follow on later days. The cron does
+  nothing without the API key. Re-enqueued pages are re-embedded too (fractions
+  of a cent), because Vectorize can't update a vector's `slot` metadata without
+  its values.
 - **Classifier output** is validated, not trusted: `slot` must be in the
   enum, `topic_path` needs 2-4 levels (normalised to lowercase slugs of
   letters, digits, `.`, `_`, `-`, so `/` can join them), summary required;
-  tasks and entities are cut to 5 and 15, entities with an unknown kind are
-  dropped. Anything else is a failed attempt and goes to the fallback model.
+  tasks and entities are cut to 5 and 15, entities with an unknown kind or a
+  name that doesn't appear verbatim in the page Markdown are dropped, and
+  control and format characters (`\p{Cc}`, `\p{Cf}`: zero-width, bidi
+  overrides) are removed from summary, tasks and entity names. Anything else
+  is a failed attempt and goes to the fallback model.
   The page is sent inside `<page url=… title=…>…</page>` with any literal
   `</page>` in it escaped, truncated to 60,000 characters.
 - **Chunking:** sections split at headings outside code fences; blocks are
@@ -289,8 +316,9 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   are batched 32 texts at a time.
 - **Vectorize** index per environment (`scoop-chunks-dev|staging|production`),
   metadata `{ site, slot, url, chunkId }` with string metadata indexes on
-  `site`, `slot` and `url` (only the first 64 bytes of a string are indexed,
-  which covers hostnames and slots).
+  `site` and `slot` (only the first 64 bytes of a string are indexed, which
+  covers hostnames and slots). `url` isn't filtered on, so it isn't indexed
+  (the dev index has one from before; harmless).
 - **FTS5 on D1:** `chunks_fts` is an external-content FTS5 table over
   `chunks(text, heading_path, title)`, kept in sync by insert/delete triggers,
   tokenizer `porter unicode61`. unicode61 splits on punctuation, so
@@ -309,7 +337,10 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   Vectorize fails, results are FTS5 only (logged). Site and slot filters are
   re-checked against D1, since vector metadata can lag a re-index.
 - **Topics:** the `topics` table counts pages per topic prefix (`a`, `a/b`,
-  `a/b/c`), moved incrementally in the indexing transaction. `page_index.topic`
+  `a/b/c`). Indexing a page recounts every prefix of its old and new paths
+  with `COUNT(*)` over `page_index`, in the same transaction after the
+  `page_index` upsert, and deletes zero rows; counts are never adjusted by ±1,
+  so concurrent consumers or a drifted row can't leave them wrong. `page_index.topic`
   holds the joined path for prefix queries (`substr`, not `LIKE`, since `_` is a
   valid topic character).
 - **Packages** (`GET /v1/packages`): `q` runs the hybrid search (top 40 chunks
@@ -319,7 +350,12 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   Sources line is only written if one of its chunks fits, and both count
   against the budget (default 60,000 characters, 2,000-400,000). Titles,
   heading trails and the query label are flattened to one line with no
-  backticks, brackets or `<`, so they can't add structure or HTML.
+  backticks, brackets or `<`, so they can't add structure or HTML. Each
+  chunk's text is wrapped in a ```` ```markdown ```` fence one backtick longer
+  than its longest backtick run, so page text can't close the fence and forge
+  a section, Source line or heading. URLs are printed as `<url>`; a chunk
+  whose URL isn't http(s) or contains whitespace, control or format
+  characters, `<` or `>` is left out.
   `text/markdown; charset=utf-8`, 404 when nothing matches.
 - **Public reads** (`/v1/search`, `/v1/sites/:site/topics`, `/v1/packages`) go
   through the read rate limiter and send `public, max-age=60, s-maxage=60`.
@@ -332,5 +368,6 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
 - **Health** also reports `secrets.openrouter` (boolean).
 - **CI** runs `wrangler dev --local`: the remote AI/Vectorize bindings need a
   Cloudflare login, which CI doesn't have.
-- **Queue names:** `index-pages` (dev, simulated locally; production) and
-  `index-pages-staging`, since queue names are per account.
+- **Queue names** (per account, so per environment): `index-pages-dev`
+  (simulated locally), `index-pages-staging`, `index-pages-production`, with
+  dead-letter queues `index-pages-dlq-dev|staging|production`.
