@@ -9,6 +9,17 @@ function applyTheme(theme) {
   else delete document.documentElement.dataset.theme;
 }
 
+// Once, in Settings too: pinning shows the docs count for each site on the icon.
+const PIN_KEY = 'pinHintSettingsSeen';
+Promise.all([chrome.storage.local.get(PIN_KEY), chrome.action?.getUserSettings?.()]).then(([{ [PIN_KEY]: seen }, user]) => {
+  if (seen || user?.isOnToolbar !== false) return;
+  $('pin-hint').hidden = false;
+  $('pin-ok').onclick = () => {
+    $('pin-hint').hidden = true;
+    chrome.storage.local.set({ [PIN_KEY]: true });
+  };
+}).catch(() => {});
+
 // The library URL is no longer a setting.
 chrome.storage.sync.remove('libraryUrl');
 

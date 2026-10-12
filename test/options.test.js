@@ -7,9 +7,9 @@ import { parseHTML } from 'linkedom';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 
-async function openOptions({ theme, sync = {} } = {}) {
+async function openOptions({ theme, sync = {}, pinned, local: preset = {} } = {}) {
   const { document } = parseHTML(read('../extension/options.html'));
-  const local = theme === undefined ? {} : { theme };
+  const local = theme === undefined ? { ...preset } : { theme, ...preset };
   const opened = [];
   const uninstallUrls = [];
   const posts = [];
@@ -27,6 +27,7 @@ async function openOptions({ theme, sync = {} } = {}) {
     tabs: { create: async (o) => opened.push(o.url) },
     runtime: { getManifest: () => ({ version: '0.3.0' }), setUninstallURL: async (u) => { uninstallUrls.push(u); } },
     management: { getSelf: async () => ({ installType: 'normal' }) },
+    ...(pinned === undefined ? {} : { action: { getUserSettings: async () => ({ isOnToolbar: pinned }) } }),
   };
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url, init) => { posts.push({ url: String(url), body: JSON.parse(init.body) }); return new Response(null, { status: 202 }); };
@@ -86,4 +87,14 @@ test('options: usage statistics default on; switching off sends one opt-out even
   await new Promise((r) => setTimeout(r, 10));
   assert.equal(local.telemetryQueue, undefined);
   assert.equal(posts.length, 1);
+});
+
+test('Settings: a one-time pin hint while scoop.md is not pinned', async () => {
+  const off = await openOptions({ pinned: false });
+  assert.equal(off.document.getElementById('pin-hint').hidden, false);
+  off.document.getElementById('pin-ok').onclick();
+  assert.equal(off.document.getElementById('pin-hint').hidden, true);
+  assert.equal(off.local.pinHintSettingsSeen, true);
+  assert.equal((await openOptions({ pinned: false, local: { pinHintSettingsSeen: true } })).document.getElementById('pin-hint').hidden, true, 'once');
+  assert.equal((await openOptions({ pinned: true })).document.getElementById('pin-hint').hidden, true, 'not when pinned');
 });

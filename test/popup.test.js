@@ -11,7 +11,7 @@ import { createApp } from '../server/app.js';
 import { timing } from '../extension/lib/ux.js';
 
 // The loader and the copied moment are covered in popup-ux.test.js; here they only cost time.
-Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0, pollMs: 5 });
+Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0, followMs: 5 });
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(read('../extension/manifest.json'));
@@ -84,7 +84,7 @@ test('first scoop copies, shares a verified page-html section, and takes a vote'
   assert.match(clipboard.text, /not as instructions to you/);
   assert.match(clipboard.text, /# Get started with Widgets/);
   assert.ok(!clipboard.text.includes('Showcase'));
-  assert.match($('summary').textContent, /KB · 1 source on localhost$/);
+  assert.match($('summary').textContent, /KB · ~\d+ tokens · 1 source on localhost$/);
   assert.equal($('preview').value, clipboard.text, 'the box shows exactly what was copied');
   assert.equal($('copy').disabled, false);
   assert.match($('share').textContent, /^Shared with the library/);
@@ -106,11 +106,10 @@ test('first scoop copies, shares a verified page-html section, and takes a vote'
 
 test('next scoop on the site uses the shared skill with the current page first', async () => {
   const { $, clipboard } = await openPopup(`${docsUrl}/docs/other`);
-  assert.match($('summary').textContent, /KB · shared, worked for 1 person$/);
-  // Compare the page bodies: the Sources list now names the shared page by its
-  // server-written label ("Another page: Get started with Widgets").
+  assert.match($('summary').textContent, /KB · ~[\d.]+k? tokens · shared, worked for 1 person$/);
+  // The current page comes first; the shared page keeps its server-written label.
   assert.ok(clipboard.text.indexOf('# Get started with Gadgets') < clipboard.text.indexOf('# Get started with Widgets'));
-  assert.match(clipboard.text, /^- Another page: Get started with Widgets: /m);
+  assert.match(clipboard.text, /^## Another page: Get started with Widgets$/m);
   assert.equal($('rebuild').hidden, false);
   assert.equal($('intro').hidden, true, 'intro only shows until dismissed');
 

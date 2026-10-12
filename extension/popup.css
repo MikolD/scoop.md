@@ -104,26 +104,73 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
-/* Waiting for a crawl */
-.waiting { gap: var(--gap-sm); }
-.wait-title { font-size: var(--text-md); font-weight: var(--weight-bold); }
-#wait-site { color: var(--brand); }
-#wait-progress { -webkit-appearance: none; appearance: none; display: block; width: 100%; height: 6px; margin: var(--gap-sm) 0 2px; border: 0; border-radius: 3px; overflow: hidden; background: var(--accent-soft); }
-#wait-progress::-webkit-progress-bar { background: var(--accent-soft); }
-#wait-progress::-webkit-progress-value { background: var(--accent); border-radius: 3px; transition: width .4s ease-out; }
-#wait-progress:indeterminate { background: linear-gradient(var(--accent), var(--accent)) no-repeat var(--accent-soft); background-size: 35% 100%; animation: sweep 1.3s ease-in-out infinite; }
-#wait-progress:indeterminate::-webkit-progress-bar { background: transparent; }
-@keyframes sweep { from { background-position: -60% 0; } to { background-position: 160% 0; } }
-#copy-now { justify-self: start; margin-top: var(--gap-sm); }
+/* Background indexing and the full docs */
 #crawl-note { color: var(--fg); }
+#full-docs { justify-self: start; }
+.primary-outline { border-color: var(--accent); color: var(--link); font-weight: var(--weight-strong); }
+
+/* Tabs: This page, Overview, Search */
+/* Grid items may shrink below their content (a long llms.txt line would widen the popup). */
+.card, .panel, #content, .panel > div { min-width: 0; }
+.tabs { display: flex; gap: 4px; padding: 3px; border-radius: var(--radius); background: var(--accent-soft); }
+.tab { flex: 1; padding: 6px var(--gap-sm); border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); font-size: var(--text); font-weight: var(--weight-strong); cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
+.tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.panel.reveal, #content.reveal { animation: reveal var(--reveal-ms) ease-out both; }
+.panel-title { font-size: var(--text-md); font-weight: var(--weight-bold); }
+.panel-title .site-name { color: var(--brand); }
+.panel-sub { margin-top: var(--gap-sm); font-weight: var(--weight-strong); }
+.off { display: grid; gap: 4px; }
+.off-title { font-weight: var(--weight-strong); }
+
+/* Overview */
+.topics { margin: 0; padding-left: 18px; max-height: 150px; overflow: auto; }
+.topics li { margin: 2px 0; }
+.topics ul { padding-left: 16px; }
+.excerpt { min-width: 0; overflow-wrap: anywhere; max-height: 110px; margin: 0; padding: 8px var(--gap); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--well); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; }
+
+/* Search */
+.search-q { width: 100%; padding: 8px var(--gap); border: 1.5px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--fg); font: inherit; }
+.search-q:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
+.results { display: grid; gap: 4px; max-height: 210px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.results li { display: flex; align-items: flex-start; gap: var(--gap-sm); padding: 6px; border-radius: var(--radius-sm); }
+.results li:hover { background: var(--well); }
+.results input { margin-top: 3px; accent-color: var(--accent); }
+.results label { display: grid; gap: 1px; min-width: 0; cursor: pointer; }
+.hit-title { font-weight: var(--weight-strong); }
+.hit-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hit-snippet { color: var(--muted); font-size: var(--text-sm); }
+.search-actions { display: flex; align-items: center; gap: var(--gap-sm); }
+.search-actions .copy { flex: 1; }
 
 /* Reduced motion: no movement, just the check and a quick fade. */
 @media (prefers-reduced-motion: reduce) {
-  #loader .mark img, .dots span, #wait-progress:indeterminate { animation: none; }
+  #loader .mark img, .dots span { animation: none; }
   .dots span { opacity: 1; }
-  #wait-progress:indeterminate { background-size: 100% 100%; background-image: linear-gradient(var(--line), var(--line)); }
   #copied-stage:not([hidden]) .doc, #copied-stage:not([hidden]) .board { animation: none; }
   #copied-stage:not([hidden]) .check { animation: none; stroke-dashoffset: 0; }
   #copied-stage:not([hidden]) { animation: fade 200ms ease-out both; }
-  #content.reveal { animation: fade 150ms ease-out both; }
+  #content.reveal, .panel.reveal { animation: fade 150ms ease-out both; }
 }
+
+/* Pin hint */
+.pin-hint .pin { width: 15px; height: 15px; flex: none; color: var(--brand); }
+
+/* This page: what scoop.md knows about the page */
+.page-meta { display: grid; gap: 6px; min-width: 0; }
+.verdict { display: grid; gap: 6px; min-width: 0; }
+.chip { display: inline-flex; align-items: center; gap: 6px; justify-self: start; max-width: 100%; padding: 5px 12px 5px 8px; border-radius: 999px; background: var(--chip-wait); color: var(--chip-wait-on); font-size: var(--text); font-weight: var(--weight-bold); }
+.chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-icon { display: grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 50%; font-size: var(--text-xs); line-height: 1; }
+.chip[data-state="yes"] { background: var(--chip-yes); color: var(--chip-yes-on); }
+.chip[data-state="yes"] .chip-icon::before { content: "✓"; }
+.chip[data-state="no"] { background: var(--chip-no); color: var(--chip-no-on); }
+.chip[data-state="no"] .chip-icon::before { content: "✕"; }
+.chip[data-state="checking"] .chip-icon { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chip[data-state="checking"] .chip-icon { animation: none; } }
+.tab[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
+#llms-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#llms-line a, .instructions a { color: var(--link); }
+.instructions ul { display: grid; gap: 2px; margin: 0; padding-left: 18px; font-size: var(--text-sm); }
+.instructions .panel-sub { margin: 0; }

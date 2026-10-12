@@ -14,8 +14,11 @@ const events = [
   ['scoop_start, scoop_result', "A scoop began (nothing more) and how it ended: the site's hostname (only its registrable domain for a signed-in page), the page's path (public docs pages only), the outcome, which kinds of sources were used and how many, the package size, whether it was cut for length, how long it took, whether the shared library had it (and its \"worked\" count), whether it came from the docs index, whether the page was public, and the number of related links."],
   ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname, the path (public docs pages only) and the size.'],
   ['copied_animation_shown', 'The "copied to your clipboard" animation played, and whether your system asks for reduced motion.'],
-  ['crawl_request, crawl_wait', "You were the first to scoop a docs site, so scoop.md asked for it to be crawled: the site's hostname and how the request went; then how long you waited and how it ended (ready, not developer docs, failed, you copied the page instead, it took too long, or you closed the popup)."],
-  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, signed-in page, the library refused it).'],
+  ['crawl_request, crawl_wait', "You were the first to scoop a docs site, so scoop.md asked for it to be crawled: the site's hostname and how the request went; then how long you waited and how it ended (ready, not developer docs, failed, you copied the page instead, it took too long or stalled, or you closed the popup)."],
+  ['tab_switch', 'You switched between the This page, Overview and Search tabs: which tab.'],
+  ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
+  ['badge_count_shown', 'Once an hour at most: how many times the toolbar showed a docs count. One number, no sites or pages.'],
+  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
   ['vote, report', "You voted or reported: the hostname and path (public docs pages only), the scoop's ID, your vote or reason."],
   ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
   ['telemetry_opt_out, telemetry_opt_in', 'You switched usage statistics off or on.'],
@@ -37,9 +40,9 @@ const events = [
 
     <h2>The short version</h2>
     <ul>
-      <li>The extension reads only the tab you're on, and only when you click the button or press its shortcut.</li>
+      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show how many docs are indexed for a site on its icon, it compares each tab's site with a list of indexed sites downloaded to your device; that check never leaves your device.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
+      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
       <li>
         Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
         path of public docs pages you scoop. The extension says so the first time you open it, with a button to turn
@@ -83,20 +86,47 @@ const events = [
       <code>api.scoop.md/v1/sites/&lt;site&gt;/status</code> to see whether the site's docs are indexed. Not the page
       address, not the page content. This happens whether or not sharing is on.
     </p>
-    <h3>When the site's docs are indexed and the page is public</h3>
+    <h3>When the page is public</h3>
     <p>
-      The page's address (without tracking parameters) goes to <code>api.scoop.md/v1/packages</code>, which answers with
-      the indexed docs arranged around that page, whatever the sharing setting. Never for a page that only renders
-      signed in, or on your computer or a private network.
+      The page's address (without tracking parameters) goes to <code>api.scoop.md/v1/packages</code> when the site's
+      docs are indexed (it answers with the indexed docs arranged around that page), or else to
+      <code>api.scoop.md/v1/quick</code> (it answers with the site's llms.txt files and the page's Markdown version, which
+      the extension then downloads without your cookies). Whatever the sharing setting. Never for a page that only
+      renders signed in, or on your computer or a private network.
     </p>
-    <h3>When a docs site isn't indexed yet, sharing is on and the page is public</h3>
+    <h3>Checking links before copying</h3>
+    <p>
+      So your agent never gets a dead link, the links in a package built on your device from a public page (the page's
+      own links, its Markdown version and related pages) are checked before it's copied. When sharing is on, their
+      addresses (never ones on your computer or a private network) go to <code>api.scoop.md/v1/links/check</code>. Links
+      on the page's own site, or on a site the package's sources came from, that it can't vouch for are checked directly
+      from your browser with a HEAD request over https, without your cookies; links to any other site are never
+      requested. With sharing off, only the direct checks run. For a page that isn't public (signed in, or on your
+      computer or a private network), no link address is sent or requested. Links that don't work, or can't be confirmed
+      within about 2.5 seconds, lose their link but keep their text; a bare address is kept as text.
+    </p>
+    <h3>On the Overview and Search tabs</h3>
+    <p>
+      For an indexed site: the hostname, to get its topics (<code>/v1/sites/&lt;site&gt;/topics</code>), and what you type
+      in the search box, to search its docs (<code>/v1/search</code>, and <code>/v1/packages</code> for "Copy all
+      results"). The library's request log keeps the query, as described under Library requests below.
+    </p>
+    <h3>The docs count on the icon</h3>
+    <p>
+      Every 6 hours the extension downloads the list of indexed sites with their page counts from
+      <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The count for the site
+      you're on is looked up in that list on your device. Pages on your computer or a private network are never looked
+      up.
+    </p>
+    <h3>When a docs site isn't indexed yet, sharing is on and the page is public developer docs</h3>
     <p>
       A crawl request: the page's address (without tracking parameters) and your install ID go to
       <code>api.scoop.md/v1/crawl-requests</code>. The library then reads that site's public docs itself, without your
-      cookies. While it works, the extension asks about that request every 2 seconds, or every 30 seconds after you close
-      the popup (the request ID is kept on your device until it finishes).
+      cookies. Nothing waits for it: you get the best package available at once. While it works, the extension asks about
+      that request every 5 seconds while the popup is open, or every 30 seconds after you close it (the request ID is kept
+      on your device until it finishes).
     </p>
-    <h3>When sharing is on and the material was fetched without cookies</h3>
+    <h3>When sharing is on, the page is recognised as developer docs and the material was fetched without cookies</h3>
     <ul>
       <li>The public documentation sections in the package, and the URL each came from.</li>
       <li>The page's address and title.</li>
@@ -104,7 +134,8 @@ const events = [
       <li>Your install ID.</li>
     </ul>
     <p>
-      If any part of the package came from your signed-in view of the page, nothing is shared. The library then
+      Only pages recognised as developer docs are shared; for any other page, nothing is shared and no crawl is
+      requested. If any part of the package came from your signed-in view of the page, nothing is shared. The library then
       re-fetches every source itself, without cookies, and rejects anything that doesn't match what the site serves
       publicly.
     </p>
