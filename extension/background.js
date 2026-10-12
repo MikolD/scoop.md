@@ -90,7 +90,11 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
   if (name !== HOURLY_ALARM && name !== FLUSH_ALARM) return;
   (async () => {
     const t = createTelemetry({ beacon: null });
-    if (name === HOURLY_ALARM) await activePing(t);
+    if (name === HOURLY_ALARM) {
+      await activePing(t);
+      // Expires finished crawls nobody picked up, so their ✓ clears.
+      await ensureAlarms();
+    }
     await t.flush();
   })().catch(() => {});
 });

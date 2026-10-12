@@ -171,11 +171,20 @@ async function revealAfterCopy(ok) {
   reveal();
 }
 
+// Clears the live region first, so the same message twice is announced twice.
+let announcing = null;
+function announce(text) {
+  $('announce').textContent = '';
+  clearTimeout(announcing);
+  announcing = setTimeout(() => { $('announce').textContent = text; }, ANNOUNCE_DELAY_MS);
+}
+const ANNOUNCE_DELAY_MS = 50;
+
 // The content, announced with the status line, and focus on the Copy button.
 function reveal() {
   setStage('content');
   $('content').classList.add('reveal');
-  $('announce').textContent = $('status').textContent;
+  announce($('status').textContent);
   if (!$('copy').disabled) $('copy').focus();
 }
 
@@ -259,7 +268,8 @@ function waitOutcome(outcome) {
 
 function showProgress(req) {
   const { label, count, fraction } = progressText(req);
-  $('wait-phase').textContent = label;
+  // #wait-phase is aria-live: only a new phase is written (and announced).
+  if ($('wait-phase').textContent !== label) $('wait-phase').textContent = label;
   note('wait-count', count, 'meta');
   // No value: an indeterminate bar.
   if (fraction == null) $('wait-progress').removeAttribute('value');
@@ -273,7 +283,7 @@ async function waitForCrawl(scoop, initial) {
   showProgress(initial);
   setStage('waiting');
   // Phase changes are announced by #wait-phase (aria-live); this says what's going on.
-  $('announce').textContent = `Figuring out the docs for ${site}…`;
+  announce(`Figuring out the docs for ${site}…`);
   $('copy-now').disabled = false;
   waitingSince = Date.now();
   let stopped = false;

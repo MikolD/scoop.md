@@ -10,7 +10,7 @@ import { createServer } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { parseHTML, DOMParser } from 'linkedom';
 import { startMockLibrary, packageFor } from './helpers/mock-library.js';
-import { stageLog, timing } from '../extension/lib/ux.js';
+import { sleep, stageLog, timing } from '../extension/lib/ux.js';
 import { PENDING_KEY, CRAWL_ALARM, READY_TTL_MS, live, progressText, pollPending, rememberCrawl, forgetCrawl, updateBadge } from '../extension/lib/crawl.js';
 import { createLibrary } from '../extension/lib/library.js';
 
@@ -69,6 +69,15 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   Object.getPrototypeOf(document.createElement('textarea')).select ??= () => {};
   document.execCommand ??= () => false;
   globalThis.getSelection ??= () => null;
+  // Every text written to the live regions, in order.
+  const writes = { announce: [], 'wait-phase': [] };
+  for (const id of Object.keys(writes)) {
+    const el = document.getElementById(id);
+    let proto = el;
+    let found;
+    while ((proto = Object.getPrototypeOf(proto)) && !(found = Object.getOwnPropertyDescriptor(proto, 'textContent')));
+    Object.defineProperty(el, 'textContent', { get() { return found.get.call(el); }, set(v) { writes[id].push(v); found.set.call(el, v); }, configurable: true });
+  }
   // linkedom has no activeElement: record focus calls instead.
   const focused = [];
   for (const id of ['copy', 'copy-now']) document.getElementById(id).focus = () => focused.push(id);
@@ -102,7 +111,7 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   const $ = (id) => document.getElementById(id);
-  return { $, clipboard, badge, alarms, local, document, focused, ready: popup.ready };
+  return { $, clipboard, badge, alarms, local, document, focused, writes, ready: popup.ready };
 }
 
 const posts = (path) => mock.log.filter((e) => e.method === 'POST' && e.path === path);
@@ -126,7 +135,9 @@ test('the loader stays at least loaderMs, the copy lands before the copied momen
   assert.equal(p.clipboard.writes[0].stage, 'loading', 'copied while the loader was still up');
   assert.ok(p.clipboard.writes[0].at <= copiedStage.at);
   assert.ok(content.at - copiedStage.at >= timing.celebrateMs - 10);
+  await sleep(80);
   assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent.', 'announced with the status text');
+  assert.deepEqual(p.writes.announce, ['', 'Copied. Paste it into your agent.'], 'cleared first, so a repeat is announced again');
   assert.deepEqual(p.focused, ['copy'], 'focus moves to the Copy button');
   assert.equal(p.$('content').hidden, false);
   assert.ok(p.$('content').classList.contains('reveal'));
@@ -213,9 +224,12 @@ test('crawl lifecycle: queued → running → indexing → complete delivers the
   assert.deepEqual(stages(), ['loading', 'waiting', 'loading', 'copied', 'content'], 'back to the loader while the package is fetched');
   assert.equal(p.$('copy-now').disabled, true, 'no second copy once the crawl completed');
   assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
-  for (const l of ['Waiting for a crawler (about a minute)', "Checking it's developer docs", 'Finding the docs', 'Reading 12 pages', 'Indexing 6/12']) {
+  for (const l of ['Waiting for a crawler', "Checking it's developer docs", 'Finding the docs', 'Reading the docs', 'Indexing']) {
     assert.ok(labels.includes(l), `showed "${l}" (saw ${JSON.stringify(labels)})`);
   }
+  const phases = p.writes['wait-phase'];
+  assert.ok(phases.every((t, i) => i === 0 || t !== phases[i - 1]), `written only when it changes: ${JSON.stringify(phases)}`);
+  assert.ok(phases.every((t) => !/\d/.test(t)), 'no counts in the live phase line');
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
   assert.equal(p.local[PENDING_KEY][SITE], undefined, 'delivered: nothing left pending');
   assert.equal(p.badge.text, '');
@@ -368,11 +382,11 @@ test('sharing off: no crawl request (asking for one contributes, like sharing)',
 }));
 
 test('progressText: friendly labels, counts and how far along', () => {
-  assert.deepEqual(progressText({ state: 'queued', etaSeconds: 150 }), { label: 'Waiting for a crawler (about 3 minutes)', count: '', fraction: null });
+  assert.deepEqual(progressText({ state: 'queued', etaSeconds: 150 }), { label: 'Waiting for a crawler', count: 'About 3 minutes', fraction: null });
   assert.equal(progressText({ state: 'running', phase: 'gate' }).label, "Checking it's developer docs");
-  assert.equal(progressText({ state: 'running', phase: 'browser', pagesFound: 1 }).label, 'Reading 1 page');
+  assert.deepEqual(progressText({ state: 'running', phase: 'browser', pagesFound: 1 }), { label: 'Reading the docs', count: '1 page found', fraction: null });
   assert.deepEqual(progressText({ state: 'running', phase: 'discover', pagesFound: 30 }), { label: 'Finding the docs', count: '30 pages found', fraction: null });
-  assert.deepEqual(progressText({ state: 'indexing', phase: 'index', pagesFound: 40, pagesIndexed: 10 }), { label: 'Indexing 10/40', count: '', fraction: 0.25 });
+  assert.deepEqual(progressText({ state: 'indexing', phase: 'index', pagesFound: 40, pagesIndexed: 10 }), { label: 'Indexing', count: '10 of 40 pages indexed', fraction: 0.25 });
   assert.equal(progressText({ state: 'indexing', phase: 'index', pagesFound: 3, pagesIndexed: 0 }).fraction, null, 'an empty bar looks stuck');
 });
 
@@ -403,6 +417,7 @@ test('a failed copy is announced with the status text too, with no copied moment
   const p = await openPopup(PAGE, { clipboardFails: true });
   await p.ready;
   assert.equal(p.$('status').textContent, 'Ready. Click Copy to put it on your clipboard.');
+  await sleep(80);
   assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard.');
   assert.ok(!stages().includes('copied'));
   assert.deepEqual(p.focused, ['copy']);
@@ -410,7 +425,7 @@ test('a failed copy is announced with the status text too, with no copied moment
 
 test('waiting is announced once; phases are announced by the live phase line', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
   const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting');
+  await waitFor(() => p.document.body.dataset.stage === 'waiting' && p.$('announce').textContent);
   assert.equal(p.$('announce').textContent, 'Figuring out the docs for docs.example.com…');
   assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
   p.$('copy-now').onclick();
@@ -485,3 +500,26 @@ test('settings explain that the index lookup still sends the page address with s
   assert.ok((privacy.match(/whatever the sharing setting/g) ?? []).length >= 2, 'the short version and the index section');
   assert.match(privacy, /Turn sharing off[^<]*still sent to look it up in the index/);
 });
+
+test('service worker: the hourly alarm clears a ✓ nobody picked up', () => withMock({ sites: {} }, async () => {
+  const local = { devLibraryUrl: mock.url, [PENDING_KEY]: { [SITE]: { requestId: 'cr_old', site: SITE, url: PAGE, state: 'complete', startedAt: 0, updatedAt: Date.now() - READY_TTL_MS - 60_000 } } };
+  const badge = [];
+  const listeners = {};
+  const on = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
+  globalThis.chrome = {
+    storage: {
+      local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: local[k] } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async () => {} },
+      sync: { get: async (d) => ({ ...d, telemetry: false }) },
+      onChanged: on('storage'),
+    },
+    runtime: { getManifest: () => MANIFEST, onInstalled: on('installed'), onStartup: on('startup'), setUninstallURL: async () => {} },
+    management: { getSelf: async () => ({ installType: 'development' }) },
+    alarms: { create() {}, clear: async () => true, get: async () => ({}), onAlarm: on('alarm') },
+    action: { setBadgeText: async ({ text }) => { badge.push(text); }, setBadgeBackgroundColor: async () => {} },
+  };
+  await import(`../extension/background.js?${Math.random()}`);
+  listeners.alarm({ name: 'telemetry-hourly' });
+  await waitFor(() => badge.length);
+  assert.equal(badge.at(-1), '');
+  assert.deepEqual(local[PENDING_KEY], {});
+}));

@@ -21,29 +21,31 @@ const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 function eta(seconds) {
   if (!(seconds > 0)) return '';
-  return seconds < 60 ? ' (about a minute)' : ` (about ${Math.round(seconds / 60)} minutes)`;
+  return seconds < 60 ? 'About a minute' : `About ${Math.round(seconds / 60)} minutes`;
 }
 
-// What the waiting view says about a request: a label, a count, and how far
-// along it is (0–1) when that is known, else null for an indeterminate bar.
+// What the waiting view says about a request: a label (the phase only, so a
+// screen reader hears phase changes, not every count), a count shown beside
+// it, and how far along it is (0–1) when that is known, else null for an
+// indeterminate bar.
 export function progressText(req = {}) {
   const found = req.pagesFound > 0 ? req.pagesFound : 0;
   const indexed = req.pagesIndexed > 0 ? req.pagesIndexed : 0;
-  const count = found ? plural(found, 'page') + ' found' : '';
-  if (req.state === 'queued') return { label: `Waiting for a crawler${eta(req.etaSeconds)}`, count: '', fraction: null };
-  if (req.state === 'complete' || req.phase === 'done') return { label: 'Almost ready', count, fraction: 1 };
+  const pages = found ? plural(found, 'page') : '';
+  if (req.state === 'queued') return { label: 'Waiting for a crawler', count: eta(req.etaSeconds), fraction: null };
+  if (req.state === 'complete' || req.phase === 'done') return { label: 'Almost ready', count: pages, fraction: 1 };
   switch (req.phase) {
     case 'gate': return { label: "Checking it's developer docs", count: '', fraction: null };
-    case 'discover': return { label: 'Finding the docs', count, fraction: null };
+    case 'discover': return { label: 'Finding the docs', count: found ? `${pages} found` : '', fraction: null };
     case 'fetch':
-    case 'browser': return { label: found ? `Reading ${plural(found, 'page')}` : 'Reading the docs', count: '', fraction: null };
+    case 'browser': return { label: 'Reading the docs', count: found ? `${pages} found` : '', fraction: null };
     case 'index': return {
-      label: found ? `Indexing ${Math.min(indexed, found)}/${found}` : 'Indexing',
-      count: '',
+      label: 'Indexing',
+      count: found ? `${Math.min(indexed, found)} of ${pages} indexed` : '',
       // Nothing indexed yet: keep the bar moving rather than show it empty.
       fraction: found && indexed ? Math.min(1, indexed / found) : null,
     };
-    default: return { label: 'Getting started', count, fraction: null };
+    default: return { label: 'Getting started', count: pages, fraction: null };
   }
 }
 
