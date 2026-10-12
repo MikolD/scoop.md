@@ -85,6 +85,10 @@ export function parseArgs(argv, env = process.env) {
   }
   if (!o.env || !(o.env in APIS)) throw new UsageError(`--env must be staging, production or local\n${USAGE}`);
   o.api ??= APIS[o.env];
+  // The admin token goes in a header: only over HTTPS, except to a local dev server.
+  let api;
+  try { api = new URL(o.api); } catch { throw new UsageError(`--api is not a URL: ${o.api}`); }
+  if (api.protocol !== 'https:' && o.env !== 'local') throw new UsageError('--api must be https:// (plain http only with --env local)');
   o.token = env[TOKEN_VARS[o.env]] ?? null;
   if (!o.token && !o.dryRun) throw new UsageError(`${TOKEN_VARS[o.env]} is not set`);
   return o;

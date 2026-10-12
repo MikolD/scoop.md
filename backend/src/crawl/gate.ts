@@ -355,7 +355,8 @@ export interface GateAi {
   capReached: () => Promise<boolean>;
   // Records spend against the same caps as page classification.
   addCost: (usd: number) => Promise<void>;
-  signal?: AbortSignal;
+  // Per model call, started when the call is (default 60 s).
+  timeoutMs?: number;
 }
 
 // One answer, default model then fallback. Invalid output from every model
@@ -367,7 +368,11 @@ export async function aiVerdict(summary: string, ai: GateAi, s: Signals): Promis
   let invalid = false;
   for (const model of ai.models ?? [DEFAULT_MODEL, FALLBACK_MODEL]) {
     try {
-      const { content, cost } = await callModel(model, SYSTEM, summary, { apiKey: ai.apiKey, fetchImpl: ai.fetchImpl, signal: ai.signal });
+      const { content, cost } = await callModel(model, SYSTEM, summary, {
+        apiKey: ai.apiKey,
+        fetchImpl: ai.fetchImpl,
+        signal: AbortSignal.timeout(ai.timeoutMs ?? 60_000),
+      });
       costUsd += cost;
       await ai.addCost(cost);
       let a: AiAnswer;

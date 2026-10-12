@@ -4,7 +4,8 @@
 import { ApiError } from './errors.ts';
 
 export function normalizeSite(host: string | null | undefined): string {
-  return String(host || '').trim().toLowerCase().replace(/^www\./, '');
+  // A fully qualified name (amazon.com.) is the same site.
+  return String(host || '').trim().toLowerCase().replace(/\.+$/, '').replace(/^www\./, '');
 }
 
 export function siteOf(url: string): string {

@@ -22,13 +22,15 @@ const fast = () => new HostLimiter({ intervalMs: 0 });
 // An OpenRouter stand-in answering each call with the next body (a string is the model's content).
 function openRouter(answers: (string | Response)[]) {
   const calls: { model: string; messages: { role: string; content: string }[] }[] = [];
+  const signals: (AbortSignal | null | undefined)[] = [];
   const impl = async (_url: string, init: RequestInit) => {
     calls.push(JSON.parse(String(init.body)));
+    signals.push(init.signal);
     const a = answers.shift();
     if (a instanceof Response) return a;
     return Response.json({ choices: [{ message: { content: a } }], usage: { cost: 0.0001 } });
   };
-  return { impl, calls };
+  return { impl, calls, signals };
 }
 
 function ai(fetchImpl: GateAi['fetchImpl'], spent: number[] = [], capReached = false): GateAi {
@@ -42,6 +44,8 @@ test('gate lists: known docs hosts pass, search engines, shops, social and news 
   }
   const denied: [string, string][] = [
     ['https://www.amazon.com/', 'ecommerce'],
+    ['https://amazon.com./', 'ecommerce'],
+    ['https://WWW.Google.com../', 'search-engine'],
     ['https://amazon.co.uk/gp/bestsellers', 'ecommerce'],
     ['https://allbirds.myshopify.com/', 'ecommerce'],
     ['https://www.google.com/', 'search-engine'],
@@ -180,6 +184,8 @@ test('gate AI check: inconclusive signals ask the model once; its verdict, confi
   assert.deepEqual(spent, [0.0001]);
   assert.equal(or.calls.length, 1);
   assert.equal(or.calls[0].model, 'qwen/qwen3.7-flash');
+  // The timeout belongs to the model call, not to the whole gate.
+  assert.ok(or.signals[0] instanceof AbortSignal && !or.signals[0].aborted);
   // A short summary, never the page itself.
   const user = or.calls[0].messages[1].content;
   assert.match(user, /^<site url="https:\/\/flowly\.example\/">/);

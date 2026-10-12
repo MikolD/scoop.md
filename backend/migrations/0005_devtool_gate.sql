@@ -6,7 +6,7 @@
 ALTER TABLE site_profiles ADD COLUMN gate_category   TEXT; -- devtool-docs | devtool-marketing-only | ecommerce | search-engine | social | news | other
 ALTER TABLE site_profiles ADD COLUMN gate_confidence REAL; -- 0-1
 ALTER TABLE site_profiles ADD COLUMN gate_reason     TEXT; -- at most 200 characters
-ALTER TABLE site_profiles ADD COLUMN gate_method     TEXT; -- denylist | allowlist | signals | ai
+ALTER TABLE site_profiles ADD COLUMN gate_method     TEXT; -- denylist | allowlist | signals | ai | forced (an admin skipped the gate)
 ALTER TABLE site_profiles ADD COLUMN gate_checked_at TEXT;
 
 ALTER TABLE crawl_runs ADD COLUMN forced        INTEGER NOT NULL DEFAULT 0; -- the gate was skipped by an admin

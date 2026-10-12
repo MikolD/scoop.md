@@ -210,6 +210,24 @@ export class CrawlStore {
     ]);
   }
 
+  // An admin skipped the gate: the profile's verdict says so instead of
+  // keeping an earlier one. Safe to repeat.
+  async forceGate(runId: string, site: string, now = new Date()): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE site_profiles SET gate_category = NULL, gate_confidence = NULL, gate_reason = 'crawl forced by an admin (' || ?2 || ')',
+           gate_method = 'forced', gate_checked_at = ?3, updated_at = ?3 WHERE site = ?1`,
+      )
+      .bind(site, runId, now.toISOString())
+      .run();
+  }
+
+  // A crawl that ended without an outcome (the gate could not decide): the
+  // status, the last finished crawl's outcome, stays as it was.
+  async endCrawl(site: string, now = new Date()): Promise<void> {
+    await this.db.prepare(`UPDATE site_profiles SET crawl_state = 'idle', updated_at = ?2 WHERE site = ?1`).bind(site, now.toISOString()).run();
+  }
+
   // A failed crawl: a site that was 'ready' and still has pages stays 'ready'
   // (its stored pages are still good); anything else becomes 'failed'.
   async failCrawl(site: string, now = new Date()): Promise<void> {

@@ -536,7 +536,8 @@ crawl is the `gate` step, after `robots` and before `discover`
   `name.*` (any TLD, including two-part ones like `co.uk`), `*.suffix`. The
   allowlist is checked first, so `docs.aws.amazon.com`,
   `developers.google.com` and `docs.cloud.google.com` pass although
-  `amazon.*` and `google.*` are denied. robots.txt is still fetched first (one
+  `amazon.*` and `google.*` are denied. Hosts are compared after
+  `normalizeSite`, which also drops a trailing dot (`amazon.com.`). robots.txt is still fetched first (one
   request), as the step order is fixed.
 - **Signals** from a handful of polite requests: the start page (asked again
   with an HTML Accept header if the Markdown-first request gets a 4xx/5xx:
@@ -571,7 +572,9 @@ crawl is the `gate` step, after `robots` and before `discover`
   in one of two runs. "Mainly for software developers" keeps Figma's and
   Notion's home pages out. The cost goes to `index_costs` like page
   classification, so it counts against the site's and the account's daily
-  caps; with the caps spent the call isn't made.
+  caps; with the caps spent the call isn't made. Each model call has its own
+  60 s timeout, started with the call, so the polite fetches before it can't
+  use it up.
 - **Outcomes.** A rejection is recorded in one D1 batch (`recordGate`): run
   `rejected` with the reason in `error`, profile `not_devtool` with
   `gate_category/confidence/reason/method` (migration `0005_devtool_gate.sql`).
@@ -582,14 +585,17 @@ crawl is the `gate` step, after `robots` and before `discover`
   from both models rejects with a reason (we couldn't verify it; force to
   override). Two cases are *undecided* rather than rejected, because a
   rejection would mislabel the site: no OpenRouter key, or the daily cap is
-  spent. The run then fails with the reason and the profile follows the usual
-  `fail` rule. A transient OpenRouter outage throws, so the step retries.
+  spent. The run then fails with the reason; the profile's status is left as
+  it was (a new site stays `new`, a `not_devtool` one stays so) and only
+  `crawl_state` goes back to `idle`. A transient OpenRouter outage throws, so the step retries.
   A start page that robots.txt keeps us off passes with no category
   (discovery records `blocked`). One that can't be read (403, 5xx) is judged
   by its URL alone by the model (bestbuy.ca, which answers our bot with 403, is
   rejected as ecommerce); without a key it passes to discovery.
 - **Override.** `POST /v1/admin/crawl {"site", "force": true}` skips the gate;
-  `crawl_runs.forced` records it, and the profile keeps its last verdict. A
+  `crawl_runs.forced` records it, and the profile's verdict becomes method
+  `forced` (category and confidence cleared, the run ID in the reason), so an
+  old rejection doesn't sit next to a crawled site. A
   rejected site can be crawled again any time (a rejected run is finished, so
   it doesn't block the next one); every crawl is gated again, so a site that
   changed is re-judged.
