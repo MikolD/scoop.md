@@ -165,49 +165,80 @@ test('verifyAll checks page-html sections one at a time', async () => {
   assert.equal(peak, 1);
 });
 
-// Worst cases for the text scanners: 2 MB of input built to make naive regexes
-// backtrack quadratically ('<script ' × n took 6 s at 160 KB before).
+// Worst cases for the text scanners: input built to make naive regexes
+// backtrack quadratically ('<script ' × n took 6 s at 160 KB before). Each is
+// checked for linear scaling rather than against a fixed time, so a busy
+// machine doesn't fail it: from 250 KB to 2 MB (8×) the time must grow less
+// than 24×. Linear is 8× (alone these run 3.5 ms → 28 ms), quadratic 64×. The
+// wide spread matters: from 1 MB to 2 MB, GC in a full test process pushed
+// linear scanners past 3× (18 → 61 ms). Each size takes the best of 5 runs,
+// alternating sizes, and a round that doesn't look linear is measured again,
+// up to 3 rounds; noise only ever adds time. A 2 s ceiling at 2 MB is the
+// backstop.
+const SMALL = 250_000;
 const TWO_MB = 2_000_000;
-const fill = (unit: string, tail = '') => unit.repeat(Math.ceil(TWO_MB / unit.length)).slice(0, TWO_MB) + tail;
-const within = (label: string, budgetMs: number, fn: () => unknown) => {
+const fillTo = (size: number, unit: string, tail = '') => unit.repeat(Math.ceil(size / unit.length)).slice(0, size) + tail;
+const RUNS = 5;
+const MAX_GROWTH = 24;
+// Below this the small run is too short to compare; a quadratic scanner takes
+// seconds at 2 MB, far above MAX_GROWTH × this.
+const NOISE_MS = 5;
+const timed = (fn: () => unknown) => {
   const t = performance.now();
   fn();
-  const ms = performance.now() - t;
-  assert.ok(ms < budgetMs, `${label}: ${ms.toFixed(0)} ms (budget ${budgetMs} ms)`);
+  return performance.now() - t;
 };
+function assertLinear(label: string, make: (size: number) => string, fn: (input: string) => unknown, ceilingMs = 2000) {
+  const small = make(SMALL);
+  const large = make(TWO_MB);
+  const linear = (t1: number, t2: number) => t2 < MAX_GROWTH * Math.max(t1, NOISE_MS);
+  let t1 = Infinity;
+  let t2 = Infinity;
+  for (let round = 0; round < 3; round++) {
+    t1 = Infinity;
+    t2 = Infinity;
+    for (let i = 0; i < RUNS; i++) {
+      t1 = Math.min(t1, timed(() => fn(small)));
+      t2 = Math.min(t2, timed(() => fn(large)));
+    }
+    if (linear(t1, t2)) break;
+  }
+  assert.ok(linear(t1, t2), `${label}: ${t1.toFixed(1)} ms at 250 KB, ${t2.toFixed(1)} ms at 2 MB (not linear)`);
+  assert.ok(t2 < ceilingMs, `${label}: ${t2.toFixed(0)} ms at 2 MB (ceiling ${ceilingMs} ms)`);
+}
 
 test('htmlToText is linear on adversarial HTML', () => {
-  for (const [label, input] of [
-    ['<script ×n', fill('<script ')],
-    ['<style>×n', fill('<style>')],
-    ['<!--×n', fill('<!--')],
-    ['<!--a>×n', fill('<!--a>')],
-    ['<!-- ×n', fill('<!-- ')],
-    ['<×n', fill('<')],
-    ['<a ×n', fill('<a ')],
-    ['</script ×n', fill('<script></script ')],
-    ['&×n', fill('&amp')],
-  ] as const) within(label, 200, () => htmlToText(input));
+  for (const [label, unit] of [
+    ['<script ×n', '<script '],
+    ['<style>×n', '<style>'],
+    ['<!--×n', '<!--'],
+    ['<!--a>×n', '<!--a>'],
+    ['<!-- ×n', '<!-- '],
+    ['<×n', '<'],
+    ['<a ×n', '<a '],
+    ['</script ×n', '<script></script '],
+    ['&×n', '&amp'],
+  ] as const) assertLinear(label, (size) => fillTo(size, unit), htmlToText);
 });
 
 test('markdownToPlain and normalizeText are linear on adversarial Markdown', () => {
-  for (const [label, input] of [
-    ['[×n', fill('[')],
-    ['](×n', fill('](')],
-    ['[a](×n', fill('[a](')],
-    ['![×n', fill('![')],
-    ['1×n', fill('1')],
-    ['spaces', fill(' ', 'x')],
-    ['- ×n lines', fill('-\n')],
+  for (const [label, unit, tail] of [
+    ['[×n', '[', ''],
+    ['](×n', '](', ''],
+    ['[a](×n', '[a](', ''],
+    ['![×n', '![', ''],
+    ['1×n', '1', ''],
+    ['spaces', ' ', 'x'],
+    ['- ×n lines', '-\n', ''],
   ] as const) {
-    within(`markdownToPlain ${label}`, 200, () => markdownToPlain(input));
-    within(`normalizeText ${label}`, 200, () => normalizeText(input));
+    assertLinear(`markdownToPlain ${label}`, (size) => fillTo(size, unit, tail), markdownToPlain);
+    assertLinear(`normalizeText ${label}`, (size) => fillTo(size, unit, tail), normalizeText);
   }
 });
 
 test('containment of a 2 MB section against a 2 MB page stays fast', () => {
-  const prose = fill('lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ');
-  within('containment', 1500, () => containment(prose, `<p>${prose}</p>`));
+  const unit = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor ';
+  assertLinear('containment', (size) => fillTo(size, unit), (prose) => containment(prose, `<p>${prose}</p>`), 6000);
 });
 
 test('ordered-list numbers are not counted as words', () => {
