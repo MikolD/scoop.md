@@ -18,7 +18,7 @@ import type { Env } from '../env.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
-import { browserPages } from './result.ts';
+import { batchKey, collectResult, planKey, runPrefix, uploadKey } from './collect.ts';
 import type { RunHandle } from './runner.ts';
 import { discoverSite, fetchPlanned, fetchRobots, robotsFrom } from './site.ts';
 import type { Discovery, FetchedSource, PlannedPage, RobotsFile } from './site.ts';
@@ -33,11 +33,6 @@ export interface CrawlParams {
 
 const PAGES_PER_STEP = 10;
 const POLL_SECONDS = 20;
-const runPrefix = (runId: string) => `crawl-results/${runId}/`;
-const planKey = (runId: string) => `${runPrefix(runId)}plan.json`;
-// Where the optional presigned upload puts the raw result.
-const uploadKey = (runId: string) => `${runPrefix(runId)}upload.json`;
-const batchKey = (runId: string, i: number) => `${runPrefix(runId)}batch-${i}.json`;
 
 const NET: WorkflowStepConfig = { retries: { limit: 2, delay: '10 seconds', backoff: 'exponential' }, timeout: '10 minutes' };
 const DB: WorkflowStepConfig = { retries: { limit: 3, delay: '2 seconds', backoff: 'exponential' }, timeout: '1 minute' };
@@ -65,7 +60,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
     try {
       await step.do('start', DB, async () => {
         await store().updateRun(p.runId, { status: 'running' });
-        await store().setProfileStatus(p.site, 'crawling');
+        await store().beginCrawl(p.site);
       });
 
       const robots: RobotsFile = await step.do('robots', NET, () => fetchRobots(origin, { limiter: new HostLimiter(), allowLocalhost: local }));
@@ -84,10 +79,9 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
 
       await step.do('profile', DB, async () => {
         const now = new Date().toISOString();
-        // Status stays 'crawling' (the profile is not public) until `finish`.
+        // Discovery facts only: the public status changes in `finish`/`fail`.
         await store().putProfile({
           site: p.site,
-          status: 'crawling',
           docs_root: d.docsRoot,
           has_llms: d.llmsUrl ? 1 : 0,
           has_llms_full: d.llmsFullUrl ? 1 : 0,
@@ -99,7 +93,6 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           openapi_json: JSON.stringify(d.openapi),
           needs_browser: d.needsBrowser ? 1 : 0,
           crawl_delay: d.crawlDelay,
-          last_crawled_at: now,
           last_run_id: p.runId,
           updated_at: now,
         });
@@ -159,24 +152,26 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
 
         // The result comes from the sandbox's job server (traffic token + job
         // token, at most 25 MB of application/json), unless the optional
-        // presigned upload already delivered it. It is validated once; the
-        // pages are stored as one R2 object per page step, the raw result is
-        // deleted, and the sandbox is killed as soon as the result is in hand.
-        const collected = await step.do('browser-collect', NET, async () => {
-          const uploaded = await env.CRAWL.get(uploadKey(p.runId));
-          const raw = uploaded ? await uploaded.text() : await crawler.result(h);
-          const error = raw === null ? ((await crawler.status(h))?.error ?? 'no result') : null;
-          const { pages, skipped } = raw === null ? { pages: [] as FetchedSource[], skipped: 0 } : browserPages(raw, p.site, robotsFrom(robots), p.maxPages);
-          let batches = 0;
-          for (; batches * PAGES_PER_STEP < pages.length; batches++) {
-            const slice = pages.slice(batches * PAGES_PER_STEP, (batches + 1) * PAGES_PER_STEP);
-            await env.CRAWL.put(batchKey(p.runId, batches), JSON.stringify(slice), { httpMetadata: { contentType: 'application/json' } });
-          }
-          await env.CRAWL.delete(uploadKey(p.runId));
+        // presigned upload already delivered it. collectResult validates it
+        // once, stores one object per page step and writes a manifest last; a
+        // retry returns the manifest without needing the sandbox. Stopping the
+        // sandbox is its own step, so a retry here never finds it gone.
+        const collected = await step.do('browser-collect', NET, () =>
+          collectResult({
+            bucket: env.CRAWL,
+            crawler,
+            handle: h,
+            runId: p.runId,
+            site: p.site,
+            robots: robotsFrom(robots),
+            maxPages: p.maxPages,
+            perBatch: PAGES_PER_STEP,
+          }),
+        );
+        await step.do('browser-stop', NET, async () => {
           await crawler.stop(h);
           const seconds = Math.round((Date.now() - h.startedAt) / 1000);
           await store().updateRun(p.runId, { browser_seconds: seconds, cost_usd: Number((seconds * E2B_USD_PER_SECOND).toFixed(6)) });
-          return { pages: pages.length, batches, skipped, error };
         });
         if (collected.error && !collected.pages) throw new Error(`browser crawl failed: ${collected.error}`);
         await step.do('browser-skipped', DB, () =>
@@ -200,8 +195,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       await step.do('finish', DB, async () => {
         const now = new Date().toISOString();
         await store().updateRun(p.runId, { status: 'complete', finished_at: now });
-        await store().setProfileStatus(p.site, path === 'blocked' ? 'blocked' : path === 'none' ? 'empty' : 'ready');
-        await store().refreshPageCount(p.site);
+        await store().finishCrawl(p.site, path === 'blocked' ? 'blocked' : path === 'none' ? 'empty' : 'ready');
       });
       return { runId: p.runId, path };
     } catch (e) {
@@ -210,8 +204,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         // Every sandbox this run started, whether or not its handle survived.
         if (env.E2B_API_KEY) await e2b().stopTagged(p.runId).catch(() => {});
         await store().updateRun(p.runId, { status: 'failed', finished_at: new Date().toISOString(), error: message.slice(0, 500) });
-        await store().setProfileStatus(p.site, 'failed');
-        await store().refreshPageCount(p.site);
+        await store().failCrawl(p.site);
         await cleanup(env, p.runId).catch(() => {});
       });
       throw e;

@@ -65,7 +65,8 @@ export function fakeR2() {
     async put(key: string, value: string) { objects.set(key, value); },
     async get(key: string) {
       const v = objects.get(key);
-      return v === undefined ? null : { json: async () => JSON.parse(v), text: async () => v };
+      if (v === undefined) return null;
+      return { size: Buffer.byteLength(v), body: new Response(v).body, json: async () => JSON.parse(v), text: async () => v };
     },
     async head(key: string) { return objects.has(key) ? {} : null; },
     async delete(key: string) { objects.delete(key); },

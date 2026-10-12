@@ -20,6 +20,7 @@ skip.ts      skip list: generated indexes, search/404, tag/category pages, old c
 runner.ts    BrowserCrawler interface (start / poll / result / stop) + runCrawl()
 e2b.ts       BrowserCrawler on E2B over REST (no SDK)
 result.ts    re-validates the browser crawler's (untrusted) output
+collect.ts   browser result -> validated batch objects + manifest in R2 (retry-safe)
 workflow.ts  Workflow CrawlSite: the Workers-only glue (D1, R2, Queue, steps)
 ```
 
@@ -50,13 +51,16 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
    and clears the flags (an outbox: a retry resends, nothing is lost).
 5. Browser sites only: `browser-start` (kill sandboxes left by an earlier
    attempt, create one tagged with the run ID, start the job),
-   `browser-wait-N`/`browser-poll-N` every 20 s, `browser-collect` (read the
+   `browser-wait-N`/`browser-poll-N` every 20 s, `browser-collect`
+   (`collect.ts`; retry-safe through a manifest written last: read the
    result from the sandbox's job server, application/json only, at most
    25 MB, unless an optional presigned upload already delivered it; validate
-   once and store one batch object per page step; kill the sandbox; record
-   seconds and cost), `browser-pages-N` + `index-browser-N` (as step 4,
-   source kind `browser`).
+   once and store one batch object per page step), `browser-stop` (kill the
+   sandbox; record seconds and cost), `browser-pages-N` + `index-browser-N`
+   (as step 4, source kind `browser`).
 6. `index-final`, `cleanup` (delete `crawl-results/<runId>/`), `finish` — run
    `complete`, profile `ready`/`empty`/`blocked`. On any error, `fail` kills
-   every sandbox tagged with the run, marks the run and profile `failed` and
-   deletes the run's files.
+   every sandbox tagged with the run, marks the run `failed`, the profile
+   `failed` (or keeps `ready` when the site still has pages) and deletes the
+   run's files. The profile's public status only changes in these two steps;
+   `crawl_state` says whether a crawl is running.

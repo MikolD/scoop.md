@@ -142,6 +142,8 @@ function profileJson(r: SiteProfileRow) {
     pagesFetched: r.pages_fetched,
     needsBrowser: Boolean(r.needs_browser),
     crawlDelay: r.crawl_delay,
+    // A re-crawl in progress; status is still the last finished crawl's outcome.
+    crawling: r.crawl_state === 'crawling',
     lastCrawledAt: r.last_crawled_at,
     updatedAt: r.updated_at,
   };

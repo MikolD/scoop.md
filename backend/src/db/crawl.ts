@@ -10,7 +10,10 @@ import type { IndexMessage } from '../index/indexer.ts';
 
 export interface SiteProfileRow {
   site: string;
+  // Outcome of the last finished crawl: new | ready | empty | blocked | failed.
+  // Changes only in finishCrawl/failCrawl (migrations/0004_crawl_state.sql).
   status: string;
+  crawl_state: string; // idle | crawling
   docs_root: string;
   has_llms: number;
   has_llms_full: number;
@@ -114,32 +117,53 @@ export class CrawlStore {
     return this.db.prepare('SELECT * FROM site_profiles WHERE site = ?').bind(site).first<SiteProfileRow>();
   }
 
-  async putProfile(p: Omit<SiteProfileRow, 'pages_fetched'>): Promise<void> {
+  // A crawl of `site` started: the public status (the last finished crawl's
+  // outcome) stays as it is. A site seen for the first time is 'new'.
+  async beginCrawl(site: string, now = new Date()): Promise<void> {
+    await this.db
+      .prepare(
+        `INSERT INTO site_profiles (site, status, crawl_state, updated_at) VALUES (?1, 'new', 'crawling', ?2)
+         ON CONFLICT (site) DO UPDATE SET crawl_state = 'crawling', updated_at = excluded.updated_at`,
+      )
+      .bind(site, now.toISOString())
+      .run();
+  }
+
+  // Discovery facts. Never touches status, crawl_state or last_crawled_at,
+  // which describe the last finished crawl.
+  async putProfile(p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at'>): Promise<void> {
     const cols = Object.keys(p) as (keyof typeof p)[];
     await this.db
       .prepare(
-        `INSERT INTO site_profiles (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})
+        `INSERT INTO site_profiles (${cols.join(', ')}, status) VALUES (${cols.map(() => '?').join(', ')}, 'new')
          ON CONFLICT (site) DO UPDATE SET ${cols.filter((c) => c !== 'site').map((c) => `${c} = excluded.${c}`).join(', ')}`,
       )
       .bind(...cols.map((c) => p[c]))
       .run();
   }
 
-  async setProfileStatus(site: string, status: string, now = new Date()): Promise<void> {
+  async finishCrawl(site: string, status: 'ready' | 'empty' | 'blocked', now = new Date()): Promise<void> {
     await this.db
       .prepare(
-        `INSERT INTO site_profiles (site, status, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT (site) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at`,
+        `UPDATE site_profiles SET status = ?2, crawl_state = 'idle', updated_at = ?3, last_crawled_at = ?3,
+           pages_fetched = (SELECT COUNT(*) FROM pages WHERE site = ?1) WHERE site = ?1`,
       )
       .bind(site, status, now.toISOString())
       .run();
   }
 
-  // Recounts pages_fetched from the pages table.
-  async refreshPageCount(site: string): Promise<void> {
+  // A failed crawl: a site that was 'ready' and still has pages stays 'ready'
+  // (its stored pages are still good); anything else becomes 'failed'.
+  async failCrawl(site: string, now = new Date()): Promise<void> {
     await this.db
-      .prepare('UPDATE site_profiles SET pages_fetched = (SELECT COUNT(*) FROM pages WHERE site = ?1) WHERE site = ?1')
-      .bind(site)
+      .prepare(
+        `UPDATE site_profiles SET
+           status = CASE WHEN status = 'ready' AND EXISTS (SELECT 1 FROM pages WHERE site = ?1) THEN 'ready' ELSE 'failed' END,
+           crawl_state = 'idle', updated_at = ?2,
+           pages_fetched = (SELECT COUNT(*) FROM pages WHERE site = ?1)
+         WHERE site = ?1`,
+      )
+      .bind(site, now.toISOString())
       .run();
   }
 

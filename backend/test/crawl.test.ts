@@ -17,6 +17,8 @@ import { browserPages } from '../src/crawl/result.ts';
 import { E2BCrawler } from '../src/crawl/e2b.ts';
 import { runCrawl } from '../src/crawl/runner.ts';
 import { validateCrawl } from '../src/lib/validate.ts';
+import { batchKey, collectResult, manifestKey, uploadKey } from '../src/crawl/collect.ts';
+import type { Manifest } from '../src/crawl/collect.ts';
 import { parseMessage } from '../src/index/consumer.ts';
 import type { IndexMessage } from '../src/index/indexer.ts';
 import { archiveVersion, lowValue, skipLowValue } from '../src/crawl/skip.ts';
@@ -777,4 +779,104 @@ test('MEDIUM-4: plan URLs are at most 1024 characters', async () => {
   const d = await discoverSite('https://ex.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
   assert.ok(d.plan.every((p) => p.url.length <= 1024 && p.sourceUrl.length <= 1024));
   assert.deepEqual(d.plan.map((p) => p.url), ['https://ex.com/llms.txt', 'https://ex.com/docs/a.md']);
+});
+
+// --- N1/N2: collecting a browser result survives retries
+
+function collectSetup() {
+  const { r2, objects } = fakeR2();
+  const body = 'Readable docs text. '.repeat(10);
+  const result = JSON.stringify({ pages: Array.from({ length: 23 }, (_, i) => ({ url: `https://ex.com/#/p${i}`, title: `P${i}`, markdown: body })).concat([{ url: 'https://evil.com/x', title: 'X', markdown: body }]) });
+  let reads = 0;
+  let alive = true;
+  const crawler = {
+    async result() {
+      reads++;
+      if (!alive) throw new Error('sandbox gone');
+      return result;
+    },
+  };
+  const input = {
+    bucket: r2, crawler, handle: { id: 'sbx1', startedAt: 0 }, runId: 'cr_1', site: 'ex.com', robots: parseRobots(''), maxPages: 100, perBatch: 10,
+  };
+  return { r2, objects, input, reads: () => reads, kill: () => { alive = false; } };
+}
+
+test('N1: collectResult writes batches then a manifest; a retry after the sandbox is gone returns the manifest', async () => {
+  const t = collectSetup();
+  const first = await collectResult(t.input);
+  assert.deepEqual(first, { pages: 23, batches: 3, skipped: 1, error: null } satisfies Manifest);
+  assert.equal(JSON.parse(t.objects.get(batchKey('cr_1', 2))!).length, 3);
+  assert.ok(t.objects.has(manifestKey('cr_1')));
+  // The step is retried after the sandbox was stopped: nothing is lost.
+  t.kill();
+  assert.deepEqual(await collectResult(t.input), first);
+  assert.equal(t.reads(), 1);
+});
+
+test('N1: a collect attempt that dies before the manifest is simply redone', async () => {
+  const t = collectSetup();
+  const bucket = t.r2 as unknown as { put: (key: string, value: string) => Promise<void> };
+  const put = bucket.put.bind(bucket);
+  let failOnManifest = true;
+  bucket.put = async (key, value) => {
+    if (key === manifestKey('cr_1') && failOnManifest) { failOnManifest = false; throw new Error('R2 hiccup'); }
+    return put(key, value);
+  };
+  await assert.rejects(collectResult(t.input), /R2 hiccup/);
+  assert.equal(t.objects.has(manifestKey('cr_1')), false);
+  const again = await collectResult(t.input); // the sandbox is still up: stopping is a later step
+  assert.equal(again.pages, 23);
+  assert.equal(t.reads(), 2);
+});
+
+test('N2: an uploaded result over the cap is refused before it is read; a valid upload is used and deleted', async () => {
+  const t = collectSetup();
+  t.objects.set(uploadKey('cr_1'), 'x'.repeat(25_000_001));
+  await assert.rejects(collectResult(t.input), /over 25000000 bytes/);
+  assert.equal(t.reads(), 0);
+  const u = collectSetup();
+  u.objects.set(uploadKey('cr_1'), JSON.stringify({ pages: [{ url: 'https://ex.com/a', title: 'A', markdown: 'Uploaded docs text. '.repeat(10) }] }));
+  assert.equal((await collectResult(u.input)).pages, 1);
+  assert.equal(u.reads(), 0);
+  assert.equal(u.objects.has(uploadKey('cr_1')), false);
+});
+
+// --- N3: the public profile survives re-crawls
+
+test('N3: status changes only when a crawl finishes or fails; a failed re-crawl keeps ready', async () => {
+  const { d1 } = fakeD1();
+  const { r2 } = fakeR2();
+  const store = new CrawlStore(d1, r2);
+  const facts = (runId: string) => ({
+    site: 'ex.com', docs_root: '/', has_llms: 1, has_llms_full: 0, llms_url: null, llms_full_url: null, md_twins_ratio: 1, twin_pattern: 'suffix',
+    sitemap_urls_count: 3, openapi_json: '[]', needs_browser: 0, crawl_delay: null, last_run_id: runId, updated_at: new Date().toISOString(),
+  });
+  const state = async () => {
+    const r = (await store.getProfile('ex.com'))!;
+    return [r.status, r.crawl_state, r.pages_fetched];
+  };
+
+  await store.beginCrawl('ex.com');
+  await store.putProfile(facts('cr_1'));
+  assert.deepEqual(await state(), ['new', 'crawling', 0]); // first crawl: not public yet
+  await store.record('cr_1', 'ex.com', [{ url: 'https://ex.com/a', sourceUrl: 'https://ex.com/a.md', kind: 'page-md', title: 'A', markdown: md('A'), etag: null, lastModified: null }]);
+  await store.finishCrawl('ex.com', 'ready');
+  assert.deepEqual(await state(), ['ready', 'idle', 1]);
+  const finishedAt = (await store.getProfile('ex.com'))!.last_crawled_at;
+  assert.ok(finishedAt);
+
+  // A re-crawl: still 'ready' (public) while it runs, flagged as crawling.
+  await store.beginCrawl('ex.com');
+  await store.putProfile(facts('cr_2'));
+  assert.deepEqual(await state(), ['ready', 'crawling', 1]);
+  assert.equal((await store.getProfile('ex.com'))!.last_crawled_at, finishedAt);
+  // It fails: the stored pages are still good, so the site stays 'ready'.
+  await store.failCrawl('ex.com');
+  assert.deepEqual(await state(), ['ready', 'idle', 1]);
+
+  // A site with no pages whose crawl fails is 'failed'.
+  await store.beginCrawl('empty.com');
+  await store.failCrawl('empty.com');
+  assert.equal((await store.getProfile('empty.com'))!.status, 'failed');
 });

@@ -343,11 +343,18 @@ listening on `::` for that port.
   win), else 409 `conflict`. After 6 hours a stuck run (its Workflow died) no
   longer blocks. If creating the Workflow instance throws, the run is marked
   `failed`.
-- **Profile status** is `crawling` from `start` until `finish`, which sets
-  `ready`, `empty` or `blocked` (`failed` on error); whether the site needed a
-  browser is the separate `needs_browser` flag. `GET
-  /v1/sites/:site/profile` answers 404 unless the status is final and doesn't
-  expose the run ID.
+- **Profile status** is the outcome of the last *finished* crawl: `ready`,
+  `empty`, `blocked` or `failed` (`new` before the first one finishes). It
+  changes only in `finish` and `fail` (migration `0004_crawl_state.sql`);
+  whether a crawl is running now is the separate `crawl_state`
+  (`idle`/`crawling`, shown publicly as `crawling: true`), so a re-crawl never
+  hides a site's profile. A failed re-crawl of a `ready` site that still has
+  pages keeps `ready`; otherwise it becomes `failed`. `lastCrawledAt` is set
+  only when a crawl finishes. Discovery facts (docs root, llms URLs, twin
+  ratio…) are written as soon as they are known, even if that crawl later
+  fails. Whether the site needed a browser is the separate `needs_browser`
+  flag. `GET /v1/sites/:site/profile` answers 404 while the status is `new`
+  and doesn't expose the run ID.
 - Failures anywhere run a `fail` step (kill every sandbox tagged with the run,
   mark run and profile `failed`, delete the run's working files) and rethrow,
   so the Workflow instance shows `errored` too. Successful runs delete
@@ -379,6 +386,13 @@ listening on `::` for that port.
   The tag is re-checked client-side after `GET /v2/sandboxes?metadata=…`.
   `start()` is bounded well inside its 3-minute step: create (30 s) plus at
   most four 10 s `/run` attempts 2 s apart.
+- **Collect is retry-safe** (`src/crawl/collect.ts`). `browser-collect` writes
+  the batch objects, then `crawl-results/<runId>/manifest.json` ({pages,
+  batches, skipped, error}) last; a retry that finds the manifest returns it
+  without the sandbox. Stopping the sandbox and recording its cost is a
+  separate `browser-stop` step, so a collect retry never finds the sandbox
+  already killed. An uploaded result (optional presigned path) is checked
+  against the 25 MB cap by its R2 `size` before it is read.
 - **Result collection:** the Worker reads `GET /result` from the sandbox's job
   server in every environment (traffic token + job token). It must be
   `application/json`, is read with the same capped reader as page fetches (at
