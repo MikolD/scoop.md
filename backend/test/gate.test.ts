@@ -195,6 +195,21 @@ test('gate AI check: inconclusive signals ask the model once; its verdict, confi
   assert.equal(unsure.decision, 'reject');
 });
 
+test('gateSite: an unreadable start page is judged by its URL when a model is available, else left to discovery', async () => {
+  const forbidden = fakeFetch({ 'https://shop.example/': () => new Response('no bots', { status: 403 }) });
+  const or = openRouter([JSON.stringify({ isDevtool: false, category: 'ecommerce', confidence: 0.9, reason: 'A retailer by its name.' })]);
+  const v = await gateSite('https://shop.example/', NO_ROBOTS, { fetchImpl: forbidden.impl, limiter: fast(), ai: ai(or.impl) });
+  assert.equal(v.decision, 'reject');
+  assert.equal(v.method, 'ai');
+  assert.match(or.calls[0].messages[1].content, /note: start page unreadable \(HTTP 403\)/);
+
+  const again = fakeFetch({ 'https://shop.example/': () => new Response('no bots', { status: 403 }) });
+  const p = await gateSite('https://shop.example/', NO_ROBOTS, { fetchImpl: again.impl, limiter: fast(), ai: null });
+  assert.equal(p.decision, 'crawl');
+  assert.equal(p.category, null);
+  assert.match(p.reason, /left to discovery/);
+});
+
 test('gate AI check: invalid JSON from every model rejects with a reason; outages throw; no key or a spent cap is undecided', async () => {
   const s = pageSignals(fixture('marketing.html'), 'https://flowly.example/', 'text/html').signals;
   const bad = openRouter(['not json', JSON.stringify({ isDevtool: 'yes', category: 'devtool-docs', confidence: 2, reason: '' })]);
