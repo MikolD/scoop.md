@@ -47,7 +47,7 @@ Check Cloudflare's current documentation for exact `wrangler` config syntax (D1,
 |---|---|---|
 | `kind` | enum | `page-md` (the page's Markdown twin), `llms` (llms.txt), `llms-full` (llms-full.txt), `page-html` (extracted from the page's HTML by the extension) |
 | `label` | string | Shown to the agent as the section heading. **Written by the server** (§6, "Server-written text"); a label in the request is accepted for compatibility and ignored. At most 200 chars. |
-| `url` | string | Absolute `https://` URL (or `http://` only when `ALLOW_LOCALHOST=1`). Hostname must equal the skill's `site` after the same normalisation. |
+| `url` | string | Absolute `https://` URL (or `http://` only when `ALLOW_LOCALHOST=1`). Hostname must equal the skill's `site` after the same normalisation. Stored in canonical form: a plain fragment is dropped (a `#/` client route is kept, cut at `?` or a second `#`, trailing slashes trimmed). A query string over 200 characters, or one that decodes (with `+` as a space) to whitespace or control/format characters, is rejected with `400 invalid_request`: a query can spell out instructions as well as parameters. |
 | `content` | string or null | The text. `null` only for `llms-full` sections too large to download (> 2,000,000 bytes); then `bytes` says how large (a lower bound is fine). |
 | `bytes` | integer or null | Required when `content` is null, otherwise null. |
 
@@ -209,8 +209,8 @@ Verification proves the section *content*, but a skill also carries text the cli
 | Section `label`, `llms` | `Site documentation index (llms.txt)` |
 | Section `label`, `llms-full` | `Full documentation (llms-full.txt)` |
 | Skill `title` | The title of the first `page-md` or `page-html` section that has one, else `<site> documentation`. |
-| Related links | Kept only when a verified source links to the same URL (fragment and trailing slash ignored): an `<a href>` in the fetched HTML of a `page-html` section, or a Markdown `[text](url)` in the verified content of a `page-md`, `llms` or `llms-full` section. `text` is that link's text in the source. Others are dropped. |
-| `pageUrl` | Kept when it is the same page as a verified `page-md` or `page-html` section (a trailing `.md`, `/index.md` or slash ignored, as the extension compares pages); otherwise the first such section's URL, or the first section's URL if there is none. |
+| Related links | Kept only when a verified source links to the same URL (fragment and trailing slash ignored): an `<a href>` in the fetched HTML of a `page-html` section, or a Markdown `[text](url)` in the verified content of a `page-md`, `llms` or `llms-full` section. Stored as that source has it: `url` is the href resolved against the source's URL with its fragment dropped, `text` is the link's text there (an anchor ends at `</a` followed by whitespace or `>`, so `</abbr>` doesn't end it). Others are dropped. |
+| `pageUrl` | The canonical URL of the verified page it names: the `page-html` (else `page-md`) section that is the same page (a trailing `.md`, `/index.md` or slash ignored, as the extension compares pages), else the first page section, else the first section. Canonical means origin and path only (a `page-md` section's trailing `.md` or `index.md` dropped) plus a `#/` client route: the client's query string and fragment are never stored. |
 
 Every value has control and format characters (Unicode `Cc`, `Cf`: zero-width, bidi overrides) replaced by spaces, whitespace collapsed to single spaces, and is cut to 300 (title), 200 (label) or 120 (link text) characters without splitting a surrogate pair. Reading titles and links must stay linear on hostile 2 MB sources (no backtracking regexes over unbounded input). The `This page: ` prefix is what the extension uses to relabel a shared skill's page as `Another page: ` when the user is on a different page.
 

@@ -7,6 +7,7 @@
 // from a URL the server didn't fetch. The same code is in server/skilltext.js.
 
 import { pageTitle, stripLinks } from '../index/chunk.ts';
+import { pageHash } from './urls.ts';
 import type { NewSkill, SectionKind } from './types.ts';
 
 export const MAX_TITLE = 300;
@@ -16,10 +17,15 @@ export const MAX_LINK_TEXT = 120;
 export const MAX_SOURCE_LINKS = 5000;
 
 // What verification read from one section's source: its title ('' for llms
-// kinds or none) and its links, keyed by linkKey, with their anchor text.
+// kinds or none) and its links, keyed by linkKey: the URL exactly as the
+// source resolved it (fragment dropped) and the link's text there.
+export interface SourceLink {
+  url: string;
+  text: string;
+}
 export interface Verified {
   title: string;
-  links: Map<string, string>;
+  links: Map<string, SourceLink>;
 }
 
 // One line of plain text: control and format characters (zero-width, bidi
@@ -38,11 +44,33 @@ export function markdownTitle(md: string): string {
 // A link's identity for matching: absolute, fragment dropped, trailing slash
 // dropped (except the root). Null for anything that isn't http(s).
 export function linkKey(href: string, base?: string): string | null {
+  return resolveLink(href, base)?.key ?? null;
+}
+
+// An href resolved against its page: the absolute URL without fragment, and its key.
+export function resolveLink(href: string, base?: string): { url: string; key: string } | null {
   let u: URL;
   try { u = new URL(href, base); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   u.hash = '';
-  return u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '');
+  return { url: u.href, key: u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '') };
+}
+
+// Records a link unless one with text is already there.
+export function addLink(links: Map<string, SourceLink>, href: string, base: string, text: () => string): void {
+  const r = resolveLink(href, base);
+  if (!r || links.get(r.key)?.text) return;
+  links.set(r.key, { url: r.url, text: text() });
+}
+
+// The URL stored as a skill's pageUrl for a verified page section: origin and
+// path only (a page-md section's trailing .md or index.md dropped, so it names
+// the page), plus a '#/' client route. No query string or plain fragment, so
+// nothing the client added to the URL is kept.
+export function canonicalPageUrl(sectionUrl: string, kind: SectionKind): string {
+  const u = new URL(sectionUrl);
+  const path = kind === 'page-md' ? u.pathname.replace(/index\.md$/, '').replace(/\.md$/, '') : u.pathname;
+  return u.origin + (path || '/') + pageHash(u.hash);
 }
 
 // The page a URL stands for, as the extension's package.js keys it: a '#/'
@@ -58,8 +86,8 @@ export function pageKey(href: string): string {
 // Markdown links [text](url) in a verified file, resolved against its URL.
 // One forward scan: a search for ']' or ')' stops at the next '[', so no
 // character is read more than twice.
-export function markdownLinks(md: string, base: string): Map<string, string> {
-  const links = new Map<string, string>();
+export function markdownLinks(md: string, base: string): Map<string, SourceLink> {
+  const links = new Map<string, SourceLink>();
   let i = md.indexOf('[');
   while (i !== -1 && i < md.length && links.size < MAX_SOURCE_LINKS) {
     let j = i + 1;
@@ -70,8 +98,7 @@ export function markdownLinks(md: string, base: string): Map<string, string> {
       if (md[k] === ')') {
         // [text](url "title"): the URL is the first word, <> allowed.
         const target = md.slice(j + 2, k).trim().split(/\s/)[0].replace(/^<|>$/g, '');
-        const key = target && linkKey(target, base);
-        if (key && !links.get(key)) links.set(key, cleanText(stripLinks(md.slice(i + 1, j)).replace(/[*_`]/g, ''), MAX_LINK_TEXT));
+        if (target) addLink(links, target, base, () => cleanText(stripLinks(md.slice(i + 1, j)).replace(/[*_`]/g, ''), MAX_LINK_TEXT));
         i = md.indexOf('[', k + 1);
         continue;
       }
@@ -95,22 +122,26 @@ export function withServerText(skill: NewSkill, verified: Verified[]): NewSkill 
   const sections = skill.sections.map((s, i) => ({ ...s, label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
   const pageTitleText = skill.sections.map((s, i) => (isPage(s.kind) ? verified[i]?.title : '')).find(Boolean);
 
-  // Related links survive only when a verified source links to them; the text is the source's.
-  const found = new Map<string, string>();
-  for (const v of verified) for (const [key, text] of v.links) if (!found.get(key)) found.set(key, text);
+  // Related links survive only when a verified source links to them; the URL
+  // and text are the source's, not the client's.
+  const found = new Map<string, SourceLink>();
+  for (const v of verified) for (const [key, link] of v.links) if (!found.get(key)?.text) found.set(key, link);
   const seen = new Set<string>();
   const relatedLinks = [];
   for (const l of skill.relatedLinks) {
     const key = linkKey(l.url);
-    if (!key || !found.has(key) || seen.has(key)) continue;
+    const link = key ? found.get(key) : undefined;
+    if (!key || !link || seen.has(key)) continue;
     seen.add(key);
-    relatedLinks.push({ url: l.url, text: found.get(key) ?? '' });
+    relatedLinks.push({ url: link.url, text: link.text });
   }
 
-  // pageUrl must be a page the skill verified; otherwise its first page section (or first section).
+  // pageUrl is the canonical URL of the verified page it names, else of the
+  // first page section; never the client's string.
   const here = pageKey(skill.pageUrl);
   const pages = skill.sections.filter((s) => isPage(s.kind));
-  const pageUrl = pages.some((s) => pageKey(s.url) === here) ? skill.pageUrl : (pages[0] ?? skill.sections[0]).url;
+  const page = pages.find((s) => pageKey(s.url) === here && s.kind === 'page-html') ?? pages.find((s) => pageKey(s.url) === here) ?? pages[0];
+  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(skill.sections[0].url, skill.sections[0].kind);
 
   return {
     ...skill,

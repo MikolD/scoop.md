@@ -4,7 +4,7 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { VerifyError, normalizeSite, siteOf, assertFetchable, verifySection } from './verify.js';
-import { withServerText } from './skilltext.js';
+import { pageHash, withServerText } from './skilltext.js';
 import { summary, publicSkill } from './store.js';
 
 const MAX_BODY = 6_000_000;
@@ -61,6 +61,22 @@ function str(v, name, max, { optional = false } = {}) {
   return v;
 }
 
+// Section URLs in canonical form: a plain fragment dropped ('#/' routes kept),
+// a query string refused when long or decoding to whitespace/control characters.
+function sectionUrl(raw, i) {
+  let u;
+  try { u = new URL(raw); } catch { throw bad(`sections[${i}].url is not a URL`); }
+  if (u.search) {
+    let decoded;
+    try { decoded = decodeURIComponent(u.search.slice(1).replace(/\+/g, ' ')); } catch { decoded = ' '; }
+    if (u.search.length > 200 || /[\s\p{Cc}\p{Cf}]/u.test(decoded)) {
+      throw bad(`sections[${i}].url has a query string that isn't a plain parameter list (at most 200 characters, no spaces or control characters)`);
+    }
+  }
+  u.hash = pageHash(u.hash);
+  return u.href;
+}
+
 function validateSkill(body, allowLocalhost) {
   const site = normalizeSite(str(body.site, 'site', 253));
   const pageUrl = str(body.pageUrl, 'pageUrl', 2048);
@@ -72,7 +88,7 @@ function validateSkill(body, allowLocalhost) {
   if (!Array.isArray(body.sections) || body.sections.length < 1 || body.sections.length > 6) throw bad('sections must have 1–6 items');
   const sections = body.sections.map((s, i) => {
     if (!s || !KINDS.has(s.kind)) throw bad(`sections[${i}].kind is invalid`);
-    const url = str(s.url, `sections[${i}].url`, 2048);
+    const url = sectionUrl(str(s.url, `sections[${i}].url`, 2048), i);
     assertFetchable(url, { allowLocalhost });
     const content = s.content ?? null;
     if (content !== null && typeof content !== 'string') throw bad(`sections[${i}].content must be a string or null`);

@@ -3,6 +3,7 @@
 
 import { ApiError, bad } from './errors.ts';
 import { assertFetchable, normalizeSite, siteOf } from './ssrf.ts';
+import { normalizePageUrl } from './urls.ts';
 import type { NewSkill, RelatedLink, Section, SectionKind } from './types.ts';
 
 export const MAX_BODY = 6_000_000;
@@ -28,6 +29,24 @@ function str(v: unknown, name: string, max: number): string {
   return v;
 }
 
+// Section URLs are stored, and reach agents, as the server's canonical form:
+// a plain fragment dropped (a '#/' client route kept, see urls.ts), and a
+// query string refused if it is long or decodes to whitespace or control
+// characters, since a query can spell out instructions as well as parameters.
+export const MAX_QUERY = 200;
+function sectionUrl(raw: string, i: number): string {
+  let u: URL;
+  try { u = new URL(raw); } catch { throw bad(`sections[${i}].url is not a URL`); }
+  if (u.search) {
+    let decoded: string;
+    try { decoded = decodeURIComponent(u.search.slice(1).replace(/\+/g, ' ')); } catch { decoded = ' '; }
+    if (u.search.length > MAX_QUERY || /[\s\p{Cc}\p{Cf}]/u.test(decoded)) {
+      throw bad(`sections[${i}].url has a query string that isn't a plain parameter list (at most ${MAX_QUERY} characters, no spaces or control characters)`);
+    }
+  }
+  return normalizePageUrl(u);
+}
+
 export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill {
   if (!isObject(body)) throw bad('Body must be a JSON object');
   const site = normalizeSite(str(body.site, 'site', 253));
@@ -44,7 +63,7 @@ export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill 
   const sections = body.sections.map((s: unknown, i): Section => {
     if (!isObject(s) || !KINDS.has(s.kind as SectionKind)) throw bad(`sections[${i}].kind is invalid`);
     const kind = s.kind as SectionKind;
-    const url = str(s.url, `sections[${i}].url`, 2048);
+    const url = sectionUrl(str(s.url, `sections[${i}].url`, 2048), i);
     assertFetchable(url, { allowLocalhost });
     if (siteOf(url) !== site) throw new ApiError('site_mismatch', `Section ${i + 1} (${url}) is not on ${site}`);
     const content = s.content ?? null;

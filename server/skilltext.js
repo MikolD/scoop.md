@@ -90,12 +90,36 @@ export function markdownTitle(md) {
   return cleanText(first, MAX_TITLE);
 }
 
-export function linkKey(href, base) {
+export function resolveLink(href, base) {
   let u;
   try { u = new URL(href, base); } catch { return null; }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') return null;
   u.hash = '';
-  return u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '');
+  return { url: u.href, key: u.pathname === '/' ? u.href : u.href.replace(/\/(?=$|\?)/, '') };
+}
+
+export const linkKey = (href, base) => resolveLink(href, base)?.key ?? null;
+
+// Links map key → { url (as the source resolved it, no fragment), text }.
+export function addLink(links, href, base, text) {
+  const r = resolveLink(href, base);
+  if (!r || links.get(r.key)?.text) return;
+  links.set(r.key, { url: r.url, text: text() });
+}
+
+// A '#/' client route (cut at '?' or a second '#', trailing slashes trimmed); '' otherwise.
+export function pageHash(hash) {
+  if (!hash.startsWith('#/')) return '';
+  const route = hash.slice(1).split(/[?#]/)[0].replace(/\/+$/, '');
+  return route ? `#${route}` : '';
+}
+
+// Origin and path of a verified page section (a page-md's .md or index.md
+// dropped) plus a client route: no query string or plain fragment.
+export function canonicalPageUrl(sectionUrl, kind) {
+  const u = new URL(sectionUrl);
+  const path = kind === 'page-md' ? u.pathname.replace(/index\.md$/, '').replace(/\.md$/, '') : u.pathname;
+  return u.origin + (path || '/') + pageHash(u.hash);
 }
 
 export function pageKey(href) {
@@ -117,8 +141,7 @@ export function markdownLinks(md, base) {
       while (k < md.length && md[k] !== ')' && md[k] !== '[') k++;
       if (md[k] === ')') {
         const target = md.slice(j + 2, k).trim().split(/\s/)[0].replace(/^<|>$/g, '');
-        const key = target && linkKey(target, base);
-        if (key && !links.get(key)) links.set(key, cleanText(stripLinks(md.slice(i + 1, j)).replace(/[*_`]/g, ''), MAX_LINK_TEXT));
+        if (target) addLink(links, target, base, () => cleanText(stripLinks(md.slice(i + 1, j)).replace(/[*_`]/g, ''), MAX_LINK_TEXT));
         i = md.indexOf('[', k + 1);
         continue;
       }
@@ -140,17 +163,19 @@ export function withServerText(skill, verified) {
   const sections = skill.sections.map((s, i) => ({ ...s, label: sectionLabel(s.kind, verified[i]?.title ?? '') }));
   const pageTitle = skill.sections.map((s, i) => (isPage(s.kind) ? verified[i]?.title : '')).find(Boolean);
   const found = new Map();
-  for (const v of verified) for (const [key, text] of v.links) if (!found.get(key)) found.set(key, text);
+  for (const v of verified) for (const [key, link] of v.links) if (!found.get(key)?.text) found.set(key, link);
   const seen = new Set();
   const relatedLinks = [];
   for (const l of skill.relatedLinks) {
     const key = linkKey(l.url);
-    if (!key || !found.has(key) || seen.has(key)) continue;
+    const link = key ? found.get(key) : undefined;
+    if (!key || !link || seen.has(key)) continue;
     seen.add(key);
-    relatedLinks.push({ url: l.url, text: found.get(key) ?? '' });
+    relatedLinks.push({ url: link.url, text: link.text });
   }
   const here = pageKey(skill.pageUrl);
   const pages = skill.sections.filter((s) => isPage(s.kind));
-  const pageUrl = pages.some((s) => pageKey(s.url) === here) ? skill.pageUrl : (pages[0] ?? skill.sections[0]).url;
+  const page = pages.find((s) => pageKey(s.url) === here && s.kind === 'page-html') ?? pages.find((s) => pageKey(s.url) === here) ?? pages[0];
+  const pageUrl = page ? canonicalPageUrl(page.url, page.kind) : canonicalPageUrl(skill.sections[0].url, skill.sections[0].kind);
   return { ...skill, pageUrl, title: cleanText(pageTitle || `${skill.site} documentation`, MAX_TITLE), sections, relatedLinks };
 }

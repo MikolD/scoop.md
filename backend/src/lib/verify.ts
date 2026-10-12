@@ -5,8 +5,8 @@
 
 import { decodeHTML } from 'entities/decode';
 import { ApiError } from './errors.ts';
-import { cleanText, linkKey, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.ts';
-import type { Verified } from './skilltext.ts';
+import { addLink, cleanText, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.ts';
+import type { SourceLink, Verified } from './skilltext.ts';
 import { assertFetchable, normalizeSite, siteOf } from './ssrf.ts';
 import type { Section } from './types.ts';
 
@@ -273,9 +273,15 @@ const MAX_ANCHOR = 2000;
 // Anchors examined per page: real docs pages have a few hundred; this bounds
 // the work on a page of nothing but '<a href=…>' tags.
 const MAX_ANCHORS = 20_000;
-export function htmlLinks(html: string, base: string): Map<string, string> {
+export function htmlLinks(html: string, base: string): Map<string, SourceLink> {
   const lower = asciiLower(html);
-  const links = new Map<string, string>();
+  const links = new Map<string, SourceLink>();
+  // The next '</a' that really closes an anchor (not '</abbr>' or '</aside>').
+  const closeFrom = (from: number) => {
+    let c = lower.indexOf('</a', from);
+    while (c !== -1 && !/[\s>]/.test(lower[c + 3] ?? '')) c = lower.indexOf('</a', c + 3);
+    return c;
+  };
   let gt = -2;
   let close = -2;
   let at = lower.indexOf('<a');
@@ -286,14 +292,15 @@ export function htmlLinks(html: string, base: string): Map<string, string> {
       examined++;
       if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
       if (gt === -1) break;
-      if (close !== -1 && close < gt) close = lower.indexOf('</a', gt);
+      if (close !== -1 && close < gt) close = closeFrom(gt);
       // Length checked before slicing: a run of '<a ' sharing one far '>' must not copy it each time.
       const m = gt - at <= MAX_TAG ? HREF.exec(html.slice(at, gt)) : null;
       const href = m && (m[1] ?? m[2] ?? m[3]);
-      const key = href && linkKey(decodeHTML(href), base);
-      if (key && !links.get(key)) {
-        const inner = close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 1 + MAX_ANCHOR));
-        links.set(key, cleanText(htmlToText(inner), MAX_LINK_TEXT));
+      if (href) {
+        addLink(links, decodeHTML(href), base, () => {
+          const inner = close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 1 + MAX_ANCHOR));
+          return cleanText(htmlToText(inner), MAX_LINK_TEXT);
+        });
       }
     }
     at = lower.indexOf('<a', at + 2);

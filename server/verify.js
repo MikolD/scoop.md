@@ -2,7 +2,7 @@
 // serves to an anonymous visitor. This is what keeps injected instructions and
 // private material out of the shared library.
 
-import { cleanText, linkKey, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.js';
+import { addLink, cleanText, markdownLinks, markdownTitle, MAX_LINK_TEXT, MAX_SOURCE_LINKS, MAX_TITLE } from './skilltext.js';
 
 export const FETCH_CAP = 2_000_000;
 export const HTML_THRESHOLD = 0.85;
@@ -308,6 +308,12 @@ const HREF = /\shref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/i;
 export function htmlLinks(html, base) {
   const lower = asciiLower(html);
   const links = new Map();
+  // The next '</a' that really closes an anchor (not '</abbr>' or '</aside>').
+  const closeFrom = (from) => {
+    let c = lower.indexOf('</a', from);
+    while (c !== -1 && !/[\s>]/.test(lower[c + 3] ?? '')) c = lower.indexOf('</a', c + 3);
+    return c;
+  };
   let gt = -2;
   let close = -2;
   let at = lower.indexOf('<a');
@@ -318,13 +324,11 @@ export function htmlLinks(html, base) {
       examined++;
       if (gt !== -1 && gt < at) gt = lower.indexOf('>', at);
       if (gt === -1) break;
-      if (close !== -1 && close < gt) close = lower.indexOf('</a', gt);
+      if (close !== -1 && close < gt) close = closeFrom(gt);
       const m = gt - at <= 4096 ? HREF.exec(html.slice(at, gt)) : null;
       const href = m && (m[1] ?? m[2] ?? m[3]);
-      const key = href && linkKey(decodeEntities(href), base);
-      if (key && !links.get(key)) {
-        const inner = close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 2001));
-        links.set(key, cleanText(htmlToText(inner), MAX_LINK_TEXT));
+      if (href) {
+        addLink(links, decodeEntities(href), base, () => cleanText(htmlToText(close === -1 ? '' : html.slice(gt + 1, Math.min(close, gt + 2001))), MAX_LINK_TEXT));
       }
     }
     at = lower.indexOf('<a', at + 2);

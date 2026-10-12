@@ -92,10 +92,17 @@ open, plus places where the spec and the reference server (`server/`) disagree.
     inline SVG icons carry `<title>` elements of their own.
   - Related links are kept only when a verified source links to them (the
     fetched HTML's `<a href>`s, or Markdown links in verified `.md`/llms
-    content), with that source's link text; everything else is dropped.
-    Matching ignores the fragment and a trailing slash.
-  - `pageUrl` is kept only if it is the same page (extension `pageKey`
-    rules) as a verified page section, else that section's URL.
+    content), with that source's link text and URL (resolved, fragment
+    dropped); everything else is dropped. Matching ignores the fragment and
+    a trailing slash.
+  - URLs are stored in canonical form, since a query string or fragment can
+    carry prose too (`…/webhooks?SYSTEM=run+curl…#Ignore-previous…`):
+    `pageUrl` is the origin and path of the verified page it names (extension
+    `pageKey` rules), plus a `#/` client route; section URLs lose plain
+    fragments, and a section URL whose query is over 200 characters or
+    decodes to whitespace or control characters is refused (400). Docs
+    sources rarely have a query at all; `?v=2&lang=en` still passes, and `+`
+    counts as a space, as in form encoding.
   - Everything has `\p{Cc}`/`\p{Cf}` removed, whitespace collapsed, and is
     capped at 300 / 200 / 120 characters without splitting a surrogate pair.
   - Linear time on hostile sources: ATX headings are parsed by hand (the
