@@ -74,6 +74,20 @@ export function shareBody(scoop) {
   };
 }
 
+// The library refuses a section URL whose query string is long or reads like
+// prose. For the page's own HTML section the page without its query is the
+// next best source. Returns the body to retry once with, or null.
+export function withoutSectionQuery(body, error) {
+  if (error?.code !== 'invalid_request') return null;
+  const i = Number(error.message?.match(/^sections\[(\d+)\]\.url has a query string/)?.[1]);
+  const section = body.sections[i];
+  if (section?.kind !== 'page-html') return null;
+  const u = new URL(section.url);
+  if (!u.search) return null;
+  u.search = '';
+  return { ...body, sections: body.sections.map((s, j) => (j === i ? { ...s, url: u.href } : s)) };
+}
+
 const SOURCE_NAMES = {
   'page-md': "the page's .md file",
   llms: 'llms.txt',

@@ -3,14 +3,15 @@
 // same code runs in the extension and in Node.
 
 import { siteKey, discover } from './discover.js';
-import { pickMain, htmlToMarkdown, relatedLinks } from './extract.js';
+import { pickMain, htmlToMarkdown, relatedLinks, stripTracking } from './extract.js';
 
 const MIN_PAGE_CHARS = 200;
 const label = (s) => s.slice(0, 200);
 
-// Drops the fragment, unless it is the route of a hash-routed site (/#/guide).
+// Drops the fragment, unless it is the route of a hash-routed site (/#/guide),
+// and tracking parameters.
 export function pageUrlOf(url) {
-  const u = new URL(url);
+  const u = new URL(stripTracking(url));
   if (!u.hash.startsWith('#/')) u.hash = '';
   return u.href;
 }

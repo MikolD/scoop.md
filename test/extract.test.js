@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DOMParser } from 'linkedom';
-import { pickMain, htmlToMarkdown, relatedLinks } from '../extension/lib/extract.js';
+import { pickMain, htmlToMarkdown, relatedLinks, stripTracking } from '../extension/lib/extract.js';
 import { containment } from '../server/verify.js';
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -95,4 +95,27 @@ test('prose fixtures pass the library\'s containment check against their own HTM
     const { ratio, count } = containment(md, html);
     assert.ok(ratio >= (count < 20 ? 1 : 0.85), `${name}: ${ratio} of ${count} shingles`);
   }
+});
+
+test('stripTracking drops utm_*, click IDs and ref, and keeps real parameters', () => {
+  assert.equal(stripTracking('https://ex.com/docs/a?utm_source=x&utm_medium=y&_gl=1&gclid=2&fbclid=3&mc_cid=4&mc_eid=5&ref=hn&ref_src=t'), 'https://ex.com/docs/a');
+  assert.equal(stripTracking('https://ex.com/docs/a?tab=js&UTM_Campaign=z&page=2#install'), 'https://ex.com/docs/a?tab=js&page=2#install');
+  assert.equal(stripTracking('https://ex.com/docs/a'), 'https://ex.com/docs/a');
+  assert.equal(stripTracking('https://ex.com/s?q=a%20b&utm_source=x'), 'https://ex.com/s?q=a%20b', 'the rest is not re-encoded');
+});
+
+test('related links keep their query (minus tracking) and drop fragments except #/ routes', () => {
+  const doc = parse(`<nav>
+    <a href="/docs/api?lang=js">API (JS)</a>
+    <a href="/docs/api?lang=py#intro">API (Python)</a>
+    <a href="/docs/api?lang=js&utm_source=nav">API again</a>
+    <a href="/docs/#/guide">Guide</a>
+    <a href="/docs/page?utm_source=x">This page</a>
+    <a href="mailto:a@ex.com">Mail</a>
+  </nav>`);
+  assert.deepEqual(relatedLinks(doc, 'https://ex.com/docs/page').map((l) => l.url), [
+    'https://ex.com/docs/api?lang=js',
+    'https://ex.com/docs/api?lang=py',
+    'https://ex.com/docs/#/guide',
+  ]);
 });

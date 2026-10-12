@@ -1,7 +1,7 @@
 import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
-import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason } from './lib/library.js';
+import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason, withoutSectionQuery } from './lib/library.js';
 
 const DEFAULTS = { share: true };
 const $ = (id) => document.getElementById(id);
@@ -141,7 +141,10 @@ async function share(scoop) {
   }
 
   note('share', 'Sharing with the library…');
-  const res = await library.share(shareBody(scoop));
+  const body = shareBody(scoop);
+  let res = await library.share(body);
+  const retry = res.ok ? null : withoutSectionQuery(body, res.error);
+  if (retry) res = await library.share(retry);
   // An unreachable library is not the user's problem: the copy already worked.
   if (res.error?.code === 'offline' || res.error?.code === 'timeout') return note('share', '');
   if (!res.ok) return note('share', `Not shared: ${notSharedReason(res.error, scoop.sections)}`, 'warn');

@@ -5,6 +5,21 @@
 // `containment`), so everything emitted here must be text the page contains:
 // no invented labels, and nothing from attributes except link targets.
 
+// Tracking parameters say how someone arrived, not which page it is. Removing
+// them keeps shared URLs canonical (and under the library's query limits).
+const TRACKING = /^(utm_.*|_gl|_ga|gclid|dclid|gbraid|wbraid|fbclid|msclkid|yclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|ref|ref_src|ref_url)$/i;
+
+export function stripTracking(url) {
+  const u = new URL(url);
+  // Filter the raw pairs: re-encoding through searchParams would change the rest.
+  const kept = u.search.slice(1).split('&').filter((pair) => {
+    const key = pair.split('=')[0];
+    try { return pair && !TRACKING.test(decodeURIComponent(key)); } catch { return true; }
+  });
+  u.search = kept.length ? `?${kept.join('&')}` : '';
+  return u.href;
+}
+
 const DROP = 'script,style,noscript,template,svg,nav,header,footer,aside,form,iframe,button,dialog,select,' +
   '[role=navigation],[role=banner],[role=contentinfo],[aria-hidden=true],' +
   // line-number gutters of code highlighters
@@ -158,15 +173,24 @@ function linkText(el) {
 
 // Links in the site's navigation that stay within the same docs section, so the
 // agent knows what else exists without us crawling it all up front.
+// A link as the library stores it: query kept (minus tracking), fragment
+// dropped unless it is a '#/' route.
+function linkUrl(u) {
+  const clean = new URL(stripTracking(u.href));
+  if (!clean.hash.startsWith('#/')) clean.hash = '';
+  return clean.href;
+}
+
 export function relatedLinks(doc, pageUrl, limit = 60) {
   const page = new URL(pageUrl);
   const prefix = '/' + (page.pathname.split('/').filter(Boolean)[0] || '');
-  const seen = new Set([page.origin + page.pathname]);
+  const seen = new Set([linkUrl(page)]);
   const links = [];
   for (const a of doc.querySelectorAll('nav a[href], aside a[href], [role=navigation] a[href]')) {
     let u;
     try { u = new URL(a.getAttribute('href'), pageUrl); } catch { continue; }
-    const key = u.origin + u.pathname;
+    if (!/^https?:$/.test(u.protocol)) continue;
+    const key = linkUrl(u);
     if (u.origin !== page.origin || !u.pathname.startsWith(prefix) || seen.has(key)) continue;
     seen.add(key);
     links.push({ url: key, text: linkText(a).trim().replace(/\s+/g, ' ').slice(0, 80) });

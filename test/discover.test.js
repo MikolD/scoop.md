@@ -101,6 +101,7 @@ test('pageUrlOf drops anchors but keeps hash routes', async () => {
   const { pageUrlOf } = await import('../extension/lib/scoop.js');
   assert.equal(pageUrlOf('https://ex.com/docs/a#install'), 'https://ex.com/docs/a');
   assert.equal(pageUrlOf('https://ex.com/#/quickstart'), 'https://ex.com/#/quickstart');
+  assert.equal(pageUrlOf('https://ex.com/docs/a?utm_source=x&tab=js#install'), 'https://ex.com/docs/a?tab=js');
 });
 
 test('local, private and link-local hosts are never shared', async () => {

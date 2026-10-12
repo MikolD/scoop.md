@@ -24,6 +24,7 @@ function listen(server) {
 before(async () => {
   docs = createServer((req, res) => {
     const text = (type, body) => { res.writeHead(200, { 'content-type': type }); res.end(body); };
+    if (req.url.startsWith('/docs/search')) return text('text/html; charset=utf-8', GUIDE.replaceAll('Widgets', 'Searches'));
     if (req.url === '/docs/guide' || req.url === '/docs/other') return text('text/html; charset=utf-8', GUIDE.replaceAll('Widgets', req.url === '/docs/other' ? 'Gadgets' : 'Widgets'));
     // A .md twin that changes on every request, as if edited mid-scoop.
     if (req.url === '/docs/flaky.md') return text('text/markdown', `# Flaky\n\nRevision ${++mdVersion} of a page that keeps changing while you read it.`);
@@ -168,4 +169,23 @@ test('store installs never share pages on localhost, even if a library would tak
   }
   assert.deepEqual(posts, []);
   assert.ok(!gets.some((u) => u.includes('/skills/best')), 'a private hostname is never sent to the library');
+});
+
+test('tracking parameters are stripped, and a query the library refuses is retried without it', async () => {
+  const realFetch = globalThis.fetch;
+  const shares = [];
+  globalThis.fetch = (url, init) => {
+    if (init?.method === 'POST' && String(url).endsWith('/skills')) shares.push(JSON.parse(init.body));
+    return realFetch(url, init);
+  };
+  try {
+    const { $ } = await openPopup(`${otherSite()}/docs/search?q=how%20to%20search&utm_source=news&fbclid=abc`);
+    assert.match($('share').textContent, /^Shared with the library/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal(shares.length, 2, 'one refusal, one retry');
+  assert.equal(shares[0].sections[0].url, `${otherSite()}/docs/search?q=how%20to%20search`, 'tracking parameters gone');
+  assert.equal(shares[0].pageUrl, `${otherSite()}/docs/search?q=how%20to%20search`);
+  assert.equal(shares[1].sections[0].url, `${otherSite()}/docs/search`, 'retried without the query');
 });

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DOMParser } from 'linkedom';
-import { createLibrary, shareBody, notSharedReason, libraryUrl, DEFAULT_LIBRARY, BEST_TIMEOUT_MS } from '../extension/lib/library.js';
+import { createLibrary, shareBody, notSharedReason, libraryUrl, DEFAULT_LIBRARY, BEST_TIMEOUT_MS, withoutSectionQuery } from '../extension/lib/library.js';
 import { scoopPage } from '../extension/lib/scoop.js';
 
 const ID = '3b1f2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -91,4 +91,23 @@ test('the library URL is fixed; only unpacked installs honour devLibraryUrl', as
   for (const store of ['normal', 'admin', 'sideload', 'other', null]) {
     assert.equal(await libraryUrl(fake(store, dev)), DEFAULT_LIBRARY, String(store));
   }
+});
+
+test('a refused section query is retried once, only for the page-html section', () => {
+  const body = {
+    site: 'ex.com',
+    sections: [
+      { kind: 'page-html', url: 'https://ex.com/docs/search?q=a%20b', content: 'x' },
+      { kind: 'llms', url: 'https://ex.com/llms.txt?v=1%202', content: 'y' },
+    ],
+  };
+  const refused = (i) => ({ code: 'invalid_request', message: `sections[${i}].url has a query string that isn't a plain parameter list (at most 200 characters, no spaces or control characters)` });
+  const retry = withoutSectionQuery(body, refused(0));
+  assert.equal(retry.sections[0].url, 'https://ex.com/docs/search');
+  assert.equal(retry.sections[1], body.sections[1]);
+  assert.equal(body.sections[0].url, 'https://ex.com/docs/search?q=a%20b', 'original untouched');
+  assert.equal(withoutSectionQuery(body, refused(1)), null, 'not the page-html section');
+  assert.equal(withoutSectionQuery(retry, refused(0)), null, 'no query left to drop');
+  assert.equal(withoutSectionQuery(body, { code: 'invalid_request', message: 'sections[0].url is not a URL' }), null);
+  assert.equal(withoutSectionQuery(body, { code: 'source_mismatch', message: 'Section 1 …' }), null);
 });
