@@ -855,7 +855,8 @@ function renderHits() {
     path.textContent = h.heading_path || '';
     const snippet = document.createElement('span');
     snippet.className = 'hit-snippet';
-    snippet.textContent = h.snippet || '';
+    // Snippets come as Markdown: headings' # marks are left out.
+    snippet.textContent = (h.snippet || '').replace(/(^|\s)#{1,6}\s+/g, '$1');
     label.append(title, path, snippet);
     li.append(box, label);
     list.append(li);

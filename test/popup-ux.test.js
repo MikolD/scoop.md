@@ -1330,3 +1330,13 @@ test('docs entry point: site-relative links in the llms.txt become absolute; a .
     assert.ok(!p.clipboard.text.includes('"@context"'), 'no front matter');
   });
 });
+
+test('search snippets drop Markdown heading marks', () => withMock({ sites: { [SITE]: { indexed: true, hits: [{ id: 'c1', url: `https://${SITE}/docs/a`, title: 'A', heading_path: 'A > B', snippet: '#### Verify manually ### Verify webhook signatures manually' }] } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-search').onclick();
+  p.$('search-q').value = 'verify';
+  p.$('search-q').oninput();
+  await waitFor(() => p.document.querySelector('.hit-snippet'));
+  assert.equal(p.document.querySelector('.hit-snippet').textContent, 'Verify manually Verify webhook signatures manually');
+}));
