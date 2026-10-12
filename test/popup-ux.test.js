@@ -936,3 +936,27 @@ test('the index package: the llms line and instructions shown from the package i
   assert.equal(p.$('instructions-list').children.length, 1);
   assert.equal(p.$('instructions-list').querySelector('a').getAttribute('href'), 'https://docs.example.com/agents');
 }));
+
+test('not developer docs: never shared, never sent for crawling, and the note says why', () => withMock({
+  sites: { [SITE]: { quickDevDocs: { verdict: 'no', method: 'gate', score: 0.1 } } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  await sleep(50);
+  assert.equal(p.$('devdocs').dataset.state, 'no');
+  assert.match(p.clipboard.text, /^# Guide \(docs\.example\.com, via scoop\.md\)$/m, 'still copied');
+  assert.equal(posts('/v1/skills').length, 0, 'not shared');
+  assert.equal(posts('/v1/crawl-requests').length, 0, 'no crawl request, though the site is new');
+  assert.equal(p.$('share').textContent, 'Not shared: scoop.md only shares developer docs.');
+  assert.deepEqual(queued(p.local, 'share_result').map((r) => [r.outcome, r.reason]), [['not_shared', 'not_devdocs']]);
+  assert.equal(p.$('crawl-note').textContent, '');
+}));
+
+test('developer docs on a new site: shared and sent for crawling as before', () => withMock({
+  sites: { [SITE]: { hold: true, quickDevDocs: { verdict: 'yes', method: 'classifier', score: 0.9 } } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  await waitFor(() => posts('/v1/crawl-requests').length === 1);
+  assert.equal(posts('/v1/skills').length, 1);
+}));

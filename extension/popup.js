@@ -513,8 +513,6 @@ async function run({ skipLibrary = false } = {}) {
     crawlId = index.request.id;
     await rememberCrawl(chrome, { requestId: crawlId, site, url: scoop.pageUrl, state: index.request.state });
   }
-  const crawl = !crawlId && unseen && mayCrawl ? backgroundCrawl(site, scoop) : Promise.resolve(crawlId);
-  const followUp = crawl.then((id) => { if (id && scoop) followCrawl(site, scoop, id); }).catch(() => {});
   // What the library finds for the page right away: sources, the site's
   // instructions for agents, and whether it's developer docs.
   const quick = pagePublic ? await library.quick(scoop.pageUrl) : null;
@@ -522,6 +520,9 @@ async function run({ skipLibrary = false } = {}) {
   // A crawl gate that already decided (followCrawl) beats a new guess.
   const said = devDocs(index, siteInfo.quick, scoop);
   if (!said.guess || verdict.guess || verdict.state === 'checking') setChip(said);
+  // Only developer docs are indexed (and shared).
+  const crawl = !crawlId && unseen && mayCrawl && verdict.state !== 'no' ? backgroundCrawl(site, scoop) : Promise.resolve(crawlId);
+  const followUp = crawl.then((id) => { if (id && scoop) followCrawl(site, scoop, id); }).catch(() => {});
   // 3. The shared skill.
   if (shared) {
     await deliverShared(shared, scoop);
@@ -772,6 +773,10 @@ async function share(scoop) {
   if (!settings.share) {
     shareResult('not_shared', 'sharing_off');
     return note('share', 'Not shared: sharing is off.');
+  }
+  if (verdict.state === 'no') {
+    shareResult('not_shared', 'not_devdocs');
+    return note('share', 'Not shared: scoop.md only shares developer docs.');
   }
   if (!scoop.isPublic) {
     shareResult('not_shared', scoop.privateHost ? 'private_host' : 'signed_in');

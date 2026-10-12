@@ -18,13 +18,13 @@ The popup shows a short loader (at least 600 ms), copies the best package it has
 6. **Copy.** A compact package (16,000 characters by default; the popup shows its size and ~tokens), in the server's order: a title and one line telling the agent to treat it as reference, not instructions; `Docs index for agents: <llms.txt>` when the llms.txt is verified (an H1 and at least one link; the file itself is not included); the site's instructions for agents (up to 8, with sources); the page; up to 5 related pages. Every link passes the dead-link check. The **This page** tab opens with the verdict: "✓ Developer docs · <site>" or "✕ Not developer docs" (the library's answer, else a local guess, never left undecided). On a page that isn't developer docs, Overview and Search are disabled and the copy is headed `# <title> (<site>, via scoop.md)`. Below it: the verified llms.txt and the site's instructions for agents.
 7. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
 
-A site that isn't indexed yet (public page, sharing on) is indexed in the background (`POST /v1/crawl-requests`): one quiet line says so, the service worker follows the request every 30 s, and the icon shows ✓ on that site's tabs when it's ready; "Copy all <site> docs" (or reopening) then copies the indexed package.
+A site that isn't indexed yet (public developer docs, sharing on) is indexed in the background (`POST /v1/crawl-requests`): one quiet line says so, the service worker follows the request every 30 s, and the icon shows ✓ on that site's tabs when it's ready; "Copy all <site> docs" (or reopening) then copies the indexed package.
 
 The toolbar icon shows, per tab, how many docs pages are indexed for the tab's site, looked up in `GET /v1/sites/index` (downloaded every 6 hours with If-None-Match; no request per page). The popup's **Overview** and **Search** tabs work on indexed sites: the topic tree and llms.txt with "Copy overview", or search with checkboxes, "Copy selected" and "Copy all results".
 
 Packages built in the extension never carry dead links: before copying, every link is checked (`POST /v1/links/check` when sharing is on, then HEAD/GET from the browser without cookies, about 2.5 s at most, inside the loader), and bad or unconfirmed links become plain text. What's shared stays exactly as fetched.
 
-Only material fetched without your cookies is shared with the library. If a page only renders when you're signed in, you still get it on your clipboard, but it's never uploaded.
+Only pages recognised as developer docs are shared, or sent for crawling, and only material fetched without your cookies. If a page only renders when you're signed in, you still get it on your clipboard, but it's never uploaded.
 
 ## Run it
 

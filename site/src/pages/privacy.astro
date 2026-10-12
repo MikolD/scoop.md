@@ -18,7 +18,7 @@ const events = [
   ['tab_switch', 'You switched between the This page, Overview and Search tabs: which tab.'],
   ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
   ['badge_count_shown', 'Once an hour at most: how many times the toolbar showed a docs count. One number, no sites or pages.'],
-  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, signed-in page, the library refused it).'],
+  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
   ['vote, report', "You voted or reported: the hostname and path (public docs pages only), the scoop's ID, your vote or reason."],
   ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
   ['telemetry_opt_out, telemetry_opt_in', 'You switched usage statistics off or on.'],
@@ -42,7 +42,7 @@ const events = [
     <ul>
       <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show how many docs are indexed for a site on its icon, it compares each tab's site with a list of indexed sites downloaded to your device; that check never leaves your device.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
+      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
       <li>
         Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
         path of public docs pages you scoop. The extension says so the first time you open it, with a button to turn
@@ -116,7 +116,7 @@ const events = [
       you're on is looked up in that list on your device. Pages on your computer or a private network are never looked
       up.
     </p>
-    <h3>When a docs site isn't indexed yet, sharing is on and the page is public</h3>
+    <h3>When a docs site isn't indexed yet, sharing is on and the page is public developer docs</h3>
     <p>
       A crawl request: the page's address (without tracking parameters) and your install ID go to
       <code>api.scoop.md/v1/crawl-requests</code>. The library then reads that site's public docs itself, without your
@@ -124,7 +124,7 @@ const events = [
       that request every 5 seconds while the popup is open, or every 30 seconds after you close it (the request ID is kept
       on your device until it finishes).
     </p>
-    <h3>When sharing is on and the material was fetched without cookies</h3>
+    <h3>When sharing is on, the page is recognised as developer docs and the material was fetched without cookies</h3>
     <ul>
       <li>The public documentation sections in the package, and the URL each came from.</li>
       <li>The page's address and title.</li>
@@ -132,7 +132,8 @@ const events = [
       <li>Your install ID.</li>
     </ul>
     <p>
-      If any part of the package came from your signed-in view of the page, nothing is shared. The library then
+      Only pages recognised as developer docs are shared; for any other page, nothing is shared and no crawl is
+      requested. If any part of the package came from your signed-in view of the page, nothing is shared. The library then
       re-fetches every source itself, without cookies, and rejects anything that doesn't match what the site serves
       publicly.
     </p>
