@@ -209,7 +209,7 @@ Request: `{ "url": "<the page the user is on>" }` (≤ 1024 chars). Requires `X-
 - Every answered request is recorded (install ID only as an HMAC) and kept 90 days.
 
 #### `GET /v1/crawl-requests/:id`
-Public; the ID (`rq_` + ULID, 80 random bits) is the capability. 404 if unknown.
+Public, no auth. The ID is `rq_` + a ULID (48-bit timestamp + 80 random bits), so IDs can't practically be enumerated; whoever holds one can read that request's progress (site, counts, state) and nothing else. 404 if unknown.
 
 ```json
 { "id": "rq_…", "site": "developers.cloudflare.com", "state": "indexing", "phase": "index",

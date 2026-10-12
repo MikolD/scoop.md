@@ -20,7 +20,7 @@ import type { Env } from '../env.ts';
 import { addCost, capsReached } from '../index/indexer.ts';
 import { indexDeps } from '../index/deps.ts';
 import { gateSite, GateUndecided, listVerdict } from './gate.ts';
-import { ondemandShare } from './requests.ts';
+import { ondemandShare, startWaiting } from './requests.ts';
 import type { GateVerdict } from './gate.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
@@ -70,6 +70,20 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
     const flush = (name: string) =>
       step.do(name, NET, () => store().flushIndex(p.site, (batch) => send(env, batch)));
 
+    // At every end of the run: a crawl request waiting for another scope of
+    // this site (src/crawl/requests.ts) starts now that the site is free.
+    // Safe to repeat: it starts nothing while any crawl of the site is active.
+    // It never throws: a failure here must not turn a finished run into a
+    // failed one; the hourly cron (startAllWaiting) catches anything missed.
+    const startNext = () =>
+      step.do('start-waiting', NET, async () => {
+        try {
+          await startWaiting({ db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE }, p.site);
+        } catch (e) {
+          console.error(JSON.stringify({ step: 'start-waiting', site: p.site, error: e instanceof Error ? e.message : String(e) }));
+        }
+      });
+
     // Set when the gate could not decide: the run fails, the site's status stays.
     let undecided = false;
     try {
@@ -91,6 +105,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           await store().updateRun(p.runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'site unreachable (robots.txt unavailable)' });
           await store().endCrawl(p.site);
         });
+        await startNext();
         return { runId: p.runId, unreachable: true };
       }
 
@@ -116,7 +131,10 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         }
         // Signal counts stay in the step output; the run and profile get the verdict.
         await step.do('gate-record', DB, () => store().recordGate(p.runId, p.site, { ...gate, signals: undefined }));
-        if (gate.decision === 'reject') return { runId: p.runId, rejected: true, category: gate.category, reason: gate.reason };
+        if (gate.decision === 'reject') {
+          await startNext();
+          return { runId: p.runId, rejected: true, category: gate.category, reason: gate.reason };
+        }
       }
 
       const d: DiscoverySummary = await step.do('discover', NET, async () => {
@@ -266,6 +284,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         await store().updateRun(p.runId, { status: 'complete', finished_at: now, phase: 'done' });
         await store().finishCrawl(p.site, path === 'blocked' ? 'blocked' : path === 'none' ? 'empty' : 'ready');
       });
+      await startNext();
       return { runId: p.runId, path };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -277,6 +296,8 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         else await store().failCrawl(p.site);
         await cleanup(env, p.runId).catch(() => {});
       });
+      // The site is free again whatever went wrong.
+      await startNext();
       throw e;
     }
   }

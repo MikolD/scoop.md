@@ -405,6 +405,21 @@ const routes: Route[] = [
       const site = siteArg(params[0]);
       const active = await env.DB.prepare(`SELECT id FROM crawl_runs WHERE site = ? AND status IN ('queued', 'running')`).bind(site).first<{ id: string }>();
       if (active) throw new ApiError('conflict', `Cancel the running crawl first (${active.id})`, 409);
+      // Pages still on their way to the index (the outbox, or a crawl that
+      // finished in the last 30 minutes with pages not yet indexed) would land
+      // after the purge; the indexer skips them, but wait for them anyway.
+      const since = new Date(Date.now() - 30 * 60_000).toISOString();
+      const indexing = await env.DB
+        .prepare(
+          `SELECT (SELECT COUNT(*) FROM pages WHERE site = ?1 AND index_pending = 1) AS pending,
+                  (SELECT COUNT(*) FROM crawl_runs WHERE site = ?1 AND status = 'complete' AND costs_tracked = 1
+                     AND pages_indexed < pages_new + pages_changed AND finished_at > ?2) AS indexing`,
+        )
+        .bind(site, since)
+        .first<{ pending: number; indexing: number }>();
+      if (indexing && (indexing.pending > 0 || indexing.indexing > 0)) {
+        throw new ApiError('conflict', 'Pages of this site are still being indexed; try again in a few minutes', 409);
+      }
       if (!(await crawlStore(env).rejectSite(site))) throw notFound('No profile for this site');
       const purged = await purgeSiteIndex(env.DB, env.VECTORS, site);
       return json(200, { site, status: 'not_devtool', purged });

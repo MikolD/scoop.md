@@ -76,7 +76,8 @@ test('CrawlSite: a site the gate rejects ends the run before discovery; no page 
     { 'https://sheepish.example/': shopPage },
   );
   assert.deepEqual(out, { runId: 'cr_shop', rejected: true, category: 'ecommerce', reason: (await store.getRun('cr_shop'))!.gate_reason });
-  assert.deepEqual(steps, ['start', 'robots', 'gate', 'gate-record']);
+  // A rejected run still frees the site for a waiting crawl request.
+  assert.deepEqual(steps, ['start', 'robots', 'gate', 'gate-record', 'start-waiting']);
   // robots.txt, the start page and two llms.txt probes; no sitemap, no pages.
   assert.deepEqual(requests, [
     'https://sheepish.example/robots.txt',

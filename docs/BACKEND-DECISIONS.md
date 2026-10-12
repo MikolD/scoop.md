@@ -975,7 +975,8 @@ What a crawl costs, so the average per crawl and per page is known over time.
 `src/crawl/requests.ts`, migration `0008_crawl_requests.sql`, spec in
 BACKEND.md §5 "Crawl requests".
 
-- **Two-phase counting, starts only** (review H1, L5). Rejections (denylist,
+- **Two-phase counting, starts only** (review H1, L5; counts are also given
+  back when creating the Workflow throws). Rejections (denylist,
   `not_devtool`), joins and recent answers count nothing. Otherwise the
   per-install and per-IP daily counters are bumped and checked first; only
   when both pass is the global counter bumped, and if that goes over
@@ -1009,6 +1010,13 @@ BACKEND.md §5 "Crawl requests".
   request waiting for that scope at it. A waiting request older than 6 hours
   is `failed` ("busy, try again later"). A lost start race with nothing
   running falls back to the scope's (or site's) last complete crawl (L3).
+  Waiting scopes are also started without anyone polling: every end of a
+  CrawlSite run (finish, fail, gate rejection, unreachable host) runs a
+  `start-waiting` step, which never throws (a failure there must not turn a
+  finished run into a failed one), and the hourly cron sweeps every site with
+  a fresh waiting request (`startAllWaiting`). All three paths call the same
+  repeat-safe `startWaiting`, which does nothing while any crawl of the site
+  is active.
 - **Checks run cheapest first**: the gate's lists (a denylisted site is
   rejected before anything is counted), then `not_devtool`, scope join and
   cooldown, then the spend share, then the counters (review M3).
@@ -1026,13 +1034,26 @@ BACKEND.md §5 "Crawl requests".
   its cap reached, fails the run as busy). A site first seen through a
   request gets `source = 'requested'` and `approved = 0` (`1` when
   allowlisted); an existing profile keeps its source and approval. Unapproved
-  sites serve their own endpoints but are filtered out of `/v1/search`
-  without `site` (a post-filter on the fused hits). Admin: Approve (sets
+  sites serve their own endpoints but are left out of `/v1/search` without
+  `site` in the candidate queries themselves (FTS: `c.site NOT IN (SELECT site
+  FROM site_profiles WHERE approved = 0)`; Vectorize: `site: { $nin: [...] }`
+  on the existing site metadata index, for up to 100 such sites), so a flood
+  of unapproved chunks can't crowd approved ones out of the top 50; the fused
+  hits are filtered again (and alone past 100 unapproved sites). Admin: Approve (sets
   `approved`) and Reject (status `not_devtool`, gate method `admin`, and the
   site's chunks, vectors, entities, topics, page_index rows and page rows
   deleted; refused with 409 while a crawl of it runs; R2 Markdown, which is
-  content-addressed and may be shared, stays). The Overview shows the
-  pending count; Sites has a "pending" filter.
+  content-addressed and may be shared, stays). Reject is also refused while
+  the site has pages in the outbox or a crawl that finished in the last 30
+  minutes still has pages to index. Messages that arrive late anyway are
+  acked and skipped by the indexer: any message for a `not_devtool` site, and
+  a crawl's message (`runId` `cr_…`) whose `(url, content_hash)` has no
+  `pages` row (purged, or the page changed since). Manual and reclassify
+  messages need no `pages` row. The Overview shows the pending count; Sites
+  has a "pending" filter.
+- **Request IDs** are `rq_` + a ULID (48-bit timestamp + 80 random bits):
+  not enumerable in practice. `GET /v1/crawl-requests/:id` needs no auth and
+  shows only that request's progress, so holding the ID is enough.
 - **Public reasons** (M1). A failed request's `reason` is one of three fixed
   strings (`crawl failed`, `this site needs a browser and that's unavailable
   right now`, `busy, try again later`), chosen from the run's error; the

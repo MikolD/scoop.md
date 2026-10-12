@@ -54,6 +54,12 @@ function setup(results: (Classified | null)[] = []) {
   const put = async (url: string, md: string, runId?: string): Promise<IndexMessage> => {
     const contentHash = await sha256Hex(md);
     objects.set(pageKey(contentHash), md);
+    // A crawl stores the page row before queueing it (the indexer skips crawl messages without one).
+    if (runId?.startsWith('cr_')) {
+      raw.prepare(`INSERT INTO pages (url, site, source_url, source_kind, content_hash, bytes, fetched_at, changed_at, run_id)
+        VALUES (?1, 'docs.stripe.com', ?1, 'page-md', ?2, ?3, 'x', 'x', ?4) ON CONFLICT (url) DO UPDATE SET content_hash = excluded.content_hash`)
+        .run(url, contentHash, md.length, runId);
+    }
     return { site: 'docs.stripe.com', url, contentHash, ...(runId ? { runId } : {}) };
   };
   const run = () => raw.prepare('SELECT classify_cost_usd, embed_cost_usd, pages_indexed FROM crawl_runs WHERE id = ?').get(RUN) as { classify_cost_usd: number; embed_cost_usd: number; pages_indexed: number };

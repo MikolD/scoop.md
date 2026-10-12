@@ -14,8 +14,9 @@ import { CrawlStore } from '../src/db/crawl.ts';
 import type { CrawlRunRow } from '../src/db/crawl.ts';
 import { dailyCount } from '../src/db/ratelimit.ts';
 import { search } from '../src/search/search.ts';
+import { indexPage } from '../src/index/indexer.ts';
 import {
-  LIMIT_BUCKETS, PUBLIC_REASONS, pruneCrawlRequests, REQUEST_RETENTION_DAYS, publicReason, requestIpSubject, requestView, scopeKey, startWaiting,
+  LIMIT_BUCKETS, PUBLIC_REASONS, pruneCrawlRequests, REQUEST_RETENTION_DAYS, startAllWaiting, publicReason, requestIpSubject, requestView, scopeKey, startWaiting,
   COOLDOWN_DAYS, etaSeconds, REQUEST_LIMITS, REQUEST_MAX_MINUTES, REQUEST_MAX_PAGES, requestCrawl, siteStatus, startUrlFor, viewOf,
 } from '../src/crawl/requests.ts';
 import type { RequestDeps } from '../src/crawl/requests.ts';
@@ -459,7 +460,8 @@ test('the Workflow writes its phase at step boundaries (gate → discover → fe
   }
   assert.equal(phases[0], 'start:discover'); // forced: no gate
   assert.ok(phases.includes('profile:fetch'), phases.join(' '));
-  assert.equal(phases.at(-1), 'finish:done');
+  assert.ok(phases.includes('finish:done'), phases.join(' '));
+  assert.equal(phases.at(-1), 'start-waiting:done'); // every end frees the site for a waiting request
   // Without force the first phase is the gate.
   await store.createRun('cr_G', 'gated.example.dev', 'https://gated.example.dev/');
   const s2 = { do: async (_: string, a: unknown, b?: unknown) => ((b ?? a) as () => Promise<unknown>)() };
@@ -821,4 +823,105 @@ test('L2: crawl requests (page addresses: browsing interest) are deleted after 9
   assert.equal(REQUEST_RETENTION_DAYS, 90);
   assert.equal(await pruneCrawlRequests(d.db, new Date(T0.getTime() + 91 * DAY)), 1);
   assert.deepEqual(raw.prepare('SELECT site FROM crawl_requests').all().map((r) => (r as { site: string }).site), ['new.example.dev']);
+});
+
+// ---- Re-review fixes (N1-N3, LOWs) ---------------------------------------------
+
+test('N1: when a crawl of the site ends, the Workflow starts the scope waiting behind it; the hourly cron sweeps any missed', async () => {
+  const { CrawlSite } = await import('../src/crawl/workflow.ts');
+  const { d, created, store, raw } = deps();
+  // /d1/ is crawling; a request for /workers/ waits.
+  const first = await ask({ ...d, now: new Date() }, 'https://docs.example.dev/d1/a/');
+  const waiting = await ask({ ...d, now: new Date() }, 'https://docs.example.dev/workers/a/');
+  assert.equal(waiting.outcome, 'waiting');
+  const runId = (raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(first.body.id) as { run_id: string }).run_id;
+  // Run the /d1/ crawl's Workflow to its end (a robots.txt that disallows all: blocked, done).
+  const e = {
+    DB: d.db, SKILLS: d.bucket, CRAWL: { ...fakeR2().r2, list: async () => ({ objects: [], truncated: false }) },
+    CRAWL_SITE: d.workflow, INDEX_QUEUE: { sendBatch: async () => {} }, ENVIRONMENT: 'dev',
+  } as unknown as Env;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = String(input instanceof Request ? input.url : input);
+    return url.endsWith('/robots.txt') ? new Response('User-agent: *\nDisallow: /', { headers: { 'content-type': 'text/plain' } }) : new Response('nope', { status: 404 });
+  }) as typeof fetch;
+  try {
+    await new CrawlSite({} as ExecutionContext, e).run(
+      { payload: { ...(created[0].params as object), force: true }, timestamp: new Date(), instanceId: runId } as never,
+      { do: async (_: string, a: unknown, b?: unknown) => ((b ?? a) as () => Promise<unknown>)(), sleep: async () => {} } as never,
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal((await store.getRun(runId))!.status, 'complete');
+  assert.equal(created.length, 2, 'the waiting scope started without anyone polling');
+  assert.equal((created[1].params as { startUrl: string }).startUrl, 'https://docs.example.dev/workers/');
+  assert.equal((raw.prepare('SELECT state FROM crawl_requests WHERE id = ?').get(waiting.body.id) as { state: string }).state, 'started');
+
+  // The cron sweep: a waiting request whose site is free gets its crawl.
+  const cron = deps();
+  const a = await ask({ ...cron.d, now: new Date() }, 'https://cron.example.dev/one/x/');
+  await ask({ ...cron.d, now: new Date() }, 'https://cron.example.dev/two/x/');
+  const aRun = (cron.raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(a.body.id) as { run_id: string }).run_id;
+  await cron.store.updateRun(aRun, { status: 'failed', finished_at: new Date().toISOString() });
+  assert.equal(await startAllWaiting(cron.d), 1);
+  assert.equal(cron.created.length, 2);
+  assert.equal(await startAllWaiting(cron.d), 0); // nothing left waiting
+});
+
+test('N2: unapproved sites are left out of the candidate queries, not only the results', async () => {
+  const { d1, raw } = fakeD1();
+  const store = new CrawlStore(d1, fakeR2().r2);
+  await store.beginCrawl('flood.example.dev', T0, { approved: false });
+  const chunk = raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES (?, ?, ?, 0, 'T', 'T', ?)`);
+  // 60 unapproved chunks that match better than the one approved chunk.
+  for (let i = 0; i < 60; i++) chunk.run(`f${i}`, `https://flood.example.dev/p${i}`, 'flood.example.dev', 'webhook signatures webhook signatures webhook signatures');
+  chunk.run('ok', 'https://good.example.dev/a', 'good.example.dev', 'webhook signatures and other things to read about');
+  let filter: unknown = null;
+  const vectors = { query: async (_v: number[], o: { filter: unknown }) => { filter = o.filter; return { matches: [] }; } } as never;
+  const embed = async () => [[0.1, 0.2]];
+  const hits = await search({ db: d1, vectors, embed }, { q: 'webhook signatures', limit: 10 });
+  assert.deepEqual(hits.map((h) => h.url), ['https://good.example.dev/a']);
+  assert.deepEqual(filter, { site: { $nin: ['flood.example.dev'] } });
+  // A site-scoped search uses the site filter and finds its own chunks.
+  const own = await search({ db: d1, vectors, embed }, { q: 'webhook signatures', site: 'flood.example.dev', limit: 10 });
+  assert.equal(own.length, 10);
+  assert.deepEqual(filter, { site: 'flood.example.dev' });
+});
+
+test('N3: the indexer acks and skips late messages for a rejected site or a crawl page that is gone; reject waits for pending work', async () => {
+  const { d1 } = fakeD1();
+  const store = new CrawlStore(d1, fakeR2().r2);
+  const deps0 = { db: d1 } as never;
+  await store.beginCrawl('gone.example.dev', T0);
+  await store.rejectSite('gone.example.dev', T0);
+  assert.deepEqual(await indexPage(deps0, { site: 'gone.example.dev', url: 'https://gone.example.dev/a', contentHash: 'a'.repeat(64), runId: 'cr_X' }), { status: 'skipped', reason: 'not_devtool' });
+  assert.deepEqual(await indexPage(deps0, { site: 'gone.example.dev', url: 'https://gone.example.dev/a', contentHash: 'a'.repeat(64) }), { status: 'skipped', reason: 'not_devtool' });
+  assert.deepEqual(await indexPage(deps0, { site: 'live.example.dev', url: 'https://live.example.dev/a', contentHash: 'b'.repeat(64), runId: 'cr_Y' }), { status: 'skipped', reason: 'no_page' });
+
+  // The reject route: 409 while the site has pages in the outbox.
+  const { env: e, raw } = env();
+  const s2 = new CrawlStore(e.DB, e.SKILLS);
+  await s2.beginCrawl('busy.example.dev', T0, { approved: false });
+  raw.prepare(`INSERT INTO pages (url, site, source_url, source_kind, content_hash, bytes, fetched_at, changed_at, run_id, index_pending) VALUES ('https://busy.example.dev/a', 'busy.example.dev', 'x', 'page-md', 'h', 1, 'x', 'x', 'r', 1)`).run();
+  const basic = `Basic ${Buffer.from('admin:correct horse battery staple, twice over').toString('base64')}`;
+  const reject = async () => {
+    const req = new Request('https://admin.scoop.md/api/sites/busy.example.dev/reject', { method: 'POST', headers: { authorization: basic, origin: 'https://admin.scoop.md', 'sec-fetch-site': 'same-origin' } });
+    return (await handleAdmin(req, e, new URL(req.url), '203.0.113.7')).status;
+  };
+  assert.equal(await reject(), 409);
+  raw.prepare(`UPDATE pages SET index_pending = 0`).run();
+  assert.equal(await reject(), 200);
+});
+
+test('LOWs: counts are given back when the Workflow cannot be created; "rate" alone is not a rate limit', async () => {
+  const { d } = deps({ workflow: { create: async () => { throw new Error('workflows unavailable'); } } as never });
+  const install = randomUUID();
+  await assert.rejects(ask(d, 'https://boom.example.dev/', install), /workflows unavailable/);
+  assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.install, install, T0.getTime()), 0);
+  assert.equal(await globalCount(d), 0);
+  assert.equal(publicReason('could not generate the plan'), PUBLIC_REASONS.failed);
+  assert.equal(publicReason('accurate rates table missing'), PUBLIC_REASONS.failed);
+  assert.equal(publicReason('upstream rate-limited us (429)'), PUBLIC_REASONS.busy);
+  assert.equal(publicReason('rate_limit exceeded'), PUBLIC_REASONS.busy);
 });

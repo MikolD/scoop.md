@@ -112,7 +112,7 @@ export function etaSeconds(state: RequestState, phase: Phase, found: number, sto
 export function publicReason(error: string | null): string {
   const e = error ?? '';
   if (/E2B|browser|sandbox/i.test(e)) return PUBLIC_REASONS.browser;
-  if (/cap\b|cap reached|budget|busy|undecided|devtool gate|OpenRouter|rate/i.test(e)) return PUBLIC_REASONS.busy;
+  if (/cap\b|cap reached|budget|busy|undecided|devtool gate|OpenRouter|\brate[_ -]?limit/i.test(e)) return PUBLIC_REASONS.busy;
   return PUBLIC_REASONS.failed;
 }
 
@@ -331,7 +331,14 @@ export async function requestCrawl(d: RequestDeps, input: RequestInput): Promise
 
   // Another scope of the site is crawling: this one starts after it.
   if (running) return queued('waiting', null);
-  const runId = await startCrawl(d, requestedCrawl(input.site, scope, input.pageUrl));
+  let runId: string | null;
+  try {
+    runId = await startCrawl(d, requestedCrawl(input.site, scope, input.pageUrl));
+  } catch (e) {
+    // The Workflow couldn't be created: nothing started, so nothing is counted.
+    await giveBack(true);
+    throw e;
+  }
   if (runId) return queued('started', await store.getRun(runId));
 
   // Lost a race: another crawl of the site started in between.
@@ -451,4 +458,17 @@ export async function pruneCrawlRequests(db: D1Database, now = new Date()): Prom
   const before = new Date(now.getTime() - REQUEST_RETENTION_DAYS * DAY_MS).toISOString();
   const r = await db.prepare('DELETE FROM crawl_requests WHERE created_at < ?').bind(before).run();
   return r.meta.changes ?? 0;
+}
+
+// The hourly cron's sweep: every site with a fresh waiting request gets
+// startWaiting (a Workflow that ended without reaching its own call, or a
+// waiting request nobody polls).
+export async function startAllWaiting(d: StartDeps, now = new Date()): Promise<number> {
+  const since = new Date(now.getTime() - STALE_RUN_HOURS * 3_600_000).toISOString();
+  const { results } = await d.db
+    .prepare(`SELECT DISTINCT site FROM crawl_requests WHERE state = 'waiting' AND created_at > ? LIMIT 100`)
+    .bind(since)
+    .all<{ site: string }>();
+  for (const { site } of results) await startWaiting(d, site, now).catch(() => {});
+  return results.length;
 }
