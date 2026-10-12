@@ -5,13 +5,15 @@
 
 import { classify, contentHash, pageKey } from '../crawl/changes.ts';
 import type { PrevPage } from '../crawl/changes.ts';
+import type { GateVerdict } from '../crawl/gate.ts';
 import type { FetchedSource } from '../crawl/site.ts';
 import type { IndexMessage } from '../index/indexer.ts';
 
 export interface SiteProfileRow {
   site: string;
-  // Outcome of the last finished crawl: new | ready | empty | blocked | failed.
-  // Changes only in finishCrawl/failCrawl (migrations/0004_crawl_state.sql).
+  // Outcome of the last finished crawl: new | ready | empty | blocked | failed
+  // | not_devtool. Changes only in finishCrawl/failCrawl/recordGate
+  // (migrations/0004_crawl_state.sql, 0005_devtool_gate.sql).
   status: string;
   crawl_state: string; // idle | crawling
   docs_root: string;
@@ -29,6 +31,12 @@ export interface SiteProfileRow {
   last_crawled_at: string | null;
   last_run_id: string | null;
   updated_at: string;
+  // The devtool gate's last verdict (migrations/0005_devtool_gate.sql).
+  gate_category: string | null;
+  gate_confidence: number | null;
+  gate_reason: string | null;
+  gate_method: string | null;
+  gate_checked_at: string | null;
 }
 
 export interface CrawlRunRow {
@@ -37,7 +45,7 @@ export interface CrawlRunRow {
   start_url: string;
   started_at: string;
   finished_at: string | null;
-  status: string;
+  status: string; // queued | running | complete | failed | rejected
   path: string | null;
   pages_new: number;
   pages_changed: number;
@@ -47,6 +55,12 @@ export interface CrawlRunRow {
   browser_seconds: number;
   cost_usd: number;
   error: string | null;
+  forced: number;
+  gate_decision: string | null;
+  gate_category: string | null;
+  gate_method: string | null;
+  gate_reason: string | null;
+  gate_cost_usd: number;
 }
 
 export interface RecordStats {
@@ -80,7 +94,8 @@ export class CrawlStore {
   // Runs still queued/running past STALE_RUN_HOURS (a terminated Workflow
   // never ran its fail step) are marked failed in the same batch, so they stop
   // showing as active.
-  async createRun(id: string, site: string, startUrl: string, now = new Date()): Promise<boolean> {
+  // `forced`: an admin skipped the devtool gate.
+  async createRun(id: string, site: string, startUrl: string, now = new Date(), forced = false): Promise<boolean> {
     const since = new Date(now.getTime() - STALE_RUN_HOURS * 3_600_000).toISOString();
     const [, inserted] = await this.db.batch([
       this.db
@@ -91,12 +106,12 @@ export class CrawlStore {
         .bind(site, since, now.toISOString()),
       this.db
         .prepare(
-          `INSERT INTO crawl_runs (id, site, start_url, started_at, status)
-           SELECT ?1, ?2, ?3, ?4, 'queued'
+          `INSERT INTO crawl_runs (id, site, start_url, started_at, status, forced)
+           SELECT ?1, ?2, ?3, ?4, 'queued', ?5
            WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE site = ?2 AND status IN ('queued', 'running'))
            RETURNING id`,
         )
-        .bind(id, site, startUrl, now.toISOString()),
+        .bind(id, site, startUrl, now.toISOString(), forced ? 1 : 0),
     ]);
     return (inserted.results as unknown[]).length === 1;
   }
@@ -143,7 +158,9 @@ export class CrawlStore {
 
   // Discovery facts. Never touches status, crawl_state or last_crawled_at,
   // which describe the last finished crawl.
-  async putProfile(p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at'>): Promise<void> {
+  async putProfile(
+    p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at' | `gate_${string}`>,
+  ): Promise<void> {
     const cols = Object.keys(p) as (keyof typeof p)[];
     await this.db
       .prepare(
@@ -162,6 +179,35 @@ export class CrawlStore {
       )
       .bind(site, status, now.toISOString())
       .run();
+  }
+
+  // The devtool gate's verdict, on the run and the site. A rejection ends the
+  // run ('rejected', the reason in `error`) and the crawl: the site becomes
+  // 'not_devtool', whatever it was before. One D1 batch, safe to repeat.
+  async recordGate(runId: string, site: string, v: GateVerdict, now = new Date()): Promise<void> {
+    const at = now.toISOString();
+    const reject = v.decision === 'reject';
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE crawl_runs SET gate_decision = ?2, gate_category = ?3, gate_method = ?4, gate_reason = ?5, gate_cost_usd = ?6,
+             status = CASE WHEN ?7 THEN 'rejected' ELSE status END,
+             finished_at = CASE WHEN ?7 THEN ?8 ELSE finished_at END,
+             error = CASE WHEN ?7 THEN ?5 ELSE error END
+           WHERE id = ?1`,
+        )
+        .bind(runId, v.decision, v.category, v.method, v.reason, v.costUsd, reject ? 1 : 0, at),
+      this.db
+        .prepare(
+          `UPDATE site_profiles SET gate_category = ?2, gate_confidence = ?3, gate_reason = ?4, gate_method = ?5, gate_checked_at = ?6,
+             last_run_id = ?7, updated_at = ?6,
+             status = CASE WHEN ?8 THEN 'not_devtool' ELSE status END,
+             crawl_state = CASE WHEN ?8 THEN 'idle' ELSE crawl_state END,
+             last_crawled_at = CASE WHEN ?8 THEN ?6 ELSE last_crawled_at END
+           WHERE site = ?1`,
+        )
+        .bind(site, v.category, v.confidence, v.reason, v.method, at, runId, reject ? 1 : 0),
+    ]);
   }
 
   // A failed crawl: a site that was 'ready' and still has pages stays 'ready'

@@ -144,7 +144,7 @@ export function parseClassification(raw: string, markdown?: string): Classificat
 // A failed call: `invalid` when the model answered with unusable output (worth
 // recording as a failed classification), `transient` for everything a retry
 // might fix (timeouts, dropped connections, 429, 5xx, other HTTP errors).
-class CallError extends Error {
+export class CallError extends Error {
   kind: 'invalid' | 'transient';
   cost: number;
 
@@ -166,10 +166,15 @@ export class ClassifyUnavailable extends Error {
   }
 }
 
-async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = fetch, signal }: ClassifyOptions): Promise<{ content: string; cost: number }> {
-  const user = userMessage(page);
+// One JSON-mode chat completion. Also used by the devtool gate (src/crawl/gate.ts).
+export async function callModel(
+  model: string,
+  system: string,
+  user: string,
+  { apiKey, fetchImpl = fetch, signal }: ClassifyOptions,
+): Promise<{ content: string; cost: number }> {
   // Charged when the call may have been billed but no usage came back.
-  const estimate = estimateCost(model, SYSTEM.length + user.length);
+  const estimate = estimateCost(model, system.length + user.length);
   let res: Response;
   try {
     res = await fetchImpl(ENDPOINT, {
@@ -183,7 +188,7 @@ async function callModel(model: string, page: PageInput, { apiKey, fetchImpl = f
       body: JSON.stringify({
         model,
         messages: [
-          { role: 'system', content: SYSTEM },
+          { role: 'system', content: system },
           { role: 'user', content: user },
         ],
         response_format: { type: 'json_object' },
@@ -236,7 +241,7 @@ export async function classifyPage(page: PageInput, opts: ClassifyOptions): Prom
       break;
     }
     try {
-      const { content, cost } = await callModel(model, page, opts);
+      const { content, cost } = await callModel(model, SYSTEM, userMessage(page), opts);
       costUsd += cost;
       try {
         return { classification: parseClassification(content, page.markdown), model, costUsd };

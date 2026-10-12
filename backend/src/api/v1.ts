@@ -125,9 +125,27 @@ async function requireAdmin(c: Ctx): Promise<void> {
   if (!token || !(await safeEqual(given, `Bearer ${token}`))) throw notFound();
 }
 
-const FINAL_PROFILE = new Set(['ready', 'empty', 'blocked', 'failed']);
+const FINAL_PROFILE = new Set(['ready', 'empty', 'blocked', 'failed', 'not_devtool']);
+
+function gateJson(r: { gate_category: string | null; gate_method: string | null; gate_reason: string | null }) {
+  return r.gate_method ? { category: r.gate_category, method: r.gate_method, reason: r.gate_reason } : null;
+}
 
 function profileJson(r: SiteProfileRow) {
+  // The devtool gate turned the site away: nothing else about it is known.
+  if (r.status === 'not_devtool') {
+    return {
+      site: r.site,
+      status: r.status,
+      category: r.gate_category,
+      reason: r.gate_reason,
+      confidence: r.gate_confidence,
+      method: r.gate_method,
+      crawling: r.crawl_state === 'crawling' && Date.parse(r.updated_at) > Date.now() - STALE_RUN_HOURS * 3_600_000,
+      checkedAt: r.gate_checked_at,
+      updatedAt: r.updated_at,
+    };
+  }
   return {
     site: r.site,
     status: r.status,
@@ -148,6 +166,7 @@ function profileJson(r: SiteProfileRow) {
     // window it is not reported as crawling.
     crawling: r.crawl_state === 'crawling' && Date.parse(r.updated_at) > Date.now() - STALE_RUN_HOURS * 3_600_000,
     lastCrawledAt: r.last_crawled_at,
+    gate: r.gate_method ? { ...gateJson(r), confidence: r.gate_confidence, checkedAt: r.gate_checked_at } : null,
     updatedAt: r.updated_at,
   };
 }
@@ -169,6 +188,8 @@ function runJson(r: CrawlRunRow) {
     browserSeconds: r.browser_seconds,
     costUsd: r.cost_usd,
     error: r.error,
+    forced: Boolean(r.forced),
+    gate: r.gate_decision ? { decision: r.gate_decision, ...gateJson(r), costUsd: r.gate_cost_usd } : null,
   };
 }
 
@@ -300,7 +321,7 @@ const routes: Route[] = [
       const runId = newId('cr');
       const crawls = new CrawlStore(c.env.DB, c.env.SKILLS);
       // One queued or running crawl per site.
-      if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl))) {
+      if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl, new Date(), crawl.force))) {
         throw new ApiError('conflict', `A crawl of ${crawl.site} is already queued or running`, 409);
       }
       try {
@@ -310,7 +331,7 @@ const routes: Route[] = [
         await crawls.updateRun(runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'Workflow could not be created' });
         throw e;
       }
-      return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl });
+      return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl, forced: crawl.force });
     },
   },
   {

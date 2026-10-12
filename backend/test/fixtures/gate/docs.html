@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Getting started | Acme SDK Docs</title>
+  <meta name="description" content="Install the Acme SDK, authenticate with an API key and make your first request.">
+</head>
+<body>
+  <header><nav>
+    <a href="/docs/">Docs</a> <a href="/docs/api/">API reference</a> <a href="/docs/guides/webhooks">Guides</a>
+    <a href="/docs/sdk/node">Node SDK</a> <a href="/docs/cli">CLI</a> <a href="https://github.com/acme/acme-node">GitHub</a>
+  </nav></header>
+  <aside><a href="/docs/quickstart">Quickstart</a> <a href="/docs/authentication">Authentication</a> <a href="/docs/errors">Errors</a></aside>
+  <main>
+    <h1>Getting started</h1>
+    <p>The Acme API is a REST API with JSON request and response bodies. This guide shows how to install the SDK,
+       authenticate with an API key and call your first endpoint. All requests need an access token.</p>
+    <h2>Install the SDK</h2>
+    <pre><code>npm install @acme/sdk</code></pre>
+    <pre><code>pip install acme</code></pre>
+    <h2>Authenticate</h2>
+    <p>Set the <code>ACME_API_KEY</code> environment variable, then create a client. The library reads the key from the environment.</p>
+    <pre><code class="language-js">import { Acme } from '@acme/sdk';
+const acme = new Acme({ apiKey: process.env.ACME_API_KEY });
+const res = await acme.widgets.create({ name: 'first' });</code></pre>
+    <h2>Webhooks</h2>
+    <p>Configure a webhook endpoint to receive events. Each request carries a signature header; verify it with the SDK function
+       <code>acme.webhooks.verify()</code> and the endpoint secret parameter.</p>
+  </main>
+</body>
+</html>
