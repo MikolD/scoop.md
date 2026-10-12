@@ -522,6 +522,12 @@ test('costs: 14 days of AI, gate and E2B spend by day and site', async () => {
   assert.equal(d.days.reduce((n: number, x: any) => n + x.aiUsd, 0), 0.75);
   assert.equal(d.siteCapUsd, 2);
   assert.equal(d.totalCapUsd, 10);
+  // Cost per crawl: the finished runs and their averages (the running one is left out).
+  assert.deepEqual(d.crawls.runs.map((r: any) => r.id).sort(), ['cr_01AAAAAAAAAAAAAAAAAAAAAAAA', 'cr_01BBBBBBBBBBBBBBBBBBBBBBBB']);
+  assert.equal(d.crawls.averages.overall.runs, 2);
+  const run = (await call(env, req('/api/runs/cr_01AAAAAAAAAAAAAAAAAAAAAAAA'))).body.run;
+  assert.deepEqual(Object.keys(run.costs).sort(), ['browserUsd', 'classifyUsd', 'embedUsd', 'gateUsd', 'indexingDone', 'pagesIndexed', 'pagesStored', 'perPageUsd', 'totalUsd', 'tracked']);
+  assert.ok(Math.abs(run.costs.totalUsd - 0.0015) < 1e-9);
 });
 
 // ---- Batches -----------------------------------------------------------------

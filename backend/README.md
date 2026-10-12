@@ -145,7 +145,11 @@ Options: `--only site1,site2`, `--max-pages N` (overrides the seeds'),
 `--concurrency N` (default 4), `--force`, `--dry-run`, `--out FILE` (JSON
 report), `--seeds FILE`, `--api URL`, `--poll-seconds N` (default 10),
 `--timeout-minutes N` (default 90; the crawl carries on server-side after the
-runner stops waiting). The exit code is 1 if a crawl could not be started or
+runner stops waiting), `--wait-indexing N` (wait up to N minutes after the
+crawls for indexing to catch up, so every run's cost is final). The table and
+summary show each run's total cost (browser, gate AI, classification and
+embeddings) and its cost per page once indexing has caught up, `indexing n/m`
+until then. The exit code is 1 if a crawl could not be started or
 followed. A full seed run is about 100 × 200 pages at one request per second
 per site; at concurrency 4 expect a few hours, plus OpenRouter classification
 of every new page against the daily caps (`INDEX_DAILY_CAP_USD`, default $2
@@ -203,6 +207,12 @@ costs. Crawled and shared content is always rendered as text.
   two crawls of one site, a busy site (409) retried a minute later (30 tries),
   one tick every 15 s. Cancel stops queuing; "Cancel and stop crawls" also
   cancels the crawls in flight.
+- **Cost per crawl**: each run's cost broken down (browser sandbox, gate,
+  classification, embeddings) on the run page and as a total on the Runs list;
+  the Costs page has every finished crawl over time with its total and cost
+  per page, and averages per crawl, per page and by path. Indexing lands after
+  a crawl ends, so a total is final once every page it stored is indexed
+  (docs/BACKEND-DECISIONS.md, "Cost per crawl").
 - **Cancelling a run** terminates its CrawlSite instance, kills E2B sandboxes
   tagged with the run ID, marks the run failed ("cancelled by an admin") and
   deletes its `crawl-results/` files; the site keeps its last outcome.
@@ -316,7 +326,7 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
       npx wrangler secret put ADMIN_UI_USER --env $env
       openssl rand -base64 24 | tee /dev/tty | npx wrangler secret put ADMIN_UI_PASSCODE --env $env
     done
-    npx wrangler d1 migrations apply DB --env staging --remote      # 0006_admin.sql (batches, lockouts)
+    npx wrangler d1 migrations apply DB --env staging --remote      # 0006_admin.sql (batches, lockouts), 0007_run_costs.sql
     ```
     `wrangler deploy` creates the rest: the custom domains `admin-staging.scoop.md`
     / `admin.scoop.md` (no existing DNS records for them), the Workflows

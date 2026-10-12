@@ -251,6 +251,13 @@ function gateText(g) {
   return [g.decision, g.category, g.method && `(${g.method})`].filter(Boolean).join(' ');
 }
 
+// A run's total: final once its pages are indexed, else marked as still growing.
+function costCell(c) {
+  const title = `browser ${fmtUsd(c.browserUsd)} · gate ${fmtUsd(c.gateUsd)} · classify ${fmtUsd(c.classifyUsd)} · embed ${fmtUsd(c.embedUsd, 6)}`;
+  const note = !c.tracked ? ' (no indexing costs)' : c.indexingDone ? null : ' +indexing';
+  return h('span', { title }, fmtUsd(c.totalUsd, 5), note ? h('span', { class: 'meta small' }, note) : null);
+}
+
 const pagesCell = (r) => `${fmtInt(r.pagesNew)} new · ${fmtInt(r.pagesChanged)} chg · ${fmtInt(r.pagesUnchanged)} same${r.pagesFailed ? ` · ${r.pagesFailed} failed` : ''}`;
 
 function runsTable(runs, { site = true } = {}) {
@@ -261,7 +268,7 @@ function runsTable(runs, { site = true } = {}) {
     { label: 'Gate', get: (r) => (r.forced ? 'forced' : gateText(r.gate)), cls: 'hide-sm' },
     { label: 'Path', get: (r) => r.path ?? '' },
     { label: 'Pages', get: pagesCell, cls: 'nowrap' },
-    { label: 'Cost', get: (r) => fmtUsd(r.costUsd + (r.gate?.costUsd ?? 0)), cls: 'num' },
+    { label: 'Total cost', get: (r) => costCell(r.costs), cls: 'num' },
     { label: 'Started', get: (r) => time(r.startedAt), cls: 'nowrap' },
     { label: 'Took', get: (r) => duration(r.startedAt, r.finishedAt), cls: 'num' },
     { label: 'Error', get: (r) => (r.error ? h('span', { class: r.status === 'rejected' ? 'warn small' : 'err small' }, r.error) : ''), cls: 'hide-sm' },
@@ -419,12 +426,12 @@ async function runDetail(r) {
         h('dt', {}, 'Path'), h('dd', {}, run.path ?? '—'),
         h('dt', {}, 'Gate'), h('dd', {}, run.forced ? 'skipped (forced by an admin)' : run.gate ? `${gateText(run.gate)} — ${run.gate.reason ?? ''}` : '—'),
         h('dt', {}, 'Pages'), h('dd', {}, `${pagesCell(run)} · ${fmtInt(run.pagesSkipped)} skipped`),
-        h('dt', {}, 'Browser'), h('dd', {}, `${fmtInt(Math.round(run.browserSeconds))} s · ${fmtUsd(run.costUsd)}`),
-        h('dt', {}, 'Gate AI'), h('dd', {}, fmtUsd(run.gate?.costUsd ?? 0)),
+        h('dt', {}, 'Browser'), h('dd', {}, `${fmtInt(Math.round(run.browserSeconds))} s`),
         h('dt', {}, 'Started'), h('dd', {}, run.startedAt ?? ''),
         h('dt', {}, 'Finished'), h('dd', {}, run.finishedAt ?? (active ? `running for ${duration(run.startedAt)}` : '—')),
         h('dt', {}, 'Workflow'), h('dd', {}, d.workflow ? `${d.workflow.status}${d.workflow.error ? ` — ${d.workflow.error}` : ''}` : 'expired or unknown'),
         run.error ? [h('dt', {}, 'Error'), h('dd', { class: run.status === 'rejected' ? 'warn' : 'err' }, run.error)] : null)),
+      card('Cost', costBreakdown(run.costs)),
       card(`Pages fetched by this run (first ${d.pages.length})`, table([
         { label: 'URL', get: (p) => pageLink(p.url), cls: 'url' },
         { label: 'Kind', get: (p) => p.kind },
@@ -433,6 +440,24 @@ async function runDetail(r) {
       ], d.pages, 'No pages recorded by this run.')),
     ],
   };
+}
+
+function costBreakdown(c) {
+  return [
+    h('div', { class: 'stats' },
+      stat(fmtUsd(c.totalUsd, 5), c.indexingDone ? 'total' : 'total so far'),
+      stat(c.perPageUsd == null ? '—' : fmtUsd(c.perPageUsd, 6), `per page (${fmtInt(c.pagesStored)} stored)`),
+      stat(fmtUsd(c.browserUsd), 'browser sandbox (E2B)'),
+      stat(fmtUsd(c.gateUsd), 'devtool gate (AI)'),
+      stat(fmtUsd(c.classifyUsd), 'page classification (AI)'),
+      stat(fmtUsd(c.embedUsd, 6), 'embeddings (Workers AI, est.)')),
+    h('p', { class: c.indexingDone ? 'meta small' : 'warn small' },
+      !c.tracked
+        ? 'This run is from before cost tracking: its classification and embedding costs were not recorded.'
+        : c.indexingDone
+        ? `Final: all ${fmtInt(c.pagesStored)} stored pages are indexed.`
+        : `Indexing pending: ${fmtInt(c.pagesIndexed)} of ${fmtInt(c.pagesStored)} pages indexed; classification and embedding costs are still coming in.`),
+  ];
 }
 
 async function batchDetail(r) {
@@ -824,6 +849,56 @@ async function costs() {
       { label: 'Runs', get: (x) => x.runs, cls: 'num' },
       { label: 'Top sites (AI)', get: (x) => x.sites.slice(0, 4).map((s) => h('div', { class: 'small' }, siteLink(s.site), ` ${fmtUsd(s.costUsd)}`)), cls: 'hide-sm' },
     ], d.days)),
+    ...crawlCostCards(d.crawls),
+  ];
+}
+
+// Cost per crawl: averages (over runs whose indexing has caught up), each
+// finished run with its total and per-page cost as bars, and the daily
+// reclassify job's spend, which belongs to no run.
+function crawlCostCards(c) {
+  const usd = (n, d = 6) => (n == null ? '—' : fmtUsd(n, d));
+  const o = c.averages.overall;
+  const maxPage = Math.max(0, ...c.runs.filter((r) => r.costs_tracked).map((r) => r.cost_per_page ?? 0));
+  const maxTotal = Math.max(0, ...c.runs.map((r) => r.total_cost_usd));
+  const bar = (v, max) => {
+    const m = h('div', { class: 'meter' }, h('i'));
+    m.firstChild.style.width = `${max > 0 ? Math.min(100, (v / max) * 100) : 0}%`;
+    return m;
+  };
+  return [
+    card('Cost per crawl', h('div', { class: 'stats' },
+      stat(usd(o.perCrawlUsd, 5), 'average per crawl'),
+      stat(usd(o.perPageUsd), 'average per page'),
+      stat(fmtInt(o.finalRuns), 'finished runs counted'),
+      stat(fmtInt(o.pendingRuns), 'runs still indexing (left out)')),
+    table([
+      { label: 'Path', get: (g) => g.path },
+      { label: 'Runs', get: (g) => `${g.finalRuns}${g.pendingRuns ? ` (+${g.pendingRuns} indexing)` : ''}`, cls: 'num' },
+      { label: 'Per crawl', get: (g) => usd(g.perCrawlUsd, 5), cls: 'num' },
+      { label: 'Per page', get: (g) => usd(g.perPageUsd), cls: 'num' },
+      { label: 'Pages', get: (g) => fmtInt(g.pages), cls: 'num' },
+      { label: 'Spend', get: (g) => fmtUsd(g.totalUsd), cls: 'num' },
+    ], c.averages.byPath, 'No finished crawls in this window.'),
+    h('p', { class: 'meta small' }, 'Per crawl: browser sandbox + devtool gate + classification + embeddings (Workers AI, estimated). Per page is total spend over pages stored (new + changed). A rejected run only pays for its gate check.')),
+    card('Crawls over time', table([
+      { label: 'Started', get: (r) => h('span', { title: r.started_at }, r.started_at.slice(0, 16).replace('T', ' ')), cls: 'nowrap mono' },
+      { label: 'Run', get: (r) => runLink(r.id) },
+      { label: 'Site', get: (r) => siteLink(r.site) },
+      { label: 'Path', get: (r) => (r.path ? r.path : pill(r.status)) },
+      { label: 'Pages', get: (r) => `${fmtInt(r.pages_indexed)}/${fmtInt(r.pages_stored)}`, cls: 'num' },
+      { label: 'Total', get: (r) => h('span', { title: `browser ${fmtUsd(r.browser_cost_usd)} · gate ${fmtUsd(r.gate_cost_usd)} · classify ${fmtUsd(r.classify_cost_usd)} · embed ${fmtUsd(r.embed_cost_usd, 6)}` }, fmtUsd(r.total_cost_usd, 5), r.indexing_done ? null : h('span', { class: 'meta small' }, r.costs_tracked ? ' +indexing' : ' (untracked)')), cls: 'num' },
+      { label: '', get: (r) => bar(r.total_cost_usd, maxTotal), cls: 'hide-sm' },
+      { label: 'Per page', get: (r) => (r.costs_tracked ? usd(r.cost_per_page) : '—'), cls: 'num' },
+      { label: '', get: (r) => (r.cost_per_page == null || !r.costs_tracked ? '' : bar(r.cost_per_page, maxPage)), cls: 'hide-sm' },
+    ], c.runs, 'No finished crawls in this window.')),
+    card('Daily reclassify job', table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      { label: 'Pages', get: (x) => fmtInt(x.pages), cls: 'num' },
+      { label: 'Classification', get: (x) => fmtUsd(x.classifyUsd), cls: 'num' },
+      { label: 'Embeddings', get: (x) => fmtUsd(x.embedUsd, 6), cls: 'num' },
+    ], c.reclassify, 'No reclassify spend in this window.'),
+    h('p', { class: 'meta small' }, 'Pages first indexed unclassified (cap reached, classifier down) are classified later by the cron; that spend is kept apart from the run that crawled them.')),
   ];
 }
 

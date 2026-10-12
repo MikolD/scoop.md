@@ -261,9 +261,10 @@ function gateAi(env: Env, site: string) {
   };
 }
 
-// One message per new or changed page, body exactly { site, url, contentHash }.
+// One message per new or changed page, body exactly { site, url, contentHash, runId }:
+// runId is charged for indexing it (index_run_costs).
 async function send(env: Env, batch: IndexMessage[]): Promise<void> {
-  await env.INDEX_QUEUE.sendBatch(batch.map(({ site, url, contentHash }) => ({ body: { site, url, contentHash } })));
+  await env.INDEX_QUEUE.sendBatch(batch.map(({ site, url, contentHash, runId }) => ({ body: { site, url, contentHash, runId } })));
 }
 
 // Deletes this run's working files (plan, upload, batches).

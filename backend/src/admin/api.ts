@@ -541,7 +541,8 @@ const routes: Route[] = [
     handler: async ({ env, url }) => {
       const days = Math.min(60, Math.max(1, Math.trunc(Number(url.searchParams.get('days'))) || 14));
       const { dailyCapUsd, totalCapUsd } = indexDeps(env);
-      return json(200, { days: await q.costs(env.DB, days), siteCapUsd: dailyCapUsd, totalCapUsd });
+      const [byDay, crawls] = await Promise.all([q.costs(env.DB, days), q.crawlCosts(env.DB, days)]);
+      return json(200, { days: byDay, crawls, siteCapUsd: dailyCapUsd, totalCapUsd });
     },
   },
 ];

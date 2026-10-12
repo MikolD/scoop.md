@@ -7,16 +7,23 @@
 // tested against node:sqlite and in-memory fakes.
 
 import { sha256Hex } from '../lib/ids.ts';
-import { chunkMarkdown, pageTitle } from './chunk.ts';
+import { chunkMarkdown, estimateTokens, pageTitle } from './chunk.ts';
 import { ClassifyUnavailable, FAILED } from './classify.ts';
 import type { Classification, Classified, PageInput } from './classify.ts';
+import { embedCostUsd } from './embed.ts';
 import type { Embed } from './embed.ts';
 
 export interface IndexMessage {
   site: string;
   url: string;
   contentHash: string;
+  // Who pays for indexing it (index_run_costs): the crawl run that queued it,
+  // or RECLASSIFY_RUN for the daily cron. Absent: MANUAL_RUN.
+  runId?: string;
 }
+
+export const RECLASSIFY_RUN = 'reclassify';
+export const MANUAL_RUN = 'manual';
 
 export interface IndexDeps {
   db: D1Database;
@@ -98,11 +105,12 @@ async function cachedClassification(deps: IndexDeps, contentHash: string): Promi
 // The cached result for this content, else a fresh call (cached when it succeeded).
 // Returns null when classification is skipped, with capped saying whether a cap did it.
 // Throws ClassifyUnavailable (after recording its cost) when the classifier is down.
-async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, contentHash: string, now: Date): Promise<{ result: Classified | null; capped: boolean }> {
+// `paid` is what this call spent: nothing for a cached classification.
+async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, contentHash: string, now: Date): Promise<{ result: Classified | null; capped: boolean; paid: number }> {
   const cached = await cachedClassification(deps, contentHash);
-  if (cached) return { result: cached, capped: false };
-  if (!deps.classify) return { result: null, capped: false };
-  if (await capsReached(deps, site, now)) return { result: null, capped: true };
+  if (cached) return { result: cached, capped: false, paid: 0 };
+  if (!deps.classify) return { result: null, capped: false, paid: 0 };
+  if (await capsReached(deps, site, now)) return { result: null, capped: true, paid: 0 };
   let result: Classified;
   try {
     result = await deps.classify(page);
@@ -112,8 +120,40 @@ async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, cont
   }
   await addCost(deps.db, site, now, result.costUsd);
   if (result.classification) await deps.bucket.put(classifyKey(contentHash), JSON.stringify(result));
-  return { result, capped: false };
+  return { result, capped: false, paid: result.costUsd };
 }
+
+// What indexing this page cost, charged to the message's run, in the same D1
+// batch as the index write. A redelivered message whose work is already done
+// adds nothing (an 'unchanged' outcome records zeros), so increments never
+// double-count; the run's totals are recomputed from the rows, never added to.
+// The daily cron's spend is kept per UTC day ('reclassify:YYYY-MM-DD').
+export function runCostStmts(db: D1Database, msg: IndexMessage, c: { classifyUsd: number; embedTokens: number }, now: Date): D1PreparedStatement[] {
+  const run = msg.runId === RECLASSIFY_RUN ? `${RECLASSIFY_RUN}:${capDay(now)}` : (msg.runId ?? MANUAL_RUN);
+  const stmts = [
+    db.prepare(
+      `INSERT INTO index_run_costs (run_id, url, content_hash, site, classify_cost_usd, embed_tokens, embed_cost_usd, indexed, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+       ON CONFLICT (run_id, url, content_hash) DO UPDATE SET
+         classify_cost_usd = classify_cost_usd + excluded.classify_cost_usd, embed_tokens = embed_tokens + excluded.embed_tokens,
+         embed_cost_usd = embed_cost_usd + excluded.embed_cost_usd, indexed = 1, updated_at = excluded.updated_at`,
+    ).bind(run, msg.url, msg.contentHash, msg.site, c.classifyUsd, c.embedTokens, embedCostUsd(c.embedTokens), now.toISOString()),
+  ];
+  if (run.startsWith('cr_')) {
+    stmts.push(
+      db.prepare(
+        `UPDATE crawl_runs SET
+           classify_cost_usd = (SELECT COALESCE(SUM(classify_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
+           embed_cost_usd = (SELECT COALESCE(SUM(embed_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
+           pages_indexed = (SELECT COUNT(*) FROM index_run_costs WHERE run_id = ?1 AND indexed = 1)
+         WHERE id = ?1`,
+      ).bind(run),
+    );
+  }
+  return stmts;
+}
+
+const embedTokens = (texts: string[]) => texts.reduce((n, t) => n + estimateTokens(t), 0);
 
 // Recounts every prefix of the old and new topic paths from page_index, as two
 // index range counts on (site, topic): the topic itself, and topics in
@@ -159,7 +199,11 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
     .bind(url)
     .first<Existing>();
   if (existing && existing.content_hash === contentHash) {
-    if (!NEEDS_CLASSIFYING.includes(existing.model)) return { status: 'unchanged' };
+    if (!NEEDS_CLASSIFYING.includes(existing.model)) {
+      // Indexed already: counts as indexed for this run, at no cost.
+      await db.batch(runCostStmts(db, msg, { classifyUsd: 0, embedTokens: 0 }, now));
+      return { status: 'unchanged' };
+    }
     return reclassifyPage(deps, msg, existing, now);
   }
 
@@ -167,16 +211,19 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
   const chunks = chunkMarkdown(markdown);
   const urlKey = (await sha256Hex(url)).slice(0, 32);
   const rows = chunks.map((c) => ({ ...c, id: `${urlKey}-${c.ord}`, heading: headingTrail(title, c.headingPath) }));
-  const values = rows.length ? await embed(rows.map((r) => `${r.heading}\n\n${r.text}`), 'document') : [];
+  const texts = rows.map((r) => `${r.heading}\n\n${r.text}`);
+  const values = rows.length ? await embed(texts, 'document') : [];
 
   // Classified last of the slow steps: if embedding fails, nothing was paid for.
   let result: Classified | null = null;
   let capped = false;
+  let paid = 0;
   try {
-    ({ result, capped } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
+    ({ result, capped, paid } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
   } catch (e) {
     // Its cost is already recorded; late in the retries, index without it.
     if (!(e instanceof ClassifyUnavailable) || attempt < UNAVAILABLE_FALLBACK_ATTEMPT) throw e;
+    paid = e.costUsd;
   }
   const classification = result?.classification ?? EMPTY;
   const model = result?.model ?? UNCLASSIFIED;
@@ -218,6 +265,7 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
       model, costUsd, model === FAILED ? 1 : 0, now.toISOString(),
     ),
     ...topicRecount(db, site, existing?.topic, classification.topic_path),
+    ...runCostStmts(db, msg, { classifyUsd: paid, embedTokens: embedTokens(texts) }, now),
   ];
   await db.batch(stmts);
 
@@ -230,24 +278,30 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
 async function reclassifyPage(deps: IndexDeps, msg: IndexMessage, existing: Existing, now: Date): Promise<IndexOutcome> {
   const { db, vectors } = deps;
   const { site, url, contentHash } = msg;
+  // Indexed already (unclassified): counts as indexed for this run either way.
+  const free = () => db.batch(runCostStmts(db, msg, { classifyUsd: 0, embedTokens: 0 }, now));
   let result = await cachedClassification(deps, contentHash);
+  let paid = 0;
   if (!result) {
-    if (!deps.classify || (await capsReached(deps, site, now))) return { status: 'unchanged' };
+    if (!deps.classify || (await capsReached(deps, site, now))) return free().then(() => ({ status: 'unchanged' }));
     const { markdown, title } = await readPage(deps, url, contentHash);
-    ({ result } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
-    if (!result) return { status: 'unchanged' };
+    ({ result, paid } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
+    if (!result) return free().then(() => ({ status: 'unchanged' }));
   }
   if (!result.classification) {
-    await db
-      .prepare('UPDATE page_index SET model = ?, cost_usd = ?, attempts = attempts + 1, indexed_at = ? WHERE url = ?')
-      .bind(FAILED, result.costUsd, now.toISOString(), url)
-      .run();
+    await db.batch([
+      db
+        .prepare('UPDATE page_index SET model = ?, cost_usd = ?, attempts = attempts + 1, indexed_at = ? WHERE url = ?')
+        .bind(FAILED, result.costUsd, now.toISOString(), url),
+      ...runCostStmts(db, msg, { classifyUsd: paid, embedTokens: 0 }, now),
+    ]);
     return { status: 'reclassified', slot: 'other', topicPath: [], model: FAILED, costUsd: result.costUsd };
   }
   const c = result.classification;
 
   // Vectorize can't change metadata alone: each vector is upserted again with
   // its stored values. Any missing from the index are embedded from D1.
+  let tokens = 0;
   const { results: chunks } = await db
     .prepare('SELECT id, heading_path, text FROM chunks WHERE url = ? ORDER BY ord')
     .bind(url)
@@ -257,7 +311,9 @@ async function reclassifyPage(deps: IndexDeps, msg: IndexMessage, existing: Exis
     const found = new Map((await vectors.getByIds(batch.map((r) => r.id))).map((v) => [v.id, Array.from(v.values as ArrayLike<number>)]));
     const missing = batch.filter((r) => !found.get(r.id)?.length);
     if (missing.length) {
-      const embedded = await deps.embed(missing.map((r) => `${r.heading_path}\n\n${r.text}`), 'document');
+      const texts = missing.map((r) => `${r.heading_path}\n\n${r.text}`);
+      tokens += embedTokens(texts);
+      const embedded = await deps.embed(texts, 'document');
       missing.forEach((r, j) => found.set(r.id, embedded[j]));
     }
     await vectors.upsert(batch.map((r) => ({ id: r.id, values: found.get(r.id)!, metadata: { site, slot: c.slot, url, chunkId: r.id } })));
@@ -274,6 +330,7 @@ async function reclassifyPage(deps: IndexDeps, msg: IndexMessage, existing: Exis
       result.model, result.costUsd, now.toISOString(), url,
     ),
     ...topicRecount(db, site, existing.topic, c.topic_path),
+    ...runCostStmts(db, msg, { classifyUsd: paid, embedTokens: tokens }, now),
   ]);
   return { status: 'reclassified', slot: c.slot, topicPath: c.topic_path, model: result.model, costUsd: result.costUsd };
 }

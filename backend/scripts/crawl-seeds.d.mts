@@ -19,6 +19,20 @@ export interface Options {
   urls: string[];
   pollMs: number;
   timeoutMs: number;
+  waitIndexingMs: number;
+}
+
+export interface RunCosts {
+  browserUsd: number;
+  gateUsd: number;
+  classifyUsd: number;
+  embedUsd: number;
+  totalUsd: number;
+  pagesStored: number;
+  pagesIndexed: number;
+  perPageUsd: number | null;
+  indexingDone: boolean;
+  tracked: boolean;
 }
 
 export interface Seed {
@@ -47,6 +61,7 @@ export interface Result {
   gate: { decision: string; category: string | null; method: string; reason: string | null; costUsd: number } | null;
   forced: boolean;
   costUsd: number;
+  costs: RunCosts | null;
   error: string | null;
   attempts: number;
   startedAt: string | null;
@@ -73,5 +88,17 @@ export function crawlAll(
     now?: () => number;
   },
 ): Promise<{ results: Result[]; maxInFlight: number }>;
+export function refreshCosts(
+  results: Result[],
+  o: {
+    api: string;
+    token: string | null;
+    fetchImpl?: (url: string, init?: RequestInit) => Promise<Response>;
+    pollMs?: number;
+    waitMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    now?: () => number;
+  },
+): Promise<void>;
 export function table(rows: Result[]): string;
 export function summary(results: Result[]): string;

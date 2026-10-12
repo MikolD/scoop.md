@@ -1,14 +1,15 @@
 // Queue consumer for `index-pages`. One message per changed page:
-// { site, url, contentHash }. A batch's messages run concurrently; each is
+// { site, url, contentHash, runId? }. A batch's messages run concurrently; each is
 // acked on success, retried with exponential backoff on failure, and acked
 // and logged when retrying can't help.
 
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
-import { indexPage, PermanentError } from './indexer.ts';
+import { indexPage, PermanentError, RECLASSIFY_RUN } from './indexer.ts';
 import type { IndexDeps, IndexMessage } from './indexer.ts';
 
 const HEX64 = /^[0-9a-f]{64}$/;
+const RUN_ID = /^cr_[0-9A-Z]{26}$/;
 
 export function parseMessage(body: unknown): IndexMessage {
   const b = (body ?? {}) as Record<string, unknown>;
@@ -23,7 +24,9 @@ export function parseMessage(body: unknown): IndexMessage {
   const site = normalizeSite(b.site);
   if (siteOf(url) !== site) throw new PermanentError('url is not on site');
   if (!HEX64.test(b.contentHash)) throw new PermanentError('contentHash is not a sha256 hex digest');
-  return { site, url, contentHash: b.contentHash };
+  // The run charged for indexing it; anything else is charged to 'manual'.
+  const runId = typeof b.runId === 'string' && (RUN_ID.test(b.runId) || b.runId === RECLASSIFY_RUN) ? b.runId : undefined;
+  return { site, url, contentHash: b.contentHash, ...(runId ? { runId } : {}) };
 }
 
 // 30 s, 60 s, 2 min, … capped at an hour. `attempts` starts at 1.

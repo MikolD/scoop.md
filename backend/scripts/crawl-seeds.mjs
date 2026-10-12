@@ -31,7 +31,9 @@ const USAGE = `usage: crawl-seeds --env staging|production|local [options] [url 
   --seeds FILE       seed file (default seeds/devtools.json)
   --api URL          API base (default per --env)
   --poll-seconds N   status poll interval (default 10)
-  --timeout-minutes N  stop waiting for a run after this long (default 90; the crawl continues)`;
+  --timeout-minutes N  stop waiting for a run after this long (default 90; the crawl continues)
+  --wait-indexing N  after the crawls, wait up to N minutes for indexing to catch up, so each
+                     run's cost is final (default 0: one last look; unfinished ones say "indexing")`;
 
 const normalizeSite = (host) => String(host).trim().toLowerCase().replace(/^www\./, '');
 
@@ -44,7 +46,7 @@ function positiveInt(v, name) {
 export function parseArgs(argv, env = process.env) {
   const o = {
     env: null, api: null, token: null, only: null, maxPages: null, concurrency: 4, force: false, dryRun: false,
-    out: null, seeds: DEFAULT_SEEDS, urls: [], pollMs: 10_000, timeoutMs: 90 * 60_000,
+    out: null, seeds: DEFAULT_SEEDS, urls: [], pollMs: 10_000, timeoutMs: 90 * 60_000, waitIndexingMs: 0,
   };
   const value = (i, name) => {
     if (i + 1 >= argv.length || argv[i + 1].startsWith('--')) throw new UsageError(`${name} needs a value`);
@@ -67,6 +69,7 @@ export function parseArgs(argv, env = process.env) {
       case '--concurrency': o.concurrency = positiveInt(take(), '--concurrency'); break;
       case '--poll-seconds': o.pollMs = positiveInt(take(), '--poll-seconds') * 1000; break;
       case '--timeout-minutes': o.timeoutMs = positiveInt(take(), '--timeout-minutes') * 60_000; break;
+      case '--wait-indexing': o.waitIndexingMs = positiveInt(take(), '--wait-indexing') * 60_000; break;
       case '--out': o.out = take(); break;
       case '--seeds': o.seeds = take(); break;
       case '--force': o.force = true; break;
@@ -118,7 +121,7 @@ export function selectJobs(seeds, o) {
 function blank(job) {
   return {
     name: job.name, site: job.site, startUrl: job.startUrl, maxPages: job.maxPages, runId: null, status: 'waiting', path: null,
-    pages: { new: 0, changed: 0, unchanged: 0, failed: 0, skipped: 0 }, gate: null, forced: false, costUsd: 0, error: null,
+    pages: { new: 0, changed: 0, unchanged: 0, failed: 0, skipped: 0 }, gate: null, forced: false, costUsd: 0, costs: null, error: null,
     attempts: 0, startedAt: null, finishedAt: null,
   };
 }
@@ -171,7 +174,7 @@ export async function crawlAll(jobs, o) {
         r.pages = { new: run.pagesNew, changed: run.pagesChanged, unchanged: run.pagesUnchanged, failed: run.pagesFailed, skipped: run.pagesSkipped };
         r.gate = run.gate ?? null;
         r.forced = Boolean(run.forced);
-        r.costUsd = Number(((run.costUsd ?? 0) + (run.gate?.costUsd ?? 0)).toFixed(6));
+        applyCosts(r, run);
         r.error = run.error;
         r.finishedAt = run.finishedAt;
         // The Workflow died without recording it (terminated, or errored before its fail step).
@@ -241,6 +244,31 @@ export async function crawlAll(jobs, o) {
   return { results, maxInFlight };
 }
 
+// The run's whole cost (browser, gate, classification, embeddings) once the
+// API reports it; older APIs only had browser + gate.
+function applyCosts(r, run) {
+  r.costs = run.costs ?? null;
+  r.costUsd = Number((run.costs ? run.costs.totalUsd : (run.costUsd ?? 0) + (run.gate?.costUsd ?? 0)).toFixed(6));
+}
+
+// Indexing runs after a crawl ends, so its cost arrives later: looks at every
+// run again (and again, every pollMs, until its indexing is done or waitMs
+// has passed) to pick up the final totals.
+export async function refreshCosts(results, o) {
+  const { api, token, fetchImpl = fetch, pollMs = 10_000, waitMs = 0, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = o;
+  const headers = { authorization: `Bearer ${token}`, 'x-scoop-client': 'crawl-seeds/1' };
+  const deadline = now() + waitMs;
+  for (let first = true; ; first = false) {
+    const open = results.filter((r) => r.runId && FINAL.has(r.status) && r.costs?.tracked !== false && !r.costs?.indexingDone);
+    if (!open.length || (!first && now() >= deadline)) return;
+    if (!first) await sleep(pollMs);
+    for (const r of open) {
+      const res = await fetchImpl(`${api}/v1/admin/crawl/${r.runId}`, { headers }).catch(() => null);
+      if (res?.ok) applyCosts(r, (await res.json()).run);
+    }
+  }
+}
+
 // ---- Output --------------------------------------------------------------------
 
 const pad = (s, n) => (s.length > n ? s.slice(0, n - 1) + '…' : s.padEnd(n));
@@ -254,8 +282,17 @@ const COLS = [
   ['fail', 5, (r) => String(r.pages.failed)],
   ['skip', 5, (r) => String(r.pages.skipped)],
   ['gate', 34, (r) => (r.forced ? 'forced' : r.gate ? `${r.gate.decision} ${r.gate.category ?? '-'} (${r.gate.method})` : '')],
-  ['cost $', 9, (r) => (r.costUsd ? r.costUsd.toFixed(4) : '')],
+  ['total $', 9, (r) => (r.costUsd ? r.costUsd.toFixed(5) : '')],
+  ['per page $', 12, (r) => perPage(r)],
 ];
+
+// Per stored page once indexing has caught up; until then how far it got.
+function perPage(r) {
+  const c = r.costs;
+  if (!c || !c.pagesStored) return '';
+  if (c.tracked === false) return 'untracked';
+  return c.indexingDone ? c.perPageUsd.toFixed(5) : `indexing ${c.pagesIndexed}/${c.pagesStored}`;
+}
 
 export function table(rows) {
   const line = (cells) => cells.join(' ').trimEnd();
@@ -266,12 +303,20 @@ export function summary(results) {
   const by = (s) => results.filter((r) => r.status === s).length;
   const sum = (k) => results.reduce((n, r) => n + r.pages[k], 0);
   const cost = results.reduce((n, r) => n + r.costUsd, 0);
+  const final = results.filter((r) => r.costs?.indexingDone && r.costs.pagesStored);
+  const finalPages = final.reduce((n, r) => n + r.costs.pagesStored, 0);
+  const pending = results.filter((r) => r.costs && r.costs.tracked !== false && !r.costs.indexingDone).length;
+  const perPageLine = final.length
+    ? `per page: $${(final.reduce((n, r) => n + r.costs.totalUsd, 0) / finalPages).toFixed(5)} over ${finalPages} pages in ${final.length} fully indexed runs` +
+      (pending ? `; ${pending} runs still indexing (their costs are not final)` : '')
+    : pending ? `per page: indexing pending in ${pending} runs (rerun later, or use --wait-indexing N)` : null;
   return [
     `${results.length} sites: ${by('complete')} complete, ${by('rejected')} rejected (not devtools), ${by('failed')} failed, ` +
       `${by('error') + by('timeout')} not finished here`,
     `pages: ${sum('new')} new, ${sum('changed')} changed, ${sum('unchanged')} unchanged, ${sum('failed')} failed, ${sum('skipped')} skipped`,
-    `cost: $${cost.toFixed(4)} (browser crawls and gate AI checks; page classification is billed to the index caps)`,
-  ].join('\n');
+    `cost: $${cost.toFixed(5)} (browser sandboxes, gate AI checks, page classification and embeddings)`,
+    perPageLine,
+  ].filter(Boolean).join('\n');
 }
 
 const reasonLines = (results) =>
@@ -335,6 +380,8 @@ async function main() {
   };
   console.log(`crawling ${jobs.length} sites on ${o.api}, ${o.concurrency} at a time${o.force ? ' (force: no gate)' : ''}`);
   const { results } = await crawlAll(jobs, { ...o, onUpdate });
+  if (o.waitIndexingMs) console.log(`\nwaiting up to ${o.waitIndexingMs / 60_000} min for indexing to finish, for final costs…`);
+  await refreshCosts(results, { ...o, waitMs: o.waitIndexingMs });
   console.log(`\n${table(results)}\n\n${summary(results)}`);
   const reasons = reasonLines(results);
   if (reasons) console.log(`\nreasons:\n${reasons}`);

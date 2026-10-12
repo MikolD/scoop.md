@@ -61,6 +61,30 @@ export interface CrawlRunRow {
   gate_method: string | null;
   gate_reason: string | null;
   gate_cost_usd: number;
+  // Indexing this run's pages (migrations/0007_run_costs.sql), recomputed by the indexer.
+  classify_cost_usd: number;
+  embed_cost_usd: number;
+  pages_indexed: number;
+  costs_tracked: number; // 0: from before migration 0007, indexing costs unknown
+}
+
+// A run's spend, broken down. Per page is over the pages it stored (new +
+// changed); the total is final once every one of them is indexed.
+export function runCosts(r: CrawlRunRow) {
+  const pagesStored = r.pages_new + r.pages_changed;
+  const totalUsd = r.cost_usd + r.gate_cost_usd + r.classify_cost_usd + r.embed_cost_usd;
+  return {
+    browserUsd: r.cost_usd,
+    gateUsd: r.gate_cost_usd,
+    classifyUsd: r.classify_cost_usd,
+    embedUsd: r.embed_cost_usd,
+    totalUsd,
+    pagesStored,
+    pagesIndexed: r.pages_indexed,
+    perPageUsd: pagesStored ? totalUsd / pagesStored : null,
+    indexingDone: Boolean(r.costs_tracked) && r.pages_indexed >= pagesStored,
+    tracked: Boolean(r.costs_tracked),
+  };
 }
 
 export interface RecordStats {
@@ -301,7 +325,7 @@ export class CrawlStore {
     return stats;
   }
 
-  // Sends the site's pending index messages ({ site, url, contentHash }) in
+  // Sends the site's pending index messages ({ site, url, contentHash, runId }) in
   // batches of 100 and clears each flag only if the page's hash is still the
   // one sent. Safe to repeat: a resend after a failure is harmless, since the
   // consumer is idempotent on (url, contentHash). Returns how many were sent.
@@ -309,11 +333,12 @@ export class CrawlStore {
     let sent = 0;
     for (let i = 0; i < maxBatches; i++) {
       const { results } = await this.db
-        .prepare('SELECT url, content_hash FROM pages WHERE site = ? AND index_pending = 1 ORDER BY url LIMIT ?')
+        .prepare('SELECT url, content_hash, run_id FROM pages WHERE site = ? AND index_pending = 1 ORDER BY url LIMIT ?')
         .bind(site, OUTBOX_BATCH)
-        .all<{ url: string; content_hash: string }>();
+        .all<{ url: string; content_hash: string; run_id: string }>();
       if (!results.length) break;
-      await send(results.map((r) => ({ site, url: r.url, contentHash: r.content_hash })));
+      // run_id is the run that stored this content: it pays for indexing it.
+      await send(results.map((r) => ({ site, url: r.url, contentHash: r.content_hash, runId: r.run_id })));
       await this.db.batch(
         results.map((r) => this.db.prepare('UPDATE pages SET index_pending = 0 WHERE url = ? AND content_hash = ?').bind(r.url, r.content_hash)),
       );

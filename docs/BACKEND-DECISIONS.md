@@ -894,3 +894,56 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   extension zip) and calls `buildPackage(withCurrentPage(sections, null,
   pageUrl))`, i.e. what the popup copies on the skill's own page when the local
   scoop found nothing to add.
+
+## Cost per crawl
+
+What a crawl costs, so the average per crawl and per page is known over time.
+
+- **Four parts per run** (`crawl_run_costs` view, migration 0007):
+  - browser sandbox: `crawl_runs.cost_usd`, E2B seconds × the template's rate
+  - devtool gate: `gate_cost_usd`, the AI check
+  - page classification: `classify_cost_usd`, OpenRouter
+  - embeddings: `embed_cost_usd`, Workers AI, estimated
+  The total and the cost per page are computed in the view, not stored, so
+  they can't drift. Per page means per stored page (new + changed).
+- **Attribution.** The crawler's index messages now carry `runId` (from
+  `pages.run_id`, the run that stored that content). The indexer charges what
+  the page actually cost on this call to that run:
+  - classification: `usage.cost`, or the estimate when OpenRouter gives none;
+    nothing when the classification came from the R2 cache
+  - embeddings: the estimated tokens
+  The charge goes into `index_run_costs (run_id, url, content_hash)`, written
+  in the same D1 batch as the page_index write. The run's totals and
+  `pages_indexed` are then recomputed from those rows in that batch.
+- **No double counting.** A redelivered message whose work is already done
+  takes the `unchanged` path, which writes zeros (and marks the page indexed
+  for the run). Since the cost row commits atomically with the index write,
+  a message is charged only when its work actually ran. The keyed increments
+  therefore never double-count.
+- **Known undercount.** Spend on a failed attempt that is then retried (a
+  classifier outage before the fallback, or an embedding redone after a D1
+  failure) is in `index_costs` but not charged to the run.
+- **Other buckets:**
+  - The daily reclassify cron sends `runId: 'reclassify'`. Its spend goes to
+    `reclassify:YYYY-MM-DD`, apart from the run that crawled the page.
+  - `POST /v1/admin/index` and messages without a run go to `manual`.
+  - A page that is still pending when a later run fetches it unchanged is
+    charged to the later run (`pages.run_id` moved on); this is rare.
+- **The daily caps are unchanged.** `index_costs` is written exactly as before.
+- **Embedding rate.** `@cf/qwen/qwen3-embedding-0.6b` costs 1,075 neurons per
+  million input tokens at $0.011 per 1,000 neurons, about $0.0118 per million
+  tokens (developers.cloudflare.com/workers-ai/platform/pricing, last updated
+  Oct 9, 2026). Tokens are estimated with `chunk.ts` `estimateTokens`. The
+  10,000 free neurons a day are ignored, so this is an upper bound; for a
+  typical page it is a few millionths of a dollar.
+- **When a total is final.** A run's total is final once `pages_indexed`
+  reaches its stored pages (`indexing_done`), because classification and
+  embedding land after the crawl ends.
+  - The Costs page averages only runs whose total is final, and counts the
+    others as "still indexing".
+  - `crawl-seeds` re-reads every run at the end and prints the per-page cost,
+    or `indexing n/m`; `--wait-indexing N` waits for indexing to catch up.
+- **Averages** are weighted: total spend over total pages, per crawl, and per
+  path (markdown, html, browser, or rejected for runs the gate turned away).
+  A message dropped as permanent (missing R2 object) keeps its run at "still
+  indexing"; it shows up as indexed n/m.

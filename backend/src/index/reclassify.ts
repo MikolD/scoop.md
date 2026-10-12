@@ -6,7 +6,7 @@
 // at most what its own daily cap pays for, so one site can't starve the rest.
 
 import { DEFAULT_MODEL, estimateCost } from './classify.ts';
-import { ALL_SITES, MAX_ATTEMPTS, NEEDS_CLASSIFYING, spentToday } from './indexer.ts';
+import { ALL_SITES, MAX_ATTEMPTS, NEEDS_CLASSIFYING, RECLASSIFY_RUN, spentToday } from './indexer.ts';
 import type { IndexMessage } from './indexer.ts';
 
 export const MIN_BATCH = 50;
@@ -52,7 +52,7 @@ export async function reclassify(
     .bind(...NEEDS_CLASSIFYING, MAX_ATTEMPTS, perSite, limit)
     .all<{ url: string; site: string; content_hash: string }>();
   for (let i = 0; i < results.length; i += SEND_BATCH) {
-    await queue.sendBatch(results.slice(i, i + SEND_BATCH).map((r) => ({ body: { site: r.site, url: r.url, contentHash: r.content_hash } })));
+    await queue.sendBatch(results.slice(i, i + SEND_BATCH).map((r) => ({ body: { site: r.site, url: r.url, contentHash: r.content_hash, runId: RECLASSIFY_RUN } })));
   }
   return results.length;
 }

@@ -334,7 +334,8 @@ test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, f
   const third = await store.record('cr_3', 'ex.com', [page('https://ex.com/a', md('A2'))]);
   assert.deepEqual([third.new, third.changed, third.unchanged], [0, 1, 0]);
   await flush();
-  assert.deepEqual(Object.keys(sent[0]).sort(), ['contentHash', 'site', 'url']); // the M4 message contract, exactly
+  assert.deepEqual(Object.keys(sent[0]).sort(), ['contentHash', 'runId', 'site', 'url']); // the M4 message contract, exactly
+  assert.equal(sent[0].runId, 'cr_3'); // the run that stored the content pays for indexing it
   assert.equal(sent[0].contentHash, await contentHash(md('A2')));
   assert.ok(objects.has(`pages/${sent[0].contentHash}.md`));
   const row = raw.prepare("SELECT title, run_id, etag FROM pages WHERE url = 'https://ex.com/a'").get() as { title: string; run_id: string; etag: string | null };

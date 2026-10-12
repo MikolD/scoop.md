@@ -238,6 +238,67 @@ export async function reports(db: D1Database, f: { open: boolean; skillId?: stri
   }));
 }
 
+export interface RunCostRow {
+  id: string;
+  site: string;
+  status: string;
+  path: string | null;
+  forced: number;
+  started_at: string;
+  finished_at: string | null;
+  pages_stored: number;
+  pages_indexed: number;
+  browser_cost_usd: number;
+  gate_cost_usd: number;
+  classify_cost_usd: number;
+  embed_cost_usd: number;
+  total_cost_usd: number;
+  cost_per_page: number | null;
+  indexing_done: number;
+  costs_tracked: number;
+}
+
+// Cost per crawl over the last `days` days (the crawl_run_costs view): the
+// finished runs, newest first, and averages over the ones whose indexing has
+// caught up (their totals are final): per crawl, per stored page, and by path
+// (markdown | html | browser | ...; a rejected run has no path and costs only
+// its gate check). Per page is weighted: total spend / total pages. Runs from
+// before cost tracking are listed but never averaged.
+export async function crawlCosts(db: D1Database, days: number, now = new Date(), limit = 200) {
+  const since = daysAgo(now, days - 1);
+  const finished = `status IN ('complete', 'failed', 'rejected') AND started_at >= ?`;
+  const [runs, byPath, reclassify] = await db.batch([
+    db.prepare(`SELECT * FROM crawl_run_costs WHERE ${finished} ORDER BY started_at DESC, id DESC LIMIT ?`).bind(since, limit),
+    db.prepare(
+      `SELECT COALESCE(path, status) AS path, COUNT(*) AS runs, SUM(indexing_done = 0) AS pending,
+         SUM(CASE WHEN indexing_done THEN total_cost_usd ELSE 0 END) AS total,
+         SUM(CASE WHEN indexing_done THEN pages_stored ELSE 0 END) AS pages,
+         SUM(indexing_done) AS final_runs
+       FROM crawl_run_costs WHERE ${finished} AND costs_tracked GROUP BY COALESCE(path, status) ORDER BY runs DESC`,
+    ).bind(since),
+    db.prepare(
+      `SELECT substr(run_id, 12) AS day, COUNT(*) AS pages, SUM(classify_cost_usd) AS classify, SUM(embed_cost_usd) AS embed
+       FROM index_run_costs WHERE run_id >= ? AND run_id < 'reclassify;' GROUP BY run_id ORDER BY run_id DESC`,
+    ).bind(`reclassify:${since}`),
+  ]);
+  const groups = byPath.results as { path: string; runs: number; pending: number; total: number; pages: number; final_runs: number }[];
+  const avg = (g: { total: number; pages: number; final_runs: number }) => ({
+    perCrawlUsd: g.final_runs ? g.total / g.final_runs : null,
+    perPageUsd: g.pages ? g.total / g.pages : null,
+  });
+  const all = groups.reduce((a, g) => ({ total: a.total + num(g.total), pages: a.pages + num(g.pages), final_runs: a.final_runs + num(g.final_runs), pending: a.pending + num(g.pending), runs: a.runs + num(g.runs) }), { total: 0, pages: 0, final_runs: 0, pending: 0, runs: 0 });
+  return {
+    runs: runs.results as RunCostRow[],
+    averages: {
+      overall: { runs: all.runs, finalRuns: all.final_runs, pendingRuns: all.pending, totalUsd: all.total, pages: all.pages, ...avg(all) },
+      byPath: groups.map((g) => ({ path: g.path, runs: num(g.runs), finalRuns: num(g.final_runs), pendingRuns: num(g.pending), totalUsd: num(g.total), pages: num(g.pages), ...avg({ total: num(g.total), pages: num(g.pages), final_runs: num(g.final_runs) }) })),
+    },
+    reclassify: (reclassify.results as { day: string; pages: number; classify: number; embed: number }[]).map((r) => ({
+      day: r.day, pages: num(r.pages), classifyUsd: num(r.classify), embedUsd: num(r.embed),
+    })),
+  };
+}
+
 // Spend per day for the last `days` days: classifier and gate AI (index_costs,
 // per site and the account total) and crawl sandboxes (crawl_runs).
 export async function costs(db: D1Database, days: number, now = new Date()) {

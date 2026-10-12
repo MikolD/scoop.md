@@ -1,7 +1,7 @@
 // The v1 API (docs/BACKEND.md §5). Each route names its pattern for the request log.
 
 import { checkHourly, ipSubject } from '../db/ratelimit.ts';
-import { CrawlStore, STALE_RUN_HOURS } from '../db/crawl.ts';
+import { CrawlStore, runCosts, STALE_RUN_HOURS } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
 import type { SkillRow } from '../db/store.ts';
@@ -191,6 +191,8 @@ export function runJson(r: CrawlRunRow) {
     error: r.error,
     forced: Boolean(r.forced),
     gate: r.gate_decision ? { decision: r.gate_decision, ...gateJson(r), costUsd: r.gate_cost_usd } : null,
+    // costUsd above is the browser sandbox alone; this is everything.
+    costs: runCosts(r),
   };
 }
 

@@ -169,3 +169,4 @@ ul.plain { margin: 0; padding-left: 18px; }
 }
 .grid { display: grid; gap: var(--gap-sm); min-width: 0; }
 .offscreen { position: fixed; top: 0; left: 0; opacity: 0; pointer-events: none; }
+td .meter { min-width: 80px; margin-top: 6px; }
