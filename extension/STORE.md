@@ -79,10 +79,9 @@ In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real exte
 | File | Size | Shows |
 |---|---|---|
 | `1-stripe-webhooks-copied.png` | 1280×800 | docs.stripe.com/webhooks: "Copied. Paste it into your agent.", 2 sources (the page's `.md` and `llms.txt`), "Shared with the library" |
-| `2-bun-library-hit.png` | 1280×800 | bun.com/docs/runtime/http/server served from the library: "shared, worked for 3 people", vote buttons, "Rebuild from this page" |
+| `2-stripe-library-hit.png` | 1280×800 | docs.stripe.com/payments/checkout served from the live library (api.scoop.md): "shared, worked for 2 people", vote buttons, "Rebuild from this page" |
 | `3-python-html-converted.png` | 1280×800 | docs.python.org/3/library/json.html (no Markdown published) converted from HTML, the preview scrolled to a converted code block |
 | `4-settings.png` | 1280×800 | Settings: sharing toggle, theme, keyboard shortcut |
 | `promo-small-440x280.png` | 440×280 | Small promo tile: icon, "scoop.md", "Scoop any doc into your coding agent" on #ffeee0 |
-| `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup |
+| `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 2 |
 
-Screenshots 1 to 3 were taken against the local reference library (`npm run server`), so "Shared with the library" and the vote count come from test installs, not real users.
