@@ -94,6 +94,15 @@ const events = [
       the extension then downloads without your cookies). Whatever the sharing setting. Never for a page that only
       renders signed in, or on your computer or a private network.
     </p>
+    <h3>Checking links before copying</h3>
+    <p>
+      So your agent never gets a dead link, the links in a package built on your device (the page's own links, its
+      Markdown version, llms.txt and related pages) are checked before it's copied. When sharing is on, their addresses
+      (never ones on your computer or a private network) go to <code>api.scoop.md/v1/links/check</code>; any it can't
+      vouch for are checked directly from your browser with a request to that address, without your cookies. With
+      sharing off, only the direct checks run. Links that don't work, or can't be confirmed within about 2.5 seconds,
+      are turned into plain text.
+    </p>
     <h3>On the Overview and Search tabs</h3>
     <p>
       For an indexed site: the hostname, to get its topics (<code>/v1/sites/&lt;site&gt;/topics</code>), and what you type

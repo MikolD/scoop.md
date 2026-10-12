@@ -67,6 +67,10 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
     // Search tab and Overview tab, for indexed sites.
     search: (site, q, limit = 20) => call('GET', `/search?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}&limit=${limit}`, undefined, SEARCH_TIMEOUT_MS),
     queryPackage: (site, q) => call('GET', `/packages?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),
+    // The package for exactly these search-result chunks (≤30), in this order.
+    chunksPackage: (site, ids) => call('GET', `/packages?site=${encodeURIComponent(site)}&chunks=${ids.slice(0, 30).map(encodeURIComponent).join(',')}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),
+    // Which of these link addresses work ({ ok, bad, unknown }), for local packages (lib/links.js).
+    checkLinks: (urls, { timeoutMs = 2_000 } = {}) => call('POST', '/links/check', { urls: urls.slice(0, 200) }, timeoutMs),
     topics: (site) => call('GET', `/sites/${encodeURIComponent(site)}/topics`, undefined, SEARCH_TIMEOUT_MS),
     // Every indexed site with its page count, for the toolbar badge. With the
     // ETag of the copy we have, an unchanged list answers 304 and isn't sent again.

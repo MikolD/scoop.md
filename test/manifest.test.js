@@ -95,3 +95,10 @@ test('the store zip leaves out store artwork, docs, types, tests and source maps
   const pack = readFileSync(new URL('../scripts/pack-extension.js', import.meta.url), 'utf8');
   for (const pattern of ["'store-assets/*'", "'*.md'", "'*.d.ts'", "'*.test.js'", "'*.map'"]) assert.ok(pack.includes(pattern), pattern);
 });
+
+test('the link checks are disclosed on the privacy page and in STORE.md', () => {
+  const privacy = readFileSync(new URL('../site/src/pages/privacy.astro', import.meta.url), 'utf8');
+  const store = readFileSync(ext('STORE.md'), 'utf8');
+  for (const doc of [privacy, store]) assert.match(doc, /links\/check/);
+  assert.match(privacy, /When sharing is on, their addresses/);
+});

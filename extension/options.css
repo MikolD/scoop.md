@@ -38,3 +38,7 @@ main { display: grid; gap: var(--gap); }
 .foot a:hover { color: var(--link); }
 #version { margin-left: auto; }
 .mono { font-family: var(--mono); font-size: 0.95em; overflow-wrap: anywhere; user-select: all; }
+
+/* Pin hint */
+.pin-hint .text { display: flex; align-items: center; gap: var(--gap-sm); }
+.pin-hint .pin { width: 16px; height: 16px; flex: none; fill: none; stroke: var(--brand); stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }

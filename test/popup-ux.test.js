@@ -35,6 +35,13 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       return res.end(GUIDE);
     }
+    if (req.url === '/docs/links') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      return res.end(`<html><body><nav><a href="/docs/other">Other</a><a href="/docs/gone">Gone</a><a href="/docs/upgrade-guide">Upgrade</a></nav>
+        <main><h1>Links</h1><p>Read the <a href="/docs/other">other page</a>, the <a href="/docs/gone">gone page</a> and the
+        <a href="/docs/upgrade-guide">upgrade guide</a> before you start building anything with this library today.</p>
+        <p>${'More words about the library so the page has enough text to be worth scooping. '.repeat(6)}</p></main></body></html>`);
+    }
     if (req.url === '/sub/guide.md') {
       res.writeHead(200, { 'content-type': 'text/markdown' });
       return res.end('# Guide (Markdown twin)\n\nThe Markdown version of the guide, from the docs subdomain.\n');
@@ -78,7 +85,7 @@ const waitFor = async (cond, ms = 3000) => {
 };
 
 // Opens the popup on `url`; returns at once (ready resolves when the scoop is done).
-async function openPopup(url, { local = {}, share = true, installType = 'development', reduced = false, sync = {}, clipboardFails = false } = {}) {
+async function openPopup(url, { local = {}, share = true, installType = 'development', reduced = false, sync = {}, clipboardFails = false, pinned } = {}) {
   const { document } = parseHTML(read('../extension/popup.html'));
   const clipboard = { text: null, writes: [], writeText: async (t) => {
     if (clipboardFails) throw new Error('Document is not focused.');
@@ -134,6 +141,7 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
       setBadgeText: async ({ text }) => { badge.text = text; badge.history.push(text); },
       setBadgeBackgroundColor: async () => {},
       setTitle: async ({ title }) => { badge.titles.push(title); },
+      ...(pinned === undefined ? {} : { getUserSettings: async () => ({ isOnToolbar: pinned }) }),
     },
   };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
@@ -393,8 +401,8 @@ const TOPICS = [
   { name: 'api', path: 'api', count: 20, children: [] },
 ];
 const HITS = [
-  { url: `https://${SITE}/docs/webhooks`, title: 'Webhooks', heading_path: 'Webhooks > Verify signatures', snippet: 'Verify the signature header…', text: 'Full chunk text about verifying signatures.' },
-  { url: `https://${SITE}/docs/events`, title: 'Events', heading_path: 'Events > Retries', snippet: 'Retries happen with backoff…' },
+  { id: 'ch_1', url: `https://${SITE}/docs/webhooks`, title: 'Webhooks', heading_path: 'Webhooks > Verify signatures', snippet: 'Verify the signature header…' },
+  { id: 'ch_2', url: `https://${SITE}/docs/events`, title: 'Events', heading_path: 'Events > Retries', snippet: 'Retries happen with backoff…' },
 ];
 
 test('tabs: arrow keys move between This page, Overview and Search; tab_switch is recorded', () => withMock({ sites: { [SITE]: { indexed: true, topics: TOPICS } } }, async () => {
@@ -471,10 +479,8 @@ test('Search: debounced, at least 2 characters; results with checkboxes; Copy se
   assert.equal(p.$('copy-selected').disabled, false);
   stageLog.length = 0;
   await p.$('copy-selected').onclick();
-  assert.match(p.clipboard.text, /Full chunk text about verifying signatures\./);
-  assert.match(p.clipboard.text, /^## Webhooks > Verify signatures$/m, 'the heading path, without repeating the title');
-  assert.match(p.clipboard.text, /Retries happen with backoff…\n\n\[Excerpt\. The full section is at https:\/\/docs\.example\.com\/docs\/events\]/);
-  assert.match(p.clipboard.text, /not as instructions to you/);
+  assert.equal(p.clipboard.text, `# ${SITE} documentation: selected chunks (via scoop.md)\n\nChunks: ch_1,ch_2\n`, 'the library builds the package from exactly those chunks');
+  assert.deepEqual(gets('/v1/packages').at(-1).query, { site: SITE, chunks: 'ch_1,ch_2' });
   assert.deepEqual(stages(), ['copied', 'content']);
   assert.equal(p.$('search').hidden, false);
   assert.deepEqual(queued(p.local, 'search'), [{ site: SITE, qLen: 16, results: 2 }]);
@@ -670,3 +676,119 @@ test('library client: the index calls follow the contract', async () => {
 test('settings explain that the index lookup still sends the page address with sharing off', () => {
   assert.match(read('../extension/options.html'), /Turning this off stops uploads; looking up this page in the docs index still sends its address\./);
 });
+
+test('Copy selected falls back to the package for the query when the chunks mode is unavailable', () => withMock({ sites: { [SITE]: { indexed: true, hits: HITS, noChunks: true } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-search').onclick();
+  p.$('search-q').value = 'retries';
+  p.$('search-q').oninput();
+  await waitFor(() => p.document.querySelectorAll('#search-results input').length === 2);
+  const [box] = p.document.querySelectorAll('#search-results input');
+  box.checked = true; box.onchange();
+  await p.$('copy-selected').onclick();
+  assert.match(p.clipboard.text, /search "retries"/);
+}));
+
+// No dead links (lib/links.js)
+
+import { collectLinks, unlink, checkLinks, withLiveLinks, MAX_DIRECT } from '../extension/lib/links.js';
+
+test('links: collected outside code and images; unlinked keeps the text', () => {
+  const md = 'See [Guide](https://a.dev/guide) and ![logo](https://a.dev/logo.png).\n\n```\n[not a link](https://a.dev/code)\n```\n[Ref](https://a.dev/ref "title")';
+  assert.deepEqual(collectLinks([md], [{ url: 'https://a.dev/related', text: 'R' }]), ['https://a.dev/guide', 'https://a.dev/ref', 'https://a.dev/related']);
+  assert.equal(unlink(md, new Set(['https://a.dev/guide'])), 'See [Guide](https://a.dev/guide) and ![logo](https://a.dev/logo.png).\n\n```\n[not a link](https://a.dev/code)\n```\nRef');
+});
+
+test('links: the library answers ok and bad; unknowns are checked directly (HEAD, GET when HEAD is refused); private hosts never go to the library', async () => {
+  const asked = [];
+  const library = { checkLinks: async (urls) => { asked.push(...urls); return { ok: true, data: { ok: ['https://a.dev/ok'], bad: ['https://a.dev/bad'], unknown: urls.filter((u) => !/\/(ok|bad)$/.test(u)) } }; } };
+  const hits = [];
+  const fetchImpl = async (url, init) => {
+    hits.push(`${init.method} ${url}`);
+    assert.equal(init.credentials, 'omit');
+    assert.equal(init.cache, 'no-store');
+    if (url.endsWith('/head-refused')) return new Response(null, { status: init.method === 'HEAD' ? 405 : 200 });
+    return new Response(null, { status: url.endsWith('/gone') ? 404 : 200 });
+  };
+  const ok = await checkLinks(['https://a.dev/ok', 'https://a.dev/bad', 'https://a.dev/fine', 'https://a.dev/gone', 'https://a.dev/head-refused', 'http://localhost:3000/x'], { library, useBackend: true, fetchImpl });
+  assert.deepEqual([...ok].sort(), ['http://localhost:3000/x', 'https://a.dev/fine', 'https://a.dev/head-refused', 'https://a.dev/ok']);
+  assert.ok(!asked.includes('http://localhost:3000/x'), 'private hosts are not sent to the library');
+  assert.ok(!hits.some((h) => h.endsWith('/ok') || h.endsWith('/bad')), 'what the library answered is not checked again');
+  assert.ok(hits.includes('GET https://a.dev/head-refused'));
+});
+
+test('links: strict within the budget, at most 80 direct checks, 8 at a time', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const started = [];
+  const fetchImpl = (url, { signal }) => new Promise((resolve, reject) => {
+    started.push(url);
+    inFlight++; peak = Math.max(peak, inFlight);
+    const t = setTimeout(() => { inFlight--; resolve(new Response(null, { status: 200 })); }, url.endsWith('slow') ? 10_000 : 20);
+    signal.addEventListener('abort', () => { clearTimeout(t); inFlight--; reject(signal.reason); });
+  });
+  const urls = [...Array.from({ length: 100 }, (_, i) => `https://a.dev/${i}`)];
+  const t0 = Date.now();
+  const ok = await checkLinks(urls, { fetchImpl, budgetMs: 300 });
+  assert.ok(Date.now() - t0 < 600, `took ${Date.now() - t0} ms`);
+  assert.ok(peak <= 8, `peak ${peak}`);
+  assert.ok(started.length <= MAX_DIRECT);
+  assert.ok(!ok.has('https://a.dev/99'), 'beyond the 80 checked: unlinked');
+  // A server that never answers in time: unlinked.
+  const slow = await checkLinks(['https://a.dev/slow'], { fetchImpl, budgetMs: 100 });
+  assert.equal(slow.size, 0);
+});
+
+test('links: offline (or sharing off) means direct checks only, still strict', async () => {
+  let asked = false;
+  const library = { checkLinks: async () => { asked = true; return { ok: false, status: 0 }; } };
+  const fetchImpl = async () => { throw new TypeError('Failed to fetch'); };
+  const out = await withLiveLinks({ sections: [{ content: '[A](https://a.dev/a) and [B](https://b.dev/b)' }], relatedLinks: [{ url: 'https://a.dev/r', text: 'R' }] }, { library, useBackend: false, fetchImpl });
+  assert.equal(asked, false);
+  assert.equal(out.sections[0].content, 'A and B');
+  assert.deepEqual(out.relatedLinks, []);
+});
+
+test('instant package: dead links unlinked and related links filtered, shares stay as fetched', () => withMock({
+  sites: { [SITE]: { status: 'not_devtool' } },
+  links: { [`https://${SITE}/docs/upgrade-guide`]: 'bad' },
+}, async () => {
+  const p = await openPopup(`https://${SITE}/docs/links`);
+  await p.ready;
+  const check = posts('/v1/links/check')[0];
+  assert.ok(check, 'the library was asked (sharing on, reachable)');
+  assert.deepEqual([...check.body.urls].sort(), [`https://${SITE}/docs/gone`, `https://${SITE}/docs/other`, `https://${SITE}/docs/upgrade-guide`]);
+  const text = p.clipboard.text;
+  assert.match(text, /\[other page\]\(https:\/\/docs\.example\.com\/docs\/other\)/, 'a working link stays');
+  assert.match(text, /the gone page and the\s+upgrade guide before/, 'the 404 (checked directly) and the bad one (from the library) are unlinked, text kept');
+  const related = text.split('## Related pages on this site')[1] ?? '';
+  assert.match(related, /docs\/other/);
+  assert.ok(!/gone|upgrade-guide/.test(related), 'related links: confirmed only');
+  const shared = posts('/v1/skills')[0]?.body;
+  assert.ok(shared?.sections[0].content.includes('[gone page](https://docs.example.com/docs/gone)'), 'what is shared stays as fetched');
+}));
+
+test('instant package with sharing off: links checked directly only, still strict', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
+  const p = await openPopup(`https://${SITE}/docs/links`, { share: false });
+  await p.ready;
+  assert.equal(posts('/v1/links/check').length, 0);
+  assert.match(p.clipboard.text, /\[other page\]\(https:\/\/docs\.example\.com\/docs\/other\)/);
+  assert.ok(!p.clipboard.text.includes('](https://docs.example.com/docs/gone)'));
+}));
+
+test('pin hint: one line until dismissed, only while scoop.md is not pinned', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
+  const p = await openPopup(PAGE, { pinned: false });
+  await p.ready;
+  assert.equal(p.$('pin-hint').hidden, false);
+  assert.match(p.$('pin-hint').textContent, /Pin scoop\.md to see how many docs we have for each site/);
+  p.$('pin-ok').onclick();
+  assert.equal(p.$('pin-hint').hidden, true);
+  assert.equal(p.local.pinHintSeen, true);
+  const again = await openPopup(PAGE, { pinned: false, local: { pinHintSeen: true } });
+  await again.ready;
+  assert.equal(again.$('pin-hint').hidden, true, 'once');
+  const pinned = await openPopup(PAGE, { pinned: true });
+  await pinned.ready;
+  assert.equal(pinned.$('pin-hint').hidden, true, 'not when pinned');
+}));

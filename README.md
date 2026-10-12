@@ -22,6 +22,8 @@ A site that isn't indexed yet (public page, sharing on) is indexed in the backgr
 
 The toolbar icon shows, per tab, how many docs pages are indexed for the tab's site, looked up in `GET /v1/sites/index` (downloaded every 6 hours with If-None-Match; no request per page). The popup's **Overview** and **Search** tabs work on indexed sites: the topic tree and llms.txt with "Copy overview", or search with checkboxes, "Copy selected" and "Copy all results".
 
+Packages built in the extension never carry dead links: before copying, every link is checked (`POST /v1/links/check` when sharing is on, then HEAD/GET from the browser without cookies, about 2.5 s at most, inside the loader), and bad or unconfirmed links become plain text. What's shared stays exactly as fetched.
+
 Only material fetched without your cookies is shared with the library. If a page only renders when you're signed in, you still get it on your clipboard, but it's never uploaded.
 
 ## Run it
@@ -58,6 +60,7 @@ extension/            Chrome MV3 extension
   lib/package.js      assembles the clipboard document within a size budget
   lib/crawl.js        background crawl requests: progress labels, pending requests
   lib/badge.js        the per-tab toolbar badge and the downloaded sites index
+  lib/links.js        no dead links: checks a local package's links and unlinks bad ones
   lib/ux.js           popup timing (loader minimum, copied moment, follow-up and search debounce)
   popup.js            the click flow
   STORE.md            Chrome Web Store listing, permissions, data disclosures

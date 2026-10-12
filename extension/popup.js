@@ -6,6 +6,7 @@ import { createTelemetry, docsLike, getInstallId, NOTICE_KEY, pagePath, errorTex
 import { registrableDomain } from './lib/hosts.js';
 import { forgetCrawl, isTerminal, loadPending, progressText, rememberCrawl } from './lib/crawl.js';
 import { compactCount } from './lib/badge.js';
+import { withLiveLinks } from './lib/links.js';
 import { logStage, reducedMotion, sleep, timing } from './lib/ux.js';
 
 const DEFAULTS = { share: true };
@@ -218,17 +219,6 @@ async function copyAndRecord({ text, summary, scoop = null, sections = [], share
 
 const deliver = async (pkg) => revealAfterCopy(await copyAndRecord(pkg));
 
-// The package built here from the page, as before the docs index existed.
-async function deliverLocal(scoop, { crawlNote = '' } = {}) {
-  if (!scoop?.sections.length) throw new Error(NO_TEXT);
-  const site = siteKey(tab.url);
-  const text = buildPackage({ site, pageUrl: scoop.pageUrl, sections: scoop.sections, relatedLinks: scoop.relatedLinks });
-  note('crawl-note', crawlNote);
-  const ok = await copyAndRecord({ text, scoop, sections: scoop.sections, summary: `${kb(text)} · ${plural(scoop.sections.length, 'source')} on ${site}` });
-  // Sharing runs while the animation plays; both finish before the scoop does.
-  await Promise.all([revealAfterCopy(ok), share(scoop)]);
-}
-
 async function deliverShared(shared, scoop) {
   const site = siteKey(tab.url);
   const sections = withCurrentPage(shared.sections, currentPageSection(scoop), tab.url);
@@ -286,7 +276,15 @@ async function deliverInstant(scoop, quick) {
     else if (!sections.some((x) => x.kind === s.kind)) sections.push(s);
   }
   if (!sections.length) throw new Error(NO_TEXT);
-  const text = buildPackage({ site, pageUrl: scoop?.pageUrl ?? tab.url, sections, relatedLinks: scoop?.relatedLinks ?? [] });
+  // No dead links for the agent (lib/links.js): bad or unconfirmed links are
+  // unlinked, inside the loader's time. The library is asked only when it is
+  // reachable and sharing is on; what's shared stays exactly as fetched.
+  const live = await withLiveLinks({ sections, relatedLinks: scoop?.relatedLinks ?? [] }, {
+    library,
+    useBackend: Boolean(settings.share && siteInfo?.libraryUp && !current.private),
+  });
+  sections = live.sections;
+  const text = buildPackage({ site, pageUrl: scoop?.pageUrl ?? tab.url, sections, relatedLinks: live.relatedLinks });
   const ok = await copyAndRecord({ text, scoop, sections, summary: `${kb(text)} · ${plural(sections.length, 'source')} on ${site}` });
   // Sharing runs while the animation plays; both finish before the scoop does.
   await Promise.all([revealAfterCopy(ok), scoop ? share(scoop) : null]);
@@ -373,7 +371,8 @@ async function run({ skipLibrary = false } = {}) {
   ]);
   const shared = best?.ok && best.data?.skill?.sections?.length ? best.data.skill : null;
   const index = siteStatus?.ok ? siteStatus.data : null;
-  siteInfo = { site, index, pending, ask };
+  // Reachable: it answered either question (a 4xx/5xx counts; no answer doesn't).
+  siteInfo = { site, index, pending, ask, libraryUp: Boolean(best?.status || siteStatus?.status) };
   const scoop = await local.catch((e) => {
     if (shared) return null; // the shared skill still works without the page
     throw e;
@@ -616,21 +615,22 @@ function updateSearchButtons() {
   $('copy-all').disabled = !hits.length;
 }
 
-// Selected results become one package: each chunk's text when the library
-// sends it, else its snippet and a link to the full section.
+// Selected results become one package built by the library from exactly
+// those chunks (GET /packages?chunks=), else the package for the query.
 $('copy-selected').onclick = async () => {
   const site = indexedSite();
   const chosen = selectedHits();
+  const q = $('search-q').value.trim();
   if (!site || !chosen.length) return;
-  const sections = chosen.map((h) => ({
-    kind: 'index',
-    // The heading path usually starts with the page title already.
-    label: (h.heading_path?.startsWith(h.title ?? '\u0000') ? h.heading_path : [h.title, h.heading_path].filter(Boolean).join(' › ')).slice(0, 200) || h.url,
-    url: h.url,
-    content: h.text?.trim() || `${h.snippet ?? ''}\n\n[Excerpt. The full section is at ${h.url}]`,
-  }));
-  const text = buildPackage({ site, pageUrl: tab.url, sections });
-  const ok = await writeClipboard(text);
+  $('search-status').textContent = 'Building the package…';
+  const ids = chosen.map((h) => h.id).filter(Boolean).slice(0, 30);
+  let res = ids.length === chosen.length ? await library.chunksPackage(site, ids) : { ok: false };
+  if (!res.ok || !res.data?.trim()) res = q.length >= 2 ? await library.queryPackage(site, q) : res;
+  if (!res.ok || !res.data?.trim()) {
+    $('search-status').textContent = "Couldn't build a package for these results. Try again.";
+    return;
+  }
+  const ok = await writeClipboard(res.data);
   $('search-status').textContent = ok ? `Copied ${plural(chosen.length, 'result')}. Paste it into your agent.` : "Couldn't copy. Try again.";
   if (ok) track('copy_search', { site, count: chosen.length });
   await revealAfterCopy(ok);
@@ -716,6 +716,22 @@ async function usageNotice() {
   };
 }
 
+// One line, once: pinning shows the docs count for each site on the icon.
+const PIN_KEY = 'pinHintSeen';
+async function pinHint() {
+  try {
+    const { [PIN_KEY]: seen } = await chrome.storage.local.get(PIN_KEY);
+    if (seen || (await chrome.action.getUserSettings?.())?.isOnToolbar !== false) return;
+  } catch {
+    return;
+  }
+  $('pin-hint').hidden = false;
+  $('pin-ok').onclick = () => {
+    $('pin-hint').hidden = true;
+    chrome.storage.local.set({ [PIN_KEY]: true });
+  };
+}
+
 async function intro() {
   const { introSeen } = await chrome.storage.local.get('introSeen');
   if (introSeen || !settings.share) return;
@@ -778,6 +794,7 @@ async function main() {
   };
   library = createLibrary(libraryOptions);
   await usageNotice();
+  await pinHint();
   await intro();
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!/^https?:/.test(tab?.url || '')) {
