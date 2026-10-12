@@ -67,6 +67,7 @@ export function fakeR2() {
       const v = objects.get(key);
       return v === undefined ? null : { json: async () => JSON.parse(v) };
     },
+    async head(key: string) { return objects.has(key) ? {} : null; },
     async delete(key: string) { objects.delete(key); },
   };
   return { r2: r2 as unknown as R2Bucket, objects };

@@ -1,0 +1,371 @@
+// Crawl pipeline: robots, sitemaps, llms.txt links, twins, client-shell
+// detection, politeness, change detection and the R2 presign helper.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { gzipSync } from 'node:zlib';
+import { matches, parseRobots } from '../src/crawl/robots.ts';
+import { parseSitemap } from '../src/crawl/sitemap.ts';
+import { docsRoot, llmsBases, llmsLinks, looksLikeClientShell, openApiLinks, twinUrl } from '../src/crawl/discover.ts';
+import { crawlFetch, HostLimiter, intervalFor } from '../src/crawl/polite.ts';
+import type { Clock } from '../src/crawl/polite.ts';
+import { classify, contentHash, needsIndexing, pageKey } from '../src/crawl/changes.ts';
+import { amzDate, presign, r2Endpoint, uriEncode } from '../src/crawl/presign.ts';
+import { discoverSite, fetchPlanned, markdownTitle } from '../src/crawl/site.ts';
+import { CrawlStore } from '../src/db/crawl.ts';
+import { fakeD1, fakeFetch, fakeR2 } from './helpers.ts';
+
+// --- robots.txt
+
+test('robots: our group wins over *, longest match wins, Allow wins ties', () => {
+  const r = parseRobots(`
+User-agent: *
+Disallow: /
+
+User-agent: Scoop.md-Bot
+Disallow: /private
+Allow: /private/ok
+Disallow: /*.json$
+Crawl-delay: 2
+Sitemap: https://ex.com/sitemap.xml
+`);
+  assert.equal(r.allowed('/docs/a'), true);
+  assert.equal(r.allowed('/private/x'), false);
+  assert.equal(r.allowed('/private/ok/y'), true);
+  assert.equal(r.allowed('/data.json'), false);
+  assert.equal(r.allowed('/data.json?x=1'), true);
+  assert.equal(r.crawlDelay, 2);
+  assert.deepEqual(r.sitemaps, ['https://ex.com/sitemap.xml']);
+});
+
+test('robots: falls back to *, consecutive user-agent lines share a group, empty Disallow allows', () => {
+  const r = parseRobots('User-agent: googlebot\nUser-agent: *\nDisallow: /admin # comment\n\nUser-agent: other\nDisallow:\n');
+  assert.equal(r.allowed('/admin/x'), false);
+  assert.equal(r.allowed('/docs'), true);
+  assert.equal(r.allowed('/robots.txt'), true);
+  const open = parseRobots('User-agent: *\nDisallow:\n');
+  assert.equal(open.allowed('/anything'), true);
+  const none = parseRobots('');
+  assert.equal(none.allowed('/x'), true);
+  const tie = parseRobots('User-agent: *\nDisallow: /a\nAllow: /a\n');
+  assert.equal(tie.allowed('/a'), true);
+});
+
+test('robots: wildcard matching is linear and correct', () => {
+  assert.equal(matches('/a*b', '/axxb'), true);
+  assert.equal(matches('/a*b$', '/axxbc'), false);
+  assert.equal(matches('/a*b', '/axxbc'), true);
+  assert.equal(matches('/', '/'), true);
+  assert.equal(matches('/x', '/'), false);
+  assert.equal(matches('*', '/q'), true);
+  const t0 = performance.now();
+  assert.equal(matches('/' + '*a'.repeat(200) + 'b$', '/' + 'a'.repeat(2000)), false);
+  assert.ok(performance.now() - t0 < 500);
+});
+
+// --- sitemaps
+
+test('sitemap: urlset with entities, CDATA and lastmod; ignores image:loc', () => {
+  const xml = `<?xml version="1.0"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://ex.com/docs/a?x=1&amp;y=2</loc><lastmod>2026-01-01</lastmod><image:image><image:loc>https://ex.com/i.png</image:loc></image:image></url>
+  <url><loc><![CDATA[https://ex.com/docs/b]]></loc></url>
+  <url ><loc> https://ex.com/docs/c </loc></url>
+</urlset>`;
+  const s = parseSitemap(xml);
+  assert.equal(s.kind, 'urlset');
+  assert.deepEqual(s.entries, [
+    { loc: 'https://ex.com/docs/a?x=1&y=2', lastmod: '2026-01-01' },
+    { loc: 'https://ex.com/docs/b', lastmod: null },
+    { loc: 'https://ex.com/docs/c', lastmod: null },
+  ]);
+});
+
+test('sitemap: index lists child sitemaps', () => {
+  const s = parseSitemap('<sitemapindex><sitemap><loc>https://ex.com/s1.xml</loc></sitemap><sitemap><loc>https://ex.com/s2.xml.gz</loc></sitemap></sitemapindex>');
+  assert.equal(s.kind, 'index');
+  assert.deepEqual(s.entries.map((e) => e.loc), ['https://ex.com/s1.xml', 'https://ex.com/s2.xml.gz']);
+});
+
+// --- llms.txt and discovery helpers
+
+test('llmsLinks: same-site Markdown links resolved against the file, fragments dropped', () => {
+  const text = `# Ex
+> Docs
+- [Quickstart](/docs/quickstart.md): start here
+- [API](https://ex.com/docs/api.md#top "API ref")
+- [Elsewhere](https://other.com/x.md)
+- [Rel](guide/intro)
+- [Mail](mailto:a@ex.com)
+- [Dup](https://ex.com/docs/api.md)`;
+  assert.deepEqual(llmsLinks(text, 'https://www.ex.com/docs/llms.txt'), [
+    'https://www.ex.com/docs/quickstart.md',
+    'https://ex.com/docs/api.md',
+    'https://www.ex.com/docs/guide/intro',
+  ]);
+});
+
+test('llmsBases: start path first, then docs prefixes, then the root', () => {
+  assert.deepEqual(llmsBases('https://ex.com', '/d1/get-started'), ['https://ex.com/d1', 'https://ex.com/docs', 'https://ex.com']);
+  assert.deepEqual(llmsBases('https://ex.com', ''), ['https://ex.com/docs', 'https://ex.com/documentation', 'https://ex.com']);
+});
+
+test('twinUrl, docsRoot and openApiLinks', () => {
+  assert.equal(twinUrl('https://ex.com/docs/a/', 'suffix'), 'https://ex.com/docs/a.md');
+  assert.equal(twinUrl('https://ex.com/docs/a', 'index'), 'https://ex.com/docs/a/index.md');
+  assert.equal(twinUrl('https://ex.com/a.html', 'suffix'), null);
+  assert.equal(twinUrl('https://ex.com/', 'index'), 'https://ex.com/index.md');
+  const urls = ['https://ex.com/docs/a', 'https://ex.com/docs/b', 'https://ex.com/blog/c', 'https://ex.com/pricing'];
+  assert.equal(docsRoot('', urls), '/docs');
+  assert.equal(docsRoot('/d1/', urls), '/d1');
+  assert.equal(docsRoot('', ['https://ex.com/a', 'https://ex.com/b']), '/');
+  assert.deepEqual(openApiLinks(['https://ex.com/openapi.json', 'https://ex.com/api/v1/swagger.yaml', 'https://ex.com/docs']), [
+    'https://ex.com/openapi.json',
+    'https://ex.com/api/v1/swagger.yaml',
+  ]);
+});
+
+test('needs_browser: client-rendered shells vs server-rendered docs', () => {
+  const shell = '<!doctype html><html><head><script src="/a.js"></script></head><body><div id="root"></div><noscript>You need to enable JavaScript to run this app.</noscript></body></html>';
+  assert.equal(looksLikeClientShell(shell), true);
+  const next = '<html><body><div id="__next"></div><script>1</script><script>2</script><script>3</script></body></html>';
+  assert.equal(looksLikeClientShell(next), true);
+  const prose = Array.from({ length: 200 }, (_, i) => `word${i}`).join(' ');
+  const ssr = `<html><body><div id="root"><main><h1>Docs</h1><p>${prose}</p></main></div><script src="/a.js"></script></body></html>`;
+  assert.equal(looksLikeClientShell(ssr), false);
+  assert.equal(looksLikeClientShell('<html><body><h1>Tiny static page</h1><p>Hello.</p></body></html>'), false);
+});
+
+test('markdownTitle takes the first h1/h2', () => {
+  assert.equal(markdownTitle('intro\n\n# Webhooks #\n\n## More'), 'Webhooks');
+  assert.equal(markdownTitle('no heading'), null);
+});
+
+// --- politeness
+
+function fakeClock(): Clock & { t: number; sleeps: number[] } {
+  const c = {
+    t: 0,
+    sleeps: [] as number[],
+    now: () => c.t,
+    async sleep(ms: number) {
+      c.sleeps.push(ms);
+      c.t += ms;
+    },
+  };
+  return c;
+}
+
+test('politeness: request starts are spaced by the interval, concurrency is capped', async () => {
+  const clock = fakeClock();
+  const limiter = new HostLimiter({ concurrency: 2, intervalMs: 1000, clock });
+  const starts: number[] = [];
+  let active = 0;
+  let maxActive = 0;
+  await Promise.all(
+    Array.from({ length: 5 }, () =>
+      limiter.run(async () => {
+        starts.push(clock.t);
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 5));
+        active--;
+      }),
+    ),
+  );
+  assert.deepEqual(starts, [0, 1000, 2000, 3000, 4000]);
+  assert.ok(maxActive <= 2);
+  assert.equal(limiter.nextStart, 5000);
+});
+
+test('politeness: Crawl-delay raises the interval, capped at 10 s', () => {
+  assert.equal(intervalFor(null), 1000);
+  assert.equal(intervalFor(0.2), 1000);
+  assert.equal(intervalFor(3), 3000);
+  assert.equal(intervalFor(120), 10_000);
+});
+
+test('crawlFetch: sends our UA and validators, returns 304, refuses off-site redirects and private hosts', async () => {
+  const limiter = new HostLimiter({ intervalMs: 0 });
+  const { impl, calls } = fakeFetch({
+    'https://ex.com/a.md': () => new Response(null, { status: 304, headers: { etag: '"v1"' } }),
+    'https://ex.com/r': () => new Response(null, { status: 302, headers: { location: 'https://evil.com/x' } }),
+    'https://ex.com/r2': () => new Response(null, { status: 301, headers: { location: 'http://127.0.0.1/' } }),
+  });
+  const r = await crawlFetch('https://ex.com/a.md', { limiter, fetchImpl: impl, etag: '"v1"', lastModified: 'Mon, 01 Jan 2026 00:00:00 GMT' });
+  assert.equal(r.ok && r.notModified, true);
+  const h = calls[0].init.headers as Record<string, string>;
+  assert.match(h['user-agent'], /^scoop\.md-bot \(\+https:\/\/scoop\.md\/bot\)$/);
+  assert.equal(h['if-none-match'], '"v1"');
+  assert.equal(calls[0].init.redirect, 'manual');
+  const off = await crawlFetch('https://ex.com/r', { limiter, fetchImpl: impl });
+  assert.equal(off.ok, false);
+  const priv = await crawlFetch('https://ex.com/r2', { limiter, fetchImpl: impl });
+  assert.equal(priv.ok, false);
+  const direct = await crawlFetch('https://10.0.0.1/', { limiter, fetchImpl: impl });
+  assert.equal(direct.ok, false);
+  assert.equal(calls.length, 3); // the private IP was never fetched
+});
+
+test('crawlFetch: caps the body and gunzips .gz sitemaps', async () => {
+  const limiter = new HostLimiter({ intervalMs: 0 });
+  const xml = '<urlset><url><loc>https://ex.com/a</loc></url></urlset>';
+  const { impl } = fakeFetch({
+    'https://ex.com/big': () => new Response('x'.repeat(5000)),
+    'https://ex.com/s.xml.gz': () => new Response(gzipSync(xml)),
+  });
+  const big = await crawlFetch('https://ex.com/big', { limiter, fetchImpl: impl, cap: 1000 });
+  assert.equal(big.ok && !big.notModified && big.over, true);
+  const gz = await crawlFetch('https://ex.com/s.xml.gz', { limiter, fetchImpl: impl });
+  assert.equal(gz.ok && !gz.notModified && gz.text, xml);
+});
+
+// --- discovery end to end over a fake site
+
+const md = (title: string) => `# ${title}\n\n${'Some documentation text. '.repeat(10)}`;
+
+test('discoverSite: llms.txt, sitemap and .md twins produce a profile and a fetch plan; robots is honoured', async () => {
+  const text = (body: string) => () => new Response(body, { headers: { 'content-type': 'text/plain' } });
+  const { impl } = fakeFetch({
+    'https://ex.com/docs/llms.txt': text(`# Ex\n- [A](https://ex.com/docs/a.md)\n- [B](https://ex.com/docs/b)\n- [Secret](https://ex.com/docs/private/s.md)`),
+    'https://ex.com/sitemap.xml': text(
+      '<urlset>' + ['a', 'b', 'c', 'private/s'].map((p) => `<url><loc>https://ex.com/docs/${p}</loc></url>`).join('') + '<url><loc>https://ex.com/blog/x</loc></url></urlset>',
+    ),
+    'https://ex.com/docs/a.md': text(md('A')),
+    'https://ex.com/docs/b.md': text(md('B')),
+    'https://ex.com/docs/c.md': text(md('C')),
+  });
+  const robots = { state: 'ok' as const, text: 'User-agent: *\nDisallow: /docs/private\n' };
+  const d = await discoverSite('https://ex.com/', robots, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.llmsUrl, 'https://ex.com/docs/llms.txt');
+  assert.equal(d.llmsFullUrl, null);
+  assert.equal(d.docsRoot, '/docs');
+  assert.equal(d.sitemapUrlsCount, 5);
+  assert.equal(d.twinPattern, 'suffix');
+  assert.equal(d.twinRatio, 1);
+  assert.equal(d.needsBrowser, false);
+  assert.deepEqual(d.plan.map((p) => [p.kind, p.url, p.sourceUrl]), [
+    ['llms', 'https://ex.com/docs/llms.txt', 'https://ex.com/docs/llms.txt'],
+    ['page-md', 'https://ex.com/docs/a.md', 'https://ex.com/docs/a.md'],
+    ['page-md', 'https://ex.com/docs/b', 'https://ex.com/docs/b.md'],
+    ['page-md', 'https://ex.com/docs/c', 'https://ex.com/docs/c.md'],
+  ]);
+  const budgeted = await discoverSite('https://ex.com/', robots, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }), budget: 2 });
+  assert.equal(budgeted.plan.length, 2);
+});
+
+test('discoverSite: no Markdown and a JS shell means needs_browser; disallowed start URL means blocked', async () => {
+  const shell = '<html><body><div id="app"></div><script src="/x.js"></script></body></html>';
+  const { impl } = fakeFetch({
+    'https://spa.com/': () => new Response(shell, { headers: { 'content-type': 'text/html' } }),
+    'https://spa.com/docs/llms.txt': () => new Response(shell, { headers: { 'content-type': 'text/html' } }), // SPA catch-all
+  });
+  const d = await discoverSite('https://spa.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.llmsUrl, null);
+  assert.equal(d.clientShell, true);
+  assert.equal(d.needsBrowser, true);
+  assert.deepEqual(d.browserStartUrls, ['https://spa.com/']);
+  const blocked = await discoverSite('https://spa.com/', { state: 'ok', text: 'User-agent: scoop.md-bot\nDisallow: /' }, { fetchImpl: impl });
+  assert.equal(blocked.blocked, true);
+  assert.equal(blocked.plan.length, 0);
+  const down = await discoverSite('https://spa.com/', { state: 'unreachable', text: '' }, { fetchImpl: impl });
+  assert.equal(down.blocked, true);
+});
+
+// --- change detection and storage
+
+test('classify: new, changed, unchanged (same hash or 304); only changes are indexed', async () => {
+  const h = await contentHash('x');
+  const prev = { content_hash: h, etag: null, last_modified: null };
+  assert.equal(classify(null, h), 'new');
+  assert.equal(classify(prev, h), 'unchanged');
+  assert.equal(classify(prev, null), 'unchanged');
+  assert.equal(classify(prev, await contentHash('y')), 'changed');
+  assert.equal(needsIndexing('unchanged'), false);
+  assert.equal(needsIndexing('changed'), true);
+  assert.equal(pageKey(h), `pages/${h}.md`);
+});
+
+test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, queues only changes', async () => {
+  const { d1, raw } = fakeD1();
+  const { r2, objects } = fakeR2();
+  const store = new CrawlStore(d1, r2);
+  const page = (url: string, markdown: string | null, etag: string | null = null) => ({
+    url,
+    sourceUrl: `${url}.md`,
+    kind: 'page-md' as const,
+    title: markdown ? markdownTitle(markdown) : null,
+    markdown,
+    etag,
+    lastModified: null,
+  });
+  const first = await store.record('cr_1', 'ex.com', [page('https://ex.com/a', md('A'), '"a1"'), page('https://ex.com/b', md('A'))]);
+  assert.deepEqual([first.new, first.changed, first.unchanged], [2, 0, 0]);
+  assert.equal(objects.size, 1); // same content, one object
+  assert.equal(first.toIndex.length, 2);
+
+  const puts = objects.size;
+  const second = await store.record('cr_2', 'ex.com', [page('https://ex.com/a', null, '"a1"'), page('https://ex.com/b', md('A')), page('https://ex.com/c', md('C'))]);
+  assert.deepEqual([second.new, second.changed, second.unchanged], [1, 0, 2]);
+  assert.deepEqual(second.toIndex.map((m) => m.url), ['https://ex.com/c']);
+  assert.equal(objects.size, puts + 1);
+
+  const third = await store.record('cr_3', 'ex.com', [page('https://ex.com/a', md('A2'))]);
+  assert.deepEqual([third.new, third.changed, third.unchanged], [0, 1, 0]);
+  assert.equal(third.toIndex[0].change, 'changed');
+  const row = raw.prepare("SELECT title, run_id, etag FROM pages WHERE url = 'https://ex.com/a'").get() as { title: string; run_id: string; etag: string | null };
+  assert.equal(row.title, 'A2');
+  assert.equal(row.run_id, 'cr_3');
+  const b = raw.prepare("SELECT run_id, title FROM pages WHERE url = 'https://ex.com/b'").get() as { run_id: string; title: string };
+  assert.deepEqual({ ...b }, { run_id: 'cr_2', title: 'A' });
+});
+
+test('fetchPlanned: conditional requests, HTML and failures are not stored', async () => {
+  const { impl, calls } = fakeFetch({
+    'https://ex.com/a.md': () => new Response(null, { status: 304 }),
+    'https://ex.com/b.md': () => new Response('<!doctype html><p>nope</p>', { headers: { 'content-type': 'text/html' } }),
+    'https://ex.com/c.md': () => new Response(md('C'), { headers: { 'content-type': 'text/markdown', etag: '"c"' } }),
+  });
+  const plan = ['a', 'b', 'c', 'd'].map((p) => ({ url: `https://ex.com/${p}`, sourceUrl: `https://ex.com/${p}.md`, kind: 'page-md' as const }));
+  const prev = new Map([['https://ex.com/a', { etag: '"a"', last_modified: null }]]);
+  const { pages, failed } = await fetchPlanned(plan, prev, { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(failed, 2);
+  assert.deepEqual(pages.map((p) => [p.url, p.markdown === null, p.etag]), [
+    ['https://ex.com/a', true, '"a"'], // a 304 keeps the validator we sent
+    ['https://ex.com/c', false, '"c"'],
+  ]);
+  assert.equal((calls[0].init.headers as Record<string, string>)['if-none-match'], '"a"');
+});
+
+// --- presign
+
+test('presign: matches the AWS SigV4 query-string test vector', async () => {
+  const url = await presign({
+    method: 'GET',
+    url: 'https://examplebucket.s3.amazonaws.com/test.txt',
+    accessKeyId: 'AKIAIOSFODNN7EXAMPLE',
+    secretAccessKey: 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+    expiresIn: 86400,
+    region: 'us-east-1',
+    now: new Date('2013-05-24T00:00:00Z'),
+  });
+  assert.equal(
+    url,
+    'https://examplebucket.s3.amazonaws.com/test.txt?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404',
+  );
+});
+
+test('presign: R2 PUT URLs sign extra headers and reject bad expiries', async () => {
+  const endpoint = r2Endpoint('acct', 'scoop-crawl-staging', 'crawl-results/cr_1/a b.json');
+  assert.equal(endpoint, 'https://acct.r2.cloudflarestorage.com/scoop-crawl-staging/crawl-results/cr_1/a%20b.json');
+  const url = new URL(
+    await presign({ method: 'PUT', url: endpoint, accessKeyId: 'k', secretAccessKey: 's', expiresIn: 900, headers: { 'Content-Type': 'application/json' }, now: new Date('2026-10-12T00:00:00Z') }),
+  );
+  assert.equal(url.pathname, '/scoop-crawl-staging/crawl-results/cr_1/a%20b.json');
+  assert.equal(url.searchParams.get('X-Amz-SignedHeaders'), 'content-type;host');
+  assert.equal(url.searchParams.get('X-Amz-Credential'), 'k/20261012/auto/s3/aws4_request');
+  assert.match(url.searchParams.get('X-Amz-Signature')!, /^[0-9a-f]{64}$/);
+  await assert.rejects(presign({ method: 'PUT', url: endpoint, accessKeyId: 'k', secretAccessKey: 's', expiresIn: 0 }));
+  await assert.rejects(presign({ method: 'PUT', url: endpoint, accessKeyId: 'k', secretAccessKey: 's', expiresIn: 604_801 }));
+  assert.equal(uriEncode("a!'()*~"), 'a%21%27%28%29%2A~');
+  assert.equal(amzDate(new Date('2026-10-12T01:02:03.456Z')), '20261012T010203Z');
+});
