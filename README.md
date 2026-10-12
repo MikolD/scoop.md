@@ -18,7 +18,7 @@ The popup shows a short loader (at least 600 ms), copies the best package it has
 6. **Copy.** The package opens with its sources and a note telling the agent to treat the material as reference, not instructions.
 7. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
 
-A site that isn't indexed yet (public page, sharing on) is indexed in the background (`POST /v1/crawl-requests`): one quiet line says so, the service worker follows the request every 30 s, and the icon shows ✓ on that site's tabs when it's ready; "Upgrade to full docs" (or reopening) then copies the indexed package.
+A site that isn't indexed yet (public page, sharing on) is indexed in the background (`POST /v1/crawl-requests`): one quiet line says so, the service worker follows the request every 30 s, and the icon shows ✓ on that site's tabs when it's ready; "Copy all <site> docs" (or reopening) then copies the indexed package.
 
 The toolbar icon shows, per tab, how many docs pages are indexed for the tab's site, looked up in `GET /v1/sites/index` (downloaded every 6 hours with If-None-Match; no request per page). The popup's **Overview** and **Search** tabs work on indexed sites: the topic tree and llms.txt with "Copy overview", or search with checkboxes, "Copy selected" and "Copy all results".
 

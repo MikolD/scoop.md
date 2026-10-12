@@ -308,7 +308,7 @@ async function backgroundCrawl(site, scoop) {
 }
 
 // While the popup is open, a crawl for this site is checked quietly; when it
-// completes, "Upgrade to full docs" copies the indexed package.
+// completes, "Copy all <site> docs" copies the indexed package.
 let following = false;
 async function followCrawl(site, scoop, id) {
   if (following) return;
@@ -322,13 +322,14 @@ async function followCrawl(site, scoop, id) {
     background = res.data;
     if (res.data.state === 'complete') {
       note('crawl-note', `The full docs for ${site} are ready.`);
-      $('upgrade').hidden = false;
-      $('upgrade').onclick = async () => {
-        $('upgrade').hidden = true;
+      $('full-docs').textContent = `Copy all ${site} docs`;
+      $('full-docs').hidden = false;
+      $('full-docs').onclick = async () => {
+        $('full-docs').hidden = true;
         showLoader();
         if (await deliverIndexed(scoop, { fresh: true })) {
           await forgetCrawl(chrome, site);
-          note('crawl-note', `Upgraded to the full docs for ${site}.`);
+          note('crawl-note', `Copied from the full ${site} docs.`);
         } else {
           reveal();
         }
@@ -348,7 +349,7 @@ async function run({ skipLibrary = false } = {}) {
   $('copy').disabled = true;
   note('share', '');
   note('crawl-note', '');
-  $('upgrade').hidden = true;
+  $('full-docs').hidden = true;
   showFeedback(null);
   $('rebuild').hidden = true;
   showLoader();
@@ -392,7 +393,7 @@ async function run({ skipLibrary = false } = {}) {
     askedIndex = true;
     if (await deliverIndexed(scoop, { fresh: true })) {
       await forgetCrawl(chrome, site);
-      note('crawl-note', `Upgraded to the full docs for ${site}.`);
+      note('crawl-note', `Copied from the full ${site} docs.`);
       return;
     }
     await forgetCrawl(chrome, site);

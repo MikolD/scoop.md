@@ -1,6 +1,6 @@
 // The popup (0.5.0): loader → copied → content with the best package right
 // away (index, shared skill, or the instant build: the page plus /quick
-// sources), indexing in the background with "Upgrade to full docs", the
+// sources), indexing in the background with "Copy all <site> docs", the
 // Overview and Search tabs, and the service worker: crawl follow-up and the
 // per-tab docs-count badge. The real popup.js and background.js run against a
 // mock of the library's contract (helpers/mock-library.js), chrome.* stubbed.
@@ -37,9 +37,9 @@ before(async () => {
     }
     if (req.url === '/docs/links') {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-      return res.end(`<html><body><nav><a href="/docs/other">Other</a><a href="/docs/gone">Gone</a><a href="/docs/upgrade-guide">Upgrade</a></nav>
+      return res.end(`<html><body><nav><a href="/docs/other">Other</a><a href="/docs/gone">Gone</a><a href="/docs/migration-guide">Migration</a></nav>
         <main><h1>Links</h1><p>Read the <a href="/docs/other">other page</a>, the <a href="/docs/gone">gone page</a> and the
-        <a href="/docs/upgrade-guide">upgrade guide</a> before you start building anything with this library today.</p>
+        <a href="/docs/migration-guide">migration guide</a> before you start building anything with this library today.</p>
         <p>${'More words about the library so the page has enough text to be worth scooping. '.repeat(6)}</p></main></body></html>`);
     }
     if (req.url === '/sub/guide.md') {
@@ -266,17 +266,18 @@ test('not developer docs (status not_devtool): instant copy, no crawl request', 
   assert.equal(p.$('crawl-note').textContent, '');
 }));
 
-test('the background crawl completes while the popup is open: "Upgrade to full docs" copies the index', () => withMock({ sites: { [SITE]: {} } }, async () => {
+test('the background crawl completes while the popup is open: "Copy all <site> docs" copies the index', () => withMock({ sites: { [SITE]: {} } }, async () => {
   const p = await openPopup(PAGE);
   await p.ready;
   assert.match(p.clipboard.text, /# Get started with Widgets/);
-  await waitFor(() => !p.$('upgrade').hidden);
+  await waitFor(() => !p.$('full-docs').hidden);
+  assert.equal(p.$('full-docs').textContent, 'Copy all docs.example.com docs');
   assert.equal(p.$('crawl-note').textContent, 'The full docs for docs.example.com are ready.');
   stageLog.length = 0;
-  await p.$('upgrade').onclick();
+  await p.$('full-docs').onclick();
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
   assert.deepEqual(stages(), ['loading', 'copied', 'content']);
-  assert.equal(p.$('crawl-note').textContent, 'Upgraded to the full docs for docs.example.com.');
+  assert.equal(p.$('crawl-note').textContent, 'Copied from the full docs.example.com docs.');
   assert.equal(p.local[PENDING_KEY][SITE], undefined);
 }));
 
@@ -285,7 +286,7 @@ test('reopening after the crawl finished in the background: the full docs, and t
   const p = await openPopup(PAGE, { local });
   await p.ready;
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.equal(p.$('crawl-note').textContent, 'Upgraded to the full docs for docs.example.com.');
+  assert.equal(p.$('crawl-note').textContent, 'Copied from the full docs.example.com docs.');
   assert.equal(p.local[PENDING_KEY][SITE], undefined);
   assert.notEqual(p.badge.text, '✓');
 }));
@@ -752,19 +753,19 @@ test('links: offline (or sharing off) means direct checks only, still strict', a
 
 test('instant package: dead links unlinked and related links filtered, shares stay as fetched', () => withMock({
   sites: { [SITE]: { status: 'not_devtool' } },
-  links: { [`https://${SITE}/docs/upgrade-guide`]: 'bad' },
+  links: { [`https://${SITE}/docs/migration-guide`]: 'bad' },
 }, async () => {
   const p = await openPopup(`https://${SITE}/docs/links`);
   await p.ready;
   const check = posts('/v1/links/check')[0];
   assert.ok(check, 'the library was asked (sharing on, reachable)');
-  assert.deepEqual([...check.body.urls].sort(), [`https://${SITE}/docs/gone`, `https://${SITE}/docs/other`, `https://${SITE}/docs/upgrade-guide`]);
+  assert.deepEqual([...check.body.urls].sort(), [`https://${SITE}/docs/gone`, `https://${SITE}/docs/migration-guide`, `https://${SITE}/docs/other`]);
   const text = p.clipboard.text;
   assert.match(text, /\[other page\]\(https:\/\/docs\.example\.com\/docs\/other\)/, 'a working link stays');
-  assert.match(text, /the gone page and the\s+upgrade guide before/, 'the 404 (checked directly) and the bad one (from the library) are unlinked, text kept');
+  assert.match(text, /the gone page and the\s+migration guide before/, 'the 404 (checked directly) and the bad one (from the library) are unlinked, text kept');
   const related = text.split('## Related pages on this site')[1] ?? '';
   assert.match(related, /docs\/other/);
-  assert.ok(!/gone|upgrade-guide/.test(related), 'related links: confirmed only');
+  assert.ok(!/gone|migration-guide/.test(related), 'related links: confirmed only');
   const shared = posts('/v1/skills')[0]?.body;
   assert.ok(shared?.sections[0].content.includes('[gone page](https://docs.example.com/docs/gone)'), 'what is shared stays as fetched');
 }));
@@ -792,3 +793,10 @@ test('pin hint: one line until dismissed, only while scoop.md is not pinned', ()
   await pinned.ready;
   assert.equal(pinned.$('pin-hint').hidden, true, 'not when pinned');
 }));
+
+test('no paywall words in the popup or settings: this is an open source project', () => {
+  for (const f of ['../extension/popup.html', '../extension/popup.js', '../extension/options.html', '../extension/options.js']) {
+    const src = read(f);
+    for (const word of [/upgrad/i, /premium/i, /unlock/i, /\bpro\b/i, /full version/i]) assert.ok(!word.test(src), `${f}: ${word}`);
+  }
+});
