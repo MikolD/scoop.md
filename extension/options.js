@@ -1,4 +1,8 @@
+import { createTelemetry, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
+
 const $ = (id) => document.getElementById(id);
+let telemetry = createTelemetry();
+telemetry.track('options_open');
 
 function applyTheme(theme) {
   if (theme) document.documentElement.dataset.theme = theme;
@@ -9,7 +13,19 @@ function applyTheme(theme) {
 chrome.storage.sync.remove('libraryUrl');
 
 chrome.storage.sync.get({ share: true }).then(({ share }) => { $('share').checked = share; });
-$('share').onchange = () => chrome.storage.sync.set({ share: $('share').checked });
+$('share').onchange = () => {
+  telemetry.track('settings_change', { key: 'share', value: String($('share').checked) });
+  return chrome.storage.sync.set({ share: $('share').checked });
+};
+
+// Off sends one telemetry_opt_out event, then nothing (lib/telemetry.js).
+telemetryEnabled(chrome).then((on) => { $('telemetry').checked = on; });
+$('telemetry').onchange = async () => {
+  const on = $('telemetry').checked;
+  if (!on) telemetry.disable();
+  await setTelemetry(chrome, on);
+  if (on) telemetry = createTelemetry();
+};
 
 // Same key the popup's theme button uses; no key means follow the system.
 chrome.storage.local.get('theme').then(({ theme }) => {
@@ -21,6 +37,7 @@ for (const radio of document.querySelectorAll('input[name=theme]')) {
   radio.onchange = () => {
     const theme = radio.value === 'system' ? null : radio.value;
     applyTheme(theme);
+    telemetry.track('settings_change', { key: 'theme', value: radio.value });
     if (theme) chrome.storage.local.set({ theme });
     else chrome.storage.local.remove('theme');
   };
@@ -33,3 +50,6 @@ chrome.commands.getAll().then((commands) => {
 $('shortcuts').onclick = () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
 
 $('version').textContent = `Version ${chrome.runtime.getManifest().version}`;
+
+// Sent when the page closes; whatever doesn't go stays queued for the service worker.
+globalThis.addEventListener?.('pagehide', () => telemetry.flushOnClose());

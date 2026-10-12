@@ -2,6 +2,7 @@ import { siteKey } from './lib/discover.js';
 import { buildPackage, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason, withoutSectionQuery } from './lib/library.js';
+import { createTelemetry, getInstallId, pagePath, errorText } from './lib/telemetry.js';
 
 const DEFAULTS = { share: true };
 const $ = (id) => document.getElementById(id);
@@ -12,6 +13,12 @@ let devLibrary = false;
 let tab;
 let clipboardText = '';
 let skillId = null;
+// Usage statistics (lib/telemetry.js); `current` is the scoop in progress.
+const telemetry = createTelemetry();
+const openedAt = Date.now();
+let current = null;
+const track = (name, props) => telemetry.track(name, props);
+const sizeOf = (text) => new TextEncoder().encode(text).length;
 
 function status(text, cls = 'ok') {
   $('status').textContent = text;
@@ -94,6 +101,29 @@ function scoopCurrentTab() {
   });
 }
 
+// One scoop_result per scoop. The page's path is recorded only when its
+// content was public; for a signed-in page only the hostname is.
+function scoopResult(outcome, { scoop, text, sections = [], shared = null, clipboard } = {}) {
+  if (!current || current.done) return;
+  current.done = true;
+  const isPublic = Boolean(scoop?.isPublic);
+  track('scoop_result', {
+    site: current.site,
+    path: isPublic ? pagePath(tab.url) : undefined,
+    outcome,
+    sourceKinds: [...new Set(sections.map((s) => s.kind))],
+    sources: sections.length,
+    sizeBytes: text ? sizeOf(text) : 0,
+    truncated: Boolean(text && (sections.some((s) => s.content == null) || /\[(Truncated\. The full text|Omitted for length\.)/.test(text))),
+    durationMs: Date.now() - current.started,
+    libraryHit: Boolean(shared),
+    libraryWorked: shared?.worked ?? undefined,
+    isPublic,
+    relatedLinks: (shared ? shared.relatedLinks : scoop?.relatedLinks)?.length ?? 0,
+    clipboard,
+  });
+}
+
 async function run({ skipLibrary = false } = {}) {
   status('Scooping this page…', 'busy');
   $('copy').disabled = true;
@@ -101,6 +131,8 @@ async function run({ skipLibrary = false } = {}) {
   showFeedback(null);
   $('rebuild').hidden = true;
   const site = siteKey(tab.url);
+  current = { site, started: Date.now(), done: false };
+  track('scoop_start', { site });
 
   // Build locally while asking the library; the copy never waits on the
   // library for more than its short timeout.
@@ -112,11 +144,13 @@ async function run({ skipLibrary = false } = {}) {
   const shared = best?.ok ? best.data?.skill : null;
 
   if (shared?.sections?.length) {
-    const current = currentPageSection(await local.catch(() => null));
-    const sections = withCurrentPage(shared.sections, current, tab.url);
+    const scoop = await local.catch(() => null);
+    const sections = withCurrentPage(shared.sections, currentPageSection(scoop), tab.url);
     const text = buildPackage({ site, pageUrl: tab.url, sections, relatedLinks: shared.relatedLinks ?? [] });
     const ok = await copy(text);
     copied(ok);
+    scoopResult('copied_ready', { scoop, text, sections, shared, clipboard: ok });
+    if (ok) track('copy', { site, sizeBytes: sizeOf(text), trigger: 'auto' });
     note('summary', `${kb(text)} · shared, worked for ${plural(shared.worked, 'person', 'people')}`);
     $('rebuild').hidden = false;
     showFeedback(shared.id);
@@ -124,17 +158,29 @@ async function run({ skipLibrary = false } = {}) {
   }
 
   const scoop = await local;
-  if (!scoop.sections.length) throw new Error('Could not find any documentation text on this page.');
+  if (!scoop.sections.length) throw new Error(NO_TEXT);
   const text = buildPackage({ site, pageUrl: scoop.pageUrl, sections: scoop.sections, relatedLinks: scoop.relatedLinks });
   const ok = await copy(text);
   copied(ok);
+  scoopResult('copied_ready', { scoop, text, sections: scoop.sections, clipboard: ok });
+  if (ok) track('copy', { site, sizeBytes: sizeOf(text), trigger: 'auto' });
   note('summary', `${kb(text)} · ${plural(scoop.sections.length, 'source')} on ${site}`);
   await share(scoop);
 }
 
+const NO_TEXT = 'Could not find any documentation text on this page.';
+
+function shareResult(outcome, reason) {
+  track('share_result', { site: current?.site, outcome, reason });
+}
+
 async function share(scoop) {
-  if (!settings.share) return note('share', 'Not shared: sharing is off.');
+  if (!settings.share) {
+    shareResult('not_shared', 'sharing_off');
+    return note('share', 'Not shared: sharing is off.');
+  }
   if (!scoop.isPublic) {
+    shareResult('not_shared', scoop.privateHost ? 'private_host' : 'signed_in');
     return note('share', scoop.privateHost && !devLibrary
       ? 'Not shared: this page is on your computer or a private network.'
       : "Not shared: this page's text only loads in your browser.");
@@ -146,6 +192,8 @@ async function share(scoop) {
   const retry = res.ok ? null : withoutSectionQuery(body, res.error);
   if (retry) res = await library.share(retry);
   // An unreachable library is not the user's problem: the copy already worked.
+  if (!res.ok) shareResult('not_shared', res.error?.code);
+  else shareResult(res.data.duplicate ? 'duplicate' : 'shared');
   if (res.error?.code === 'offline' || res.error?.code === 'timeout') return note('share', '');
   if (!res.ok) return note('share', `Not shared: ${notSharedReason(res.error, scoop.sections)}`, 'warn');
   note('share', res.data.duplicate ? 'Already in the library.' : 'Shared with the library.');
@@ -154,6 +202,7 @@ async function share(scoop) {
 
 async function vote(worked) {
   const res = await library.feedback(skillId, worked);
+  track('vote', { site: current?.site, skillId, worked, ok: res.ok });
   note('voted', res.ok
     ? `Thanks. It worked for ${plural(res.data.worked, 'person', 'people')} and didn't for ${res.data.failed}.`
     : "Couldn't record your vote. Try again in a moment.");
@@ -161,17 +210,9 @@ async function vote(worked) {
 
 async function report(reason) {
   const res = await library.report(skillId, reason);
+  track('report', { site: current?.site, skillId, reason, ok: res.ok });
   $('report').hidden = true;
   note('voted', res.ok ? 'Reported. Thanks, we will review it.' : "Couldn't send the report. Try again in a moment.");
-}
-
-async function installId() {
-  let { installId: id } = await chrome.storage.local.get('installId');
-  if (!id) {
-    id = crypto.randomUUID();
-    await chrome.storage.local.set({ installId: id });
-  }
-  return id;
 }
 
 async function intro() {
@@ -184,7 +225,16 @@ async function intro() {
   };
 }
 
-const fail = (e) => status(e?.message || String(e), 'err');
+function fail(e) {
+  status(e?.message || String(e), 'err');
+  if (current && !current.done) {
+    const empty = e?.message === NO_TEXT;
+    scoopResult(empty ? 'empty' : 'error');
+    if (!empty) track('error', { where: 'scoop', code: e?.name || 'Error', message: errorText(e) });
+  } else {
+    track('error', { where: 'popup', code: e?.name || 'Error', message: errorText(e) });
+  }
+}
 
 $('theme').onclick = async () => {
   const dark = document.documentElement.dataset.theme
@@ -192,15 +242,20 @@ $('theme').onclick = async () => {
     : matchMedia('(prefers-color-scheme: dark)').matches;
   const theme = dark ? 'light' : 'dark';
   applyTheme(theme);
+  track('settings_change', { key: 'theme', value: theme });
   try { await chrome.storage.local.set({ theme }); } catch {}
 };
 $('copy').onclick = async () => {
   if (!(await writeClipboard(clipboardText))) return status("Couldn't copy. Try again.", 'err');
+  track('copy', { site: current?.site, sizeBytes: sizeOf(clipboardText), trigger: 'button' });
   status('Copied again.');
   $('copy-label').textContent = 'Copied';
   setTimeout(() => { $('copy-label').textContent = 'Copy for your agent'; }, 1500);
 };
-$('rebuild').onclick = () => run({ skipLibrary: true }).catch(fail);
+$('rebuild').onclick = () => {
+  track('rebuild', { site: current?.site });
+  return run({ skipLibrary: true }).catch(fail);
+};
 $('settings').onclick = (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); };
 for (const btn of document.querySelectorAll('#feedback button[data-worked]')) {
   btn.onclick = () => vote(btn.dataset.worked === 'true');
@@ -215,14 +270,30 @@ async function main() {
   devLibrary = baseUrl !== DEFAULT_LIBRARY;
   library = createLibrary({
     baseUrl,
-    installId: await installId(),
+    installId: await getInstallId(chrome),
     client: `extension/${chrome.runtime.getManifest().version}`,
   });
   await intro();
   [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!/^https?:/.test(tab?.url || '')) return status('Open a documentation page first.', 'err');
+  if (!/^https?:/.test(tab?.url || '')) {
+    track('scoop_result', { outcome: 'unsupported_page', durationMs: 0 });
+    return status('Open a documentation page first.', 'err');
+  }
   await run();
 }
+
+// The popup can't tell a toolbar click from the keyboard shortcut (MV3 has no
+// signal for either), so popup_open carries no trigger.
+track('popup_open');
+let closed = false;
+function onClose() {
+  if (closed) return;
+  closed = true;
+  track('popup_close', { durationMs: Date.now() - openedAt });
+  telemetry.flushOnClose();
+}
+globalThis.addEventListener?.('pagehide', onClose);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') onClose(); });
 
 // Exported so tests can wait for the first run.
 export const ready = main().catch(fail);

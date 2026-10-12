@@ -189,3 +189,64 @@ test('tracking parameters are stripped, and a query the library refuses is retri
   assert.equal(shares[0].pageUrl, `${otherSite()}/docs/search?q=how%20to%20search`);
   assert.equal(shares[1].sections[0].url, `${otherSite()}/docs/search`, 'retried without the query');
 });
+
+// A public-looking host served by the local docs server, so telemetry (which
+// never records private hosts) has something to record.
+async function withPublicHost(fn) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (url, init) => realFetch(String(url).replace('https://docs.example.com', docsUrl), init);
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+test('telemetry: a public scoop queues scoop_start, scoop_result with the path, copy and share_result', async () => {
+  delete local.telemetryQueue;
+  const { $ } = await withPublicHost(() => openPopup('https://docs.example.com/docs/guide?utm_source=x#install', { share: false }));
+  assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
+  await new Promise((r) => setTimeout(r, 20));
+  const events = local.telemetryQueue;
+  assert.deepEqual(events.map((e) => e.name), ['popup_open', 'scoop_start', 'scoop_result', 'copy', 'share_result']);
+  const byName = Object.fromEntries(events.map((e) => [e.name, e.props]));
+  assert.deepEqual(byName.scoop_start, { site: 'docs.example.com' });
+  const r = byName.scoop_result;
+  assert.equal(r.site, 'docs.example.com');
+  assert.equal(r.path, '/docs/guide', 'no query, fragment or tracking parameters');
+  assert.equal(r.outcome, 'copied_ready');
+  assert.deepEqual(r.sourceKinds, ['page-html']);
+  assert.equal(r.sources, 1);
+  assert.equal(r.isPublic, true);
+  assert.equal(r.libraryHit, false);
+  assert.equal(r.clipboard, true);
+  assert.ok(r.sizeBytes > 500 && r.durationMs >= 0);
+  assert.deepEqual(byName.copy, { site: 'docs.example.com', sizeBytes: r.sizeBytes, trigger: 'auto' });
+  assert.deepEqual(byName.share_result, { site: 'docs.example.com', outcome: 'not_shared', reason: 'sharing_off' });
+  assert.ok(events.every((e) => !JSON.stringify(e).includes('Widgets')), 'no page content');
+});
+
+test('telemetry: a page that only renders signed in records the hostname, never the path', async () => {
+  delete local.telemetryQueue;
+  await withPublicHost(() => openPopup('https://docs.example.com/docs/missing', { share: false }));
+  await new Promise((r) => setTimeout(r, 20));
+  const result = local.telemetryQueue.find((e) => e.name === 'scoop_result').props;
+  assert.equal(result.site, 'docs.example.com');
+  assert.equal(result.isPublic, false);
+  assert.equal(result.path, undefined);
+  assert.ok(!JSON.stringify(local.telemetryQueue).includes('/docs/missing'));
+});
+
+test('telemetry: nothing about pages on private hosts', async () => {
+  delete local.telemetryQueue;
+  await openPopup(`${docsUrl}/docs/guide`, { share: false });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.deepEqual(local.telemetryQueue.map((e) => e.name), ['popup_open']);
+});
+
+test('telemetry: switched off, the popup queues nothing', async () => {
+  delete local.telemetryQueue;
+  await withPublicHost(() => openPopup('https://docs.example.com/docs/guide', { share: false, sync: { telemetry: false } }));
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(local.telemetryQueue, undefined);
+});

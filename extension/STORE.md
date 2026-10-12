@@ -1,6 +1,6 @@
 # Chrome Web Store listing: scoop.md
 
-Everything the Web Store dashboard asks for, matching what the code in this folder does (version 0.2.0). Build the upload with `npm run pack:extension` → `dist/scoop.md-extension-<version>.zip`. This file isn't included in the zip.
+Everything the Web Store dashboard asks for, matching what the code in this folder does (version 0.3.0). Build the upload with `npm run pack:extension` → `dist/scoop.md-extension-<version>.zip`. This file isn't included in the zip.
 
 ## Store listing
 
@@ -27,6 +27,8 @@ Scoop any doc. One click copies the docs page you're on as Markdown your coding 
 >
 > Shared library: when a package for a site has helped someone's agent get their task done, the next person on that site gets the same package. After pasting, tell scoop.md whether it worked. Only public material, fetched without your cookies or logins, is ever shared. Pages that only load when you're signed in still go to your clipboard, but never leave your machine. You can turn sharing off in Settings.
 >
+> Usage statistics: scoop.md sends anonymous usage events (which public docs sites and pages you scoop, whether it worked, version, browser and OS, errors) so we can see what to fix. Never page content, never anything from a signed-in page beyond its hostname. Turn it off in Settings ("Send usage statistics").
+>
 > Keyboard shortcut: Alt+Shift+C.
 
 **Homepage:** https://scoop.md
@@ -44,26 +46,32 @@ Copy the documentation page the user is viewing to the clipboard as Markdown for
 | `activeTab` | When the user clicks the toolbar button (or presses Alt+Shift+C), read the current tab's URL and title to know which documentation page to package. Nothing runs on tabs the user hasn't clicked on. |
 | `scripting` | Fallback for pages that only render for a signed-in user or in the browser: on click, read the current tab's HTML once so it can be converted to Markdown for the clipboard. This content is never uploaded. |
 | `clipboardWrite` | Put the Markdown package on the clipboard. That's the extension's only output. |
-| `storage` | Remember settings (sharing on/off, theme), an anonymous random install ID, and whether the first-run note was dismissed. |
-| Host permission `<all_urls>` | Documentation lives on any domain. On click, the extension fetches, **without cookies**, files next to the page the user is on: `<page>.md`, `llms.txt`, `llms-full.txt` and the page's public HTML. These are cross-origin requests from the popup, so they need host permission for that site, and the site isn't known in advance. It also calls the shared library at `https://api.scoop.md`. No content scripts are injected automatically; nothing is fetched until the user clicks. |
+| `storage` | Remember settings (sharing on/off, usage statistics on/off, theme), an anonymous random install ID, whether the first-run note was dismissed, and the queue of usage events not yet sent (at most 500). |
+| `alarms` | Wake the extension's service worker once an hour to send the once-a-day "active" usage event and any queued usage events, and to retry sending with backoff when the network was down. The service worker reads no tabs or pages. Nothing is sent when usage statistics are off. |
+| Host permission `<all_urls>` | Documentation lives on any domain. On click, the extension fetches, **without cookies**, files next to the page the user is on: `<page>.md`, `llms.txt`, `llms-full.txt` and the page's public HTML. These are cross-origin requests from the popup, so they need host permission for that site, and the site isn't known in advance. It also calls the shared library at `https://api.scoop.md`. No content scripts are injected automatically; no page is read or fetched until the user clicks. |
 
 **Remote code:** No. All JavaScript ships in the package. The extension downloads only text (Markdown, llms.txt, HTML to convert, JSON from the library), which is never executed.
 
 ## Data usage (privacy practices tab)
 
-Data the extension **collects** (sends off the device), all only after the user clicks the button:
+Data the extension **collects** (sends off the device). Library lookups and shares happen only after the user clicks the button. Usage statistics (`POST https://api.scoop.md/v1/events`, on by default, off with "Send usage statistics" in Settings) are sent in batches when the popup closes and hourly from the service worker; the full event list is in docs/TELEMETRY.md and on scoop.md/privacy.
 
 | Category | Collected? | What exactly |
 |---|---|---|
-| Web history | Yes | The **hostname** of the page being scooped is sent to `api.scoop.md` to look up a shared package (`GET /v1/skills/best?site=<hostname>`). When sharing is on and the page is public, the **page URL** is sent too. Browsing history beyond the clicked page is never read. |
+| Web history | Yes | The **hostname** of the page being scooped is sent to `api.scoop.md` to look up a shared package (`GET /v1/skills/best?site=<hostname>`). When sharing is on and the page is public, the **page URL** is sent too. Usage statistics record the **hostname and path** (no query string or fragment, tracking parameters removed) of each public docs page the user clicks scoop.md on; for a page that only renders signed in, only the hostname. Nothing about pages on private hosts (localhost, private IPs, `.local`, `.internal`, …). Browsing history beyond the clicked page is never read. |
 | Website content | Yes | When sharing is on (the default) and every source was fetched without cookies: the page title, the text of the page's public sources (its `.md` file, `llms.txt`, `llms-full.txt`, or the Markdown converted from its public HTML), their URLs, and up to 100 same-site links from the page's navigation. Content read from the signed-in tab is never sent. |
-| User activity | Yes | "It worked" / "It didn't" votes and reports ("wrong", "malicious", "copyright", "other") on a shared package. |
-| Personally identifiable information | No | The extension sends a random install ID (UUID created on install, stored locally) with shares, votes and reports, plus its version (`X-Scoop-Client: extension/0.2.0`). The ID isn't linked to any account, name or email. |
-| Authentication, financial, health, personal communications, location | No | |
+| User activity | Yes | "It worked" / "It didn't" votes and reports ("wrong", "malicious", "copyright", "other") on a shared package. App usage events: install, update, browser update, a once-a-day "active" ping, popup opened/closed (with how long it was open), each scoop (start, outcome, which kinds of sources, size, duration, whether the shared library had it), copies, rebuilds, share outcomes, votes, reports, settings changes (sharing, theme, usage statistics), the settings page being opened, and error codes with a short message stripped of URLs. Each event has a timestamp, a per-popup session ID and the install ID, plus the extension version, browser name and version, OS, CPU architecture, UI language and time zone. |
+| Location | Yes | **Coarse location** (country, region, continent) and the network's ISP or organisation name, derived on the server from the request's IP address by Cloudflare. The IP address itself is never stored (a daily-rotating salted hash is kept for abuse analysis). |
+| Personally identifiable information | No | The extension sends a random install ID (UUID created on install, stored locally) with shares, votes, reports and usage events, plus its version (`X-Scoop-Client: extension/0.3.0`). The ID isn't linked to any account, name or email. No names, emails, Google account, cookies or IP addresses are stored. |
+| Authentication, financial, health, personal communications | No | |
 
 Requests to the documentation site itself (`.md`, `llms.txt`, page HTML) go to the site the user is on, without cookies or credentials.
 
-Stored on the device only: the sharing setting (`chrome.storage.sync`), theme, install ID and first-run flag (`chrome.storage.local`).
+Stored on the device only: the sharing and usage-statistics settings (`chrome.storage.sync`), theme, install ID, first-run flag and the unsent usage-event queue (`chrome.storage.local`).
+
+Uninstall: the extension sets its uninstall page to `https://scoop.md/bye?i=<install ID>&v=<version>` (just `https://scoop.md/bye` when usage statistics are off). That page records the uninstall, and an optional reason the user picks, against the install ID.
+
+Retention: raw usage events are kept 180 days in the database, then deleted; daily counts (no install IDs) are kept. Every raw event is also archived (compressed) for later analysis. Deletion requests by install ID (team@ddamoah.com) remove the install's events from the database and exclude them from every export of the archive.
 
 Certifications to tick:
 - I do not sell or transfer user data to third parties, outside of the approved use cases.
@@ -78,7 +86,7 @@ Note for the privacy policy: shared packages are public (anyone can fetch them f
 2. The popup on a site served from the library: "from the shared library. Worked for N people", with "Rebuild from this page" and the vote buttons.
 3. The pasted package in a coding agent (Claude Code in a terminal): preamble, sources and the first section visible.
 4. The popup on a site that publishes `.md` + `llms.txt` (e.g. docs.stripe.com/webhooks), showing both source badges.
-5. The first-run note ("What gets shared") and the Settings page with the sharing toggle.
+5. The first-run note ("What gets shared") and the Settings page with the sharing and usage statistics toggles.
 6. Dark mode version of screenshot 1.
 
 Small promo tile (440×280): the icon (icons/icon128.png) and "Scoop any doc." on a dark background.

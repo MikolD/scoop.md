@@ -26,6 +26,16 @@
     </section>
 
     <section class="card">
+      <label class="row" for="telemetry">
+        <span class="text">
+          <span class="title">Send usage statistics</span>
+          <span class="meta">Anonymous events: which public docs sites and pages you scoop, whether it worked, versions, browser, OS and errors. Never page content or anything signed-in.</span>
+        </span>
+        <input id="telemetry" type="checkbox" class="toggle" role="switch">
+      </label>
+    </section>
+
+    <section class="card">
       <div class="row">
         <span class="title" id="theme-label">Theme</span>
         <div class="segmented" role="radiogroup" aria-labelledby="theme-label">
@@ -52,6 +62,6 @@
     <a href="https://scoop.md/terms" target="_blank" rel="noopener">Terms</a>
     <span id="version"></span>
   </footer>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>

@@ -11,6 +11,7 @@ test('manifest is MV3 and every file it references exists', () => {
   const files = [
     manifest.action.default_popup,
     manifest.options_page,
+    manifest.background.service_worker,
     ...Object.values(manifest.icons),
     ...Object.values(manifest.action.default_icon),
   ];
@@ -18,7 +19,8 @@ test('manifest is MV3 and every file it references exists', () => {
 });
 
 test('only the permissions STORE.md justifies', () => {
-  assert.deepEqual(manifest.permissions.sort(), ['activeTab', 'clipboardWrite', 'scripting', 'storage']);
+  assert.deepEqual(manifest.permissions.sort(), ['activeTab', 'alarms', 'clipboardWrite', 'scripting', 'storage']);
+  assert.deepEqual(manifest.background, { service_worker: 'background.js', type: 'module' });
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   const store = readFileSync(ext('STORE.md'), 'utf8');
   for (const p of [...manifest.permissions, '<all_urls>']) assert.ok(store.includes(`\`${p}\``), p);
