@@ -35,6 +35,8 @@ export interface JevOptions {
   // Further attempts after a timeout, a dropped connection, 429 or 5xx.
   retries?: number;
   model?: string;
+  // Checked before every request: false (the daily token cap is spent) fails it without a call.
+  allow?: () => Promise<boolean>;
 }
 
 // `status` is the HTTP status, null when no answer came back.
@@ -78,6 +80,7 @@ function checkAnswers(questions: Record<string, JevQuestion>, answers: unknown):
 // than one per question). Throws JevError when no valid answer came back.
 export async function askJev(state: unknown, questions: Record<string, JevQuestion>, o: JevOptions): Promise<JevResult> {
   const fetchImpl = o.fetchImpl ?? fetch;
+  if (o.allow && !(await o.allow())) throw new JevError('daily Jev token cap reached');
   const attempts = 1 + (o.retries ?? 1);
   let last: JevError = new JevError('not attempted');
   for (let i = 0; i < attempts; i++) {

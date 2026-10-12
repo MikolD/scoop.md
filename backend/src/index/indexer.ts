@@ -35,6 +35,8 @@ export interface IndexDeps {
   // Classifier spend caps per UTC day: per site, and for the whole account.
   dailyCapUsd: number;
   totalCapUsd: number;
+  // Jev tokens per UTC day for the whole account (JEV_DAILY_TOKEN_CAP); absent: no cap.
+  jevTokenCap?: number;
   now?: () => Date;
 }
 
@@ -51,6 +53,7 @@ export class PermanentError extends Error {}
 
 export const DEFAULT_DAILY_CAP_USD = 2;
 export const DEFAULT_TOTAL_CAP_USD = 10;
+export const DEFAULT_JEV_DAILY_TOKEN_CAP = 5_000_000;
 // page_index.model when classification was skipped (cap reached, no API key).
 // Pages with this or FAILED are picked up again by the daily reclassify job.
 export const UNCLASSIFIED = 'none';
@@ -99,9 +102,21 @@ export async function addCost(db: D1Database, site: string, now: Date, cost: num
   await db.batch([site, ALL_SITES].map((s) => db.prepare(add).bind(s, capDay(now), cost > 0 ? cost : 0, jevTokens > 0 ? jevTokens : 0)));
 }
 
-export async function capsReached(deps: Pick<IndexDeps, 'db' | 'dailyCapUsd' | 'totalCapUsd'>, site: string, now: Date): Promise<boolean> {
-  const [siteSpent, totalSpent] = await Promise.all([spentToday(deps.db, site, now), spentToday(deps.db, ALL_SITES, now)]);
-  return siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd;
+export async function jevTokensToday(db: D1Database, now: Date): Promise<number> {
+  const row = await db.prepare('SELECT jev_tokens FROM index_costs WHERE site = ? AND day = ?').bind(ALL_SITES, capDay(now)).first<{ jev_tokens: number }>();
+  return row?.jev_tokens ?? 0;
+}
+
+// For JevOptions.allow: false once today's Jev tokens reach the cap.
+export const jevAllowance = (db: D1Database, cap: number) => async () => (await jevTokensToday(db, new Date())) < cap;
+
+export async function capsReached(deps: Pick<IndexDeps, 'db' | 'dailyCapUsd' | 'totalCapUsd' | 'jevTokenCap'>, site: string, now: Date): Promise<boolean> {
+  const [siteSpent, totalSpent, jevTokens] = await Promise.all([
+    spentToday(deps.db, site, now),
+    spentToday(deps.db, ALL_SITES, now),
+    deps.jevTokenCap === undefined ? 0 : jevTokensToday(deps.db, now),
+  ]);
+  return siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd || (deps.jevTokenCap !== undefined && jevTokens >= deps.jevTokenCap);
 }
 
 async function cachedClassification(deps: IndexDeps, contentHash: string): Promise<Classified | null> {

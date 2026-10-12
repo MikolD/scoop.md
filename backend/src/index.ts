@@ -12,7 +12,7 @@ import { handleIndexBatch } from './index/consumer.ts';
 import { pruneCrawlRequests, startAllWaiting } from './crawl/requests.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
-import { processLinkQueue } from './links/links.ts';
+import { processLinkQueue, pruneLiveLinks } from './links/links.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import { handleTelemetryBatch, pruneTelemetry } from './telemetry/consumer.ts';
 import { API_ROUTES, recordApiUsage } from './telemetry/ingest.ts';
@@ -105,6 +105,7 @@ export default {
       // Links met while serving, and bad links due for their second check (src/links/links.ts).
       const allowLocalhost = env.ENVIRONMENT === 'dev' && env.ALLOW_LOCALHOST === '1';
       console.log(JSON.stringify({ cron: 'link-check', checked: await processLinkQueue(env.DB, { limit: 200, allowLocalhost, deadline: Date.now() + 5 * 60_000 }) }));
+      console.log(JSON.stringify({ cron: 'link-prune', deleted: await pruneLiveLinks(env.DB) }));
       return;
     }
     const { totalCapUsd, dailyCapUsd, classify } = indexDeps(env);

@@ -17,7 +17,7 @@ import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from 'cloudflare
 import { CrawlStore } from '../db/crawl.ts';
 import type { IndexMessage } from '../index/indexer.ts';
 import type { Env } from '../env.ts';
-import { addCost, capsReached } from '../index/indexer.ts';
+import { addCost, capsReached, DEFAULT_JEV_DAILY_TOKEN_CAP, jevAllowance } from '../index/indexer.ts';
 import { indexDeps } from '../index/deps.ts';
 import { gateSite, GateUndecided, listVerdict } from './gate.ts';
 import { ondemandShare, startWaiting } from './requests.ts';
@@ -25,7 +25,7 @@ import type { GateAi, GateVerdict } from './gate.ts';
 import { jevCostUsd, usdPerMTok } from '../lib/jev.ts';
 import { checkRunLinks, normalizeLink, recordsFromFetch, saveLinks } from '../links/links.ts';
 import type { LinkRecord } from '../links/links.ts';
-import { findRunInstructions } from '../agents/instructions.ts';
+import { findRunInstructions, instructionsAllowed } from '../agents/instructions.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
@@ -315,7 +315,10 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       if (env.JEV_API_KEY) {
         await step.do('agent-instructions', { retries: { limit: 1, delay: '10 seconds' }, timeout: '5 minutes' }, async () => {
           try {
-            const r = await findRunInstructions({ db: env.DB, bucket: env.SKILLS, jev: { apiKey: env.JEV_API_KEY! } }, p.runId, p.site, origin, {
+            // Only for approved or allowlisted sites: a user's request alone never puts words in front of agents.
+            if (!(await instructionsAllowed(env.DB, p.site, p.startUrl))) return { skipped: 'not approved' };
+            const jev = { apiKey: env.JEV_API_KEY!, allow: jevAllowance(env.DB, indexDeps(env).jevTokenCap ?? DEFAULT_JEV_DAILY_TOKEN_CAP) };
+            const r = await findRunInstructions({ db: env.DB, bucket: env.SKILLS, jev }, p.runId, p.site, origin, {
               allowLocalhost: local,
               limiter: new HostLimiter({ intervalMs: interval }),
               allowed: robotsFrom(robots).allowed,
@@ -357,11 +360,13 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
 // classifier's daily caps; null without either key.
 function gateAi(env: Env, site: string): GateAi | null {
   if (!env.JEV_API_KEY && !env.OPENROUTER_API_KEY) return null;
-  const { db, dailyCapUsd, totalCapUsd } = indexDeps(env);
+  const { db, dailyCapUsd, totalCapUsd, jevTokenCap } = indexDeps(env);
   return {
-    jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, usdPerMTok: usdPerMTok(env.JEV_USD_PER_MTOK) } : null,
+    jev: env.JEV_API_KEY
+      ? { apiKey: env.JEV_API_KEY, usdPerMTok: usdPerMTok(env.JEV_USD_PER_MTOK), allow: jevAllowance(db, jevTokenCap ?? DEFAULT_JEV_DAILY_TOKEN_CAP) }
+      : null,
     apiKey: env.OPENROUTER_API_KEY,
-    capReached: () => capsReached({ db, dailyCapUsd, totalCapUsd }, site, new Date()),
+    capReached: () => capsReached({ db, dailyCapUsd, totalCapUsd, jevTokenCap }, site, new Date()),
     addCost: (usd: number, jevTokens?: number) => addCost(db, site, new Date(), usd, jevTokens),
     timeoutMs: 60_000,
   };

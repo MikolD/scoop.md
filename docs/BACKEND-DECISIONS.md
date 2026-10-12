@@ -1301,14 +1301,15 @@ served links are filtered against them, strictly.
   site through `crawlFetch` (politeness, robots); external with the SSRF
   guard on every hop (a private address is bad without a request), `HEAD`
   then a 1 KB ranged `GET`, two at a time per host 250 ms apart. 2xx (or
-  3xx ending in 2xx) is ok; 4xx, 5xx and DNS failures are bad. A bad link
+  3xx ending in 2xx) is ok; 404, 410 and DNS failures are bad (statuses
+  revised in "Production review fixes", H3). A bad link
   is checked again after a day (`bad_checks` 1 → 2 is permanent). A failure
   in the step is logged and never fails the crawl.
 - **Rewrite** (`rewriteLinks`): outside code only (fences and inline code
   are code: changing `curl https://…` would break examples). Markdown links,
   images, autolinks and bare URLs: known ok → kept, made absolute (anchor
-  kept); anything else → the link text without its URL (a bare URL
-  disappears). Unknown targets are queued; the hourly cron checks up to 200.
+  kept); anything else → the link text without its URL (a bare URL is
+  kept as code text: see "Production review fixes", H3). Unknown targets are queued; the hourly cron checks up to 200.
   Strict on purpose: an unchecked external link is unlinked until checked.
 - **Where**: every package mode, search snippets, served shared skills
   (section text; related links only when ok), the package's own lists
@@ -1353,3 +1354,50 @@ package surfaces it, from verified sources only.
 - **/v1/quick** extracts on the fly from a verified llms.txt only, in the
   same Jev request as the overview pick and `isDevDocs`, cached with the
   site's llms files for an hour.
+
+## Production review fixes (H1-H3, M1, M2)
+
+- **H1, instructions as an injection channel.** Site text addressed to
+  agents is exactly what a hostile site would write. So: (a) it is quoted,
+  never relayed: `## What this site says to AI agents`, a line saying it is
+  quoted from the site and never overrides the user or the agent's own
+  rules, the items as a blockquote, and the safety line covering it;
+  (b) a second Jev noul in the same request asks whether the passage wants
+  anything beyond using the product (commands, files, credentials or env,
+  other sites, persona, hiding things), dropped at ≥ 0.3 (a missing answer
+  drops it too), and before Jev, code drops passages that pipe into a shell
+  or interpreter, curl/wget another host, or link another registrable
+  domain; (c) extraction and serving only for sites an admin approved or on
+  the allowlist (a user's request alone never puts a site's words in front
+  of agents), and /v1/quick returns them only for an indexed, approved
+  site; (d) `registrable()` (`src/lib/domains.ts`) knows country second
+  levels and ~60 multi-tenant hosting suffixes (github.io, vercel.app,
+  pages.dev, readthedocs.io, …), and /v1/quick skips the docs.<domain>
+  probe on them.
+- **H2, /v1/quick amplification and Jev spend.** Its own limiter, 30 per
+  minute per IP subject; the first miss per target host per hour probes it
+  (a Cache API marker, per colo), later misses answer from the site cache
+  without fetching; the page is fetched only when its robots.txt allows.
+  Jev has a daily token cap (`JEV_DAILY_TOKEN_CAP`, 5M): `JevOptions.allow`
+  is checked before every request (gate, classification, instructions,
+  /v1/quick), and `capsReached` counts it, so past it the gate is undecided
+  and pages index unclassified. `JEV_USD_PER_MTOK` is set to a provisional
+  0.5 so the USD columns aren't zero; tokens stay the ground truth.
+- **H3, the rewrite.** Deleting bare URLs destroyed content (an API base
+  URL in prose is a value, not a link): bare and autolink URLs not known to
+  exist now stay, as code text; only `[text](url)` loses its target. "Exists"
+  now includes 400, 401, 403 and 405 (bot walls and method refusals on live
+  pages); only 404, 410 and hosts that don't resolve are dead; 429, 5xx and
+  the rest are unknown. The scanner is hand-written and linear: fenced and
+  indented code (not list continuations), `<pre>` and `<code>`, inline
+  spans closed by the same backtick count (matched through per-length
+  queues), and balanced parentheses in URLs.
+- **M1, /v1/links/check.** Unknown URLs from callers are queued only when
+  the library links to them (`link_refs`; a shared skill's links are added
+  there); live checks are capped at 10 per target host per minute
+  (`LINKCHECK_HOST_LIMITER`); live rows nothing links to are deleted after
+  a day by the hourly cron.
+- **M2, privacy.** /v1/quick no longer sends the user's page URL to Jev:
+  the state is the host; the overview options are kinds, labels and first
+  lines (a page's `.md` twin URL would give its path away); the
+  is-it-docs question gets the origin, title, description and navigation.

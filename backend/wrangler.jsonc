@@ -38,8 +38,10 @@
     "ONDEMAND_INDEX_SHARE": "0.5",
     // Page classifier: jev (default; JEV_API_KEY) or openrouter (OPENROUTER_API_KEY).
     "CLASSIFIER": "jev",
-    // Jev's price, USD per million tokens; tokens are recorded either way (0 until it is published).
-    "JEV_USD_PER_MTOK": "0"
+    // Jev's price, USD per million tokens: PROVISIONAL (not published yet); tokens are recorded either way.
+    // Jev tokens per UTC day for the account, checked before every Jev request.
+    "JEV_USD_PER_MTOK": "0.5",
+    "JEV_DAILY_TOKEN_CAP": "5000000"
     // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
@@ -73,7 +75,11 @@
     { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4120", "simple": { "limit": 10, "period": 60 } },
     // POST /v1/events (src/telemetry/ingest.ts): 30 requests per minute per IP subject, 10 per install ID.
     { "name": "EVENTS_LIMITER", "namespace_id": "4130", "simple": { "limit": 30, "period": 60 } },
-    { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4133", "simple": { "limit": 10, "period": 60 } }
+    { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4133", "simple": { "limit": 10, "period": 60 } },
+    // GET /v1/quick: 30 per minute per IP subject (its probes fetch other sites).
+    { "name": "QUICK_LIMITER", "namespace_id": "4140", "simple": { "limit": 30, "period": 60 } },
+    // Live link checks: 10 per target host per minute.
+    { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4150", "simple": { "limit": 10, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -126,7 +132,8 @@
         "ONDEMAND_E2B_SHARE": "0.5",
         "ONDEMAND_INDEX_SHARE": "0.5",
         "CLASSIFIER": "jev",
-        "JEV_USD_PER_MTOK": "0"
+        "JEV_USD_PER_MTOK": "0.5",
+        "JEV_DAILY_TOKEN_CAP": "5000000"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -148,7 +155,9 @@
         { "name": "SEARCH_LIMITER", "namespace_id": "4111", "simple": { "limit": 60, "period": 60 } },
         { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4121", "simple": { "limit": 10, "period": 60 } },
         { "name": "EVENTS_LIMITER", "namespace_id": "4131", "simple": { "limit": 30, "period": 60 } },
-        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4134", "simple": { "limit": 10, "period": 60 } }
+        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4134", "simple": { "limit": 10, "period": 60 } },
+        { "name": "QUICK_LIMITER", "namespace_id": "4141", "simple": { "limit": 30, "period": 60 } },
+        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4151", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -194,7 +203,8 @@
         "ONDEMAND_E2B_SHARE": "0.5",
         "ONDEMAND_INDEX_SHARE": "0.5",
         "CLASSIFIER": "jev",
-        "JEV_USD_PER_MTOK": "0"
+        "JEV_USD_PER_MTOK": "0.5",
+        "JEV_DAILY_TOKEN_CAP": "5000000"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -216,7 +226,9 @@
         { "name": "SEARCH_LIMITER", "namespace_id": "4112", "simple": { "limit": 60, "period": 60 } },
         { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4122", "simple": { "limit": 10, "period": 60 } },
         { "name": "EVENTS_LIMITER", "namespace_id": "4132", "simple": { "limit": 30, "period": 60 } },
-        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4135", "simple": { "limit": 10, "period": 60 } }
+        { "name": "EVENTS_INSTALL_LIMITER", "namespace_id": "4135", "simple": { "limit": 10, "period": 60 } },
+        { "name": "QUICK_LIMITER", "namespace_id": "4142", "simple": { "limit": 30, "period": 60 } },
+        { "name": "LINKCHECK_HOST_LIMITER", "namespace_id": "4152", "simple": { "limit": 10, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [

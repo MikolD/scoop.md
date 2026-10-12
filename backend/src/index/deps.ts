@@ -5,7 +5,7 @@ import { CLASSIFY_BUDGET_MS, classifyPage } from './classify.ts';
 import { workersAiEmbed } from './embed.ts';
 import { classifyWithJev } from './jevclassify.ts';
 import { usdPerMTok } from '../lib/jev.ts';
-import { DEFAULT_DAILY_CAP_USD, DEFAULT_TOTAL_CAP_USD } from './indexer.ts';
+import { DEFAULT_DAILY_CAP_USD, DEFAULT_JEV_DAILY_TOKEN_CAP, DEFAULT_TOTAL_CAP_USD, jevAllowance } from './indexer.ts';
 import type { IndexDeps } from './indexer.ts';
 
 function usd(raw: string | undefined, fallback: number): number {
@@ -23,7 +23,13 @@ export function pageClassifier(env: Env): IndexDeps['classify'] {
   }
   const apiKey = env.JEV_API_KEY;
   const price = usdPerMTok(env.JEV_USD_PER_MTOK);
-  return apiKey ? (page) => classifyWithJev(page, { apiKey, usdPerMTok: price }) : null;
+  const allow = jevAllowance(env.DB, jevTokenCap(env));
+  return apiKey ? (page) => classifyWithJev(page, { apiKey, usdPerMTok: price, allow }) : null;
+}
+
+export function jevTokenCap(env: Env): number {
+  const n = Number(env.JEV_DAILY_TOKEN_CAP);
+  return env.JEV_DAILY_TOKEN_CAP && Number.isFinite(n) && n >= 0 ? n : DEFAULT_JEV_DAILY_TOKEN_CAP;
 }
 
 export function indexDeps(env: Env): IndexDeps {
@@ -35,5 +41,6 @@ export function indexDeps(env: Env): IndexDeps {
     classify: pageClassifier(env),
     dailyCapUsd: usd(env.INDEX_DAILY_CAP_USD, DEFAULT_DAILY_CAP_USD),
     totalCapUsd: usd(env.INDEX_DAILY_TOTAL_CAP_USD, DEFAULT_TOTAL_CAP_USD),
+    jevTokenCap: jevTokenCap(env),
   };
 }

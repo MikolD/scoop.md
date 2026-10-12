@@ -55,48 +55,219 @@ export function normalizeLink(raw: string, base?: string): string | null {
 
 // ---- Finding and rewriting links in Markdown -------------------------------------
 
-// [text](url "title") and ![alt](src); <https://autolink>; a bare https://url.
-// Bounded quantifiers only: nothing here can backtrack quadratically.
-const LINKS =
-  /(!?)\[([^\]\n]{0,500})\]\(\s*<?([^\s<>()]{1,2048})>?(?:\s+(?:"[^"\n]{0,300}"|'[^'\n]{0,300}'))?\s*\)|<(https?:\/\/[^\s<>]{1,2048})>|(https?:\/\/[^\s<>()[\]"'`]{1,2048})/g;
-const TRAILING = /[.,;:!?*_]+$/;
+type LinkKind = 'link' | 'image' | 'auto' | 'bare';
+type Visit = (m: { kind: LinkKind; text: string; target: string; raw: string }) => string;
+
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+const LIST_ITEM = /^ {0,3}([-*+]|\d{1,9}[.)])[ \t]/;
+const MAX_TEXT = 500;
+const MAX_TARGET = 2048;
+// Characters that end a bare URL; parentheses are handled by balance.
+const URL_STOP = /[\s<>"'`[\]{}|\\^]/;
+const TRAILING = /[.,;:!?*_]+$/;
 
-type Visit = (m: { kind: 'link' | 'image' | 'auto' | 'bare'; text: string; target: string; raw: string }) => string;
+// A bare URL from `i` (an "http" there): to the first stop character, with
+// parentheses kept only while balanced (wiki/Foo_(bar)), and trailing
+// punctuation left to the prose.
+function bareAt(s: string, i: number): { url: string; end: number } | null {
+  if (!/^https?:\/\//.test(s.slice(i, i + 8))) return null;
+  let j = i;
+  let depth = 0;
+  while (j < s.length && j - i < MAX_TARGET && !URL_STOP.test(s[j])) {
+    if (s[j] === '(') depth++;
+    else if (s[j] === ')') {
+      if (depth === 0) break;
+      depth--;
+    }
+    j++;
+  }
+  let url = s.slice(i, j);
+  const tail = TRAILING.exec(url)?.[0] ?? '';
+  if (tail) url = url.slice(0, -tail.length);
+  // An unclosed "(" stays out of the URL.
+  while (url.split('(').length > url.split(')').length) {
+    const k = url.lastIndexOf('(');
+    url = url.slice(0, k);
+  }
+  return url.length > 10 ? { url, end: i + url.length } : null;
+}
 
-// Calls `visit` for every link outside code (fences and inline code spans)
-// and replaces it with what visit returns.
+// [text](target "title") or ![alt](target) starting at `i`; the target may
+// hold balanced parentheses. `closes` lists the positions of ']' in s, and
+// `ci` is the first one not before i (so the scan stays linear).
+function linkAt(s: string, i: number, close: number): { kind: 'link' | 'image'; text: string; target: string; end: number } | null {
+  const image = s[i] === '!';
+  const open = image ? i + 1 : i;
+  if (close < 0 || close - open > MAX_TEXT + 1 || s[close + 1] !== '(') return null;
+  let j = close + 2;
+  while (s[j] === ' ' || s[j] === '\t') j++;
+  let target = '';
+  if (s[j] === '<') {
+    const k = s.indexOf('>', j);
+    if (k < 0 || k - j > MAX_TARGET) return null;
+    target = s.slice(j + 1, k);
+    j = k + 1;
+  } else {
+    const t0 = j;
+    let depth = 0;
+    while (j < s.length && j - t0 <= MAX_TARGET && !/\s/.test(s[j])) {
+      if (s[j] === '(') depth++;
+      else if (s[j] === ')') {
+        if (depth === 0) break;
+        depth--;
+      }
+      j++;
+    }
+    target = s.slice(t0, j);
+  }
+  while (s[j] === ' ' || s[j] === '\t') j++;
+  if (s[j] === '"' || s[j] === "'") {
+    const k = s.indexOf(s[j], j + 1);
+    if (k < 0 || k - j > 300) return null;
+    j = k + 1;
+    while (s[j] === ' ' || s[j] === '\t') j++;
+  }
+  if (s[j] !== ')' || !target) return null;
+  return { kind: image ? 'image' : 'link', text: s.slice(open + 1, close), target, end: j + 1 };
+}
+
+// Links in a run of prose (no code in it).
+function proseLinks(s: string, visit: Visit): string {
+  if (!s.includes('http') && !s.includes('](')) return s;
+  const closes: number[] = [];
+  for (let k = s.indexOf(']'); k >= 0; k = s.indexOf(']', k + 1)) closes.push(k);
+  let ci = 0;
+  let out = '';
+  let i = 0;
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '[' || (c === '!' && s[i + 1] === '[')) {
+      const open = c === '!' ? i + 1 : i;
+      while (ci < closes.length && closes[ci] < open) ci++;
+      const m = linkAt(s, i, closes[ci] ?? -1);
+      if (m) {
+        out += visit({ kind: m.kind, text: m.text, target: m.target, raw: s.slice(i, m.end) });
+        i = m.end;
+        continue;
+      }
+    } else if (c === '<' && s.startsWith('http', i + 1)) {
+      const k = s.indexOf('>', i);
+      const inner = k > 0 && k - i <= MAX_TARGET ? s.slice(i + 1, k) : '';
+      if (inner && /^https?:\/\/\S+$/.test(inner)) {
+        out += visit({ kind: 'auto', text: inner, target: inner, raw: s.slice(i, k + 1) });
+        i = k + 1;
+        continue;
+      }
+    } else if (c === 'h' && (i === 0 || !/[\w/.:@-]/.test(s[i - 1]))) {
+      const b = bareAt(s, i);
+      if (b) {
+        out += visit({ kind: 'bare', text: b.url, target: b.url, raw: b.url });
+        i = b.end;
+        continue;
+      }
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+// A line's code spans (`code`, ``co`de``, <code>…</code>) kept as they are,
+// links in the rest. A backtick run closes only at the next run of the same
+// length (found through per-length queues, so the scan stays linear).
+function lineLinks(line: string, visit: Visit): string {
+  const runs: { at: number; n: number }[] = [];
+  for (let i = 0; i < line.length; ) {
+    if (line[i] !== '`') { i++; continue; }
+    let n = 0;
+    while (line[i + n] === '`') n++;
+    runs.push({ at: i, n });
+    i += n;
+  }
+  const byLength = new Map<number, number[]>();
+  runs.forEach((run, k) => {
+    const q = byLength.get(run.n);
+    if (q) q.push(k);
+    else byLength.set(run.n, [k]);
+  });
+  const next = new Map<number, number>(); // per length: position in its queue
+  let out = '';
+  let prose = '';
+  let i = 0;
+  let r = 0;
+  const flush = () => {
+    out += proseLinks(prose, visit);
+    prose = '';
+  };
+  while (i < line.length) {
+    while (r < runs.length && runs[r].at < i) r++;
+    if (r < runs.length && runs[r].at === i) {
+      const { n } = runs[r];
+      const queue = byLength.get(n)!;
+      let q = next.get(n) ?? 0;
+      while (q < queue.length && queue[q] <= r) q++;
+      next.set(n, q);
+      if (q < queue.length) {
+        const close = runs[queue[q]];
+        flush();
+        out += line.slice(i, close.at + n);
+        i = close.at + n;
+        continue;
+      }
+      prose += line.slice(i, i + n);
+      i += n;
+      continue;
+    }
+    if (line[i] === '<' && /^<code[\s>]/i.test(line.slice(i, i + 6))) {
+      const k = line.toLowerCase().indexOf('</code>', i);
+      if (k >= 0) {
+        flush();
+        out += line.slice(i, k + 7);
+        i = k + 7;
+        continue;
+      }
+    }
+    prose += line[i];
+    i++;
+  }
+  flush();
+  return out;
+}
+
+// Calls `visit` for every link outside code and replaces it with what visit
+// returns. Code is: fenced blocks, indented blocks (after a blank line, not
+// inside a list), <pre> blocks, and inline code spans.
 function eachLink(md: string, visit: Visit): string {
   let fence = '';
+  let pre = false;
+  let indented = false;
+  let prevBlank = true;
+  let inList = false;
   return md
     .split('\n')
     .map((line) => {
+      const blank = !line.trim();
       const f = FENCE.exec(line);
+      let out = line;
       if (fence) {
         if (f && f[1][0] === fence[0] && f[1].length >= fence.length) fence = '';
-        return line;
-      }
-      if (f) {
+      } else if (pre) {
+        if (/<\/pre>/i.test(line)) pre = false;
+      } else if (f) {
         fence = f[1];
-        return line;
+      } else if (/^\s*<pre[\s>]/i.test(line)) {
+        pre = !/<\/pre>/i.test(line);
+      } else if (!blank && /^( {4}|\t)/.test(line) && (indented || (prevBlank && !inList))) {
+        indented = true;
+      } else if (!blank) {
+        indented = false;
+        if (LIST_ITEM.test(line)) inList = true;
+        else if (!/^\s/.test(line)) inList = false;
+        out = lineLinks(line, visit);
       }
-      if (!line.includes('http') && !line.includes('](')) return line;
-      // Odd parts are inline code spans, kept as they are.
-      return line
-        .split(/(`[^`\n]*`)/)
-        .map((part, i) =>
-          i % 2
-            ? part
-            : part.replace(LINKS, (raw, bang: string, text: string, target: string, auto: string, bare: string) => {
-                if (auto) return visit({ kind: 'auto', text: auto, target: auto, raw });
-                if (bare) {
-                  const tail = TRAILING.exec(bare)?.[0] ?? '';
-                  const url = tail ? bare.slice(0, -tail.length) : bare;
-                  return visit({ kind: 'bare', text: url, target: url, raw: url }) + tail;
-                }
-                return visit({ kind: bang ? 'image' : 'link', text, target, raw });
-              }))
-        .join('');
+      if (!blank && !/^( {4}|\t)/.test(line)) indented = false;
+      prevBlank = blank;
+      return out;
     })
     .join('\n');
 }
@@ -112,15 +283,16 @@ export function extractLinks(md: string, base: string): string[] {
   return [...out];
 }
 
-// Keeps a link only when its target is known ok (made absolute); otherwise
-// the link text stays and the URL goes: [text](url) → text, an image → its
-// alt text, an autolink or bare URL disappears. Links that aren't http(s)
-// (mailto:) are left alone. `unknown` lists targets with no status yet.
+// Keeps a link only when its target is known to exist (made absolute).
+// Otherwise [text](url) keeps its text and loses the URL, and an image its
+// alt text; a bare or <auto> URL is never deleted: it stays as plain text in
+// backticks, so it reads as a value rather than a link. Links that aren't
+// http(s) (mailto:) are left alone. `unknown` lists targets with no status yet.
 export function rewriteLinks(md: string, base: string, states: Map<string, LinkState>): { text: string; unknown: string[] } {
   const unknown = new Set<string>();
   const text = eachLink(md, (m) => {
     const u = normalizeLink(m.target, base);
-    if (!u) return m.kind === 'link' || m.kind === 'image' ? m.raw : '';
+    if (!u) return m.raw;
     const state = states.get(u);
     if (state === undefined) unknown.add(u);
     if (state === 'ok') {
@@ -130,7 +302,7 @@ export function rewriteLinks(md: string, base: string, states: Map<string, LinkS
       if (m.kind === 'image') return `![${m.text}](${abs})`;
       return m.kind === 'auto' ? `<${abs}>` : abs;
     }
-    return m.kind === 'link' || m.kind === 'image' ? m.text : '';
+    return m.kind === 'link' || m.kind === 'image' ? m.text : `\`${m.text}\``;
   });
   return { text, unknown: [...unknown] };
 }
@@ -171,6 +343,27 @@ export async function saveLinks(db: D1Database, records: LinkRecord[], source: '
   for (const part of chunks(stmts, 100)) await db.batch(part);
 }
 
+// Records that `site` links to these URLs (from `pageUrl`).
+export async function addRefs(db: D1Database, site: string, pageUrl: string, urls: string[], now = new Date()): Promise<void> {
+  const unique = [...new Set(urls.map((u) => normalizeLink(u)).filter((u): u is string => u !== null))].slice(0, 500);
+  const stmts = unique.map((u) =>
+    db.prepare('INSERT INTO link_refs (site, url, page_url, seen_at) VALUES (?, ?, ?, ?) ON CONFLICT (site, url) DO UPDATE SET seen_at = excluded.seen_at')
+      .bind(site, u, pageUrl, now.toISOString()));
+  for (const part of chunks(stmts, 100)) await db.batch(part);
+}
+
+// Statuses from POST /v1/links/check for URLs nothing in the library links
+// to: kept a day for repeat lookups, then deleted.
+export const LIVE_ROW_HOURS = 24;
+export async function pruneLiveLinks(db: D1Database, now = new Date()): Promise<number> {
+  const before = new Date(now.getTime() - LIVE_ROW_HOURS * 3_600_000).toISOString();
+  const r = await db
+    .prepare(`DELETE FROM link_status WHERE source = 'live' AND checked_at < ? AND url NOT IN (SELECT url FROM link_refs)`)
+    .bind(before)
+    .run();
+  return r.meta.changes ?? 0;
+}
+
 // Links met while serving with no status yet, for the hourly check.
 export async function queueLinks(db: D1Database, urls: string[], site: string | null, now = new Date()): Promise<void> {
   const unique = [...new Set(urls)].slice(0, 500);
@@ -179,14 +372,22 @@ export async function queueLinks(db: D1Database, urls: string[], site: string | 
   for (const part of chunks(stmts, 100)) await db.batch(part);
 }
 
-// What a crawlFetch told about every URL of its redirect chain: ok when it
-// ended in a 2xx (or 304), bad on a 4xx or 5xx; nothing when the answer
-// says nothing about the link (a timeout, 429, robots.txt, a redirect off
-// the site).
+// What an HTTP status says about a link: the page exists (2xx; 400, 401,
+// 403 and 405, where a server refuses a bot or a method but the page is
+// there), is dead (404, 410), or nothing is known (429, 5xx, anything else).
+export function linkVerdict(status: number): boolean | null {
+  if ((status >= 200 && status < 300) || status === 304 || status === 400 || status === 401 || status === 403 || status === 405) return true;
+  if (status === 404 || status === 410) return false;
+  return null;
+}
+
+// What a crawlFetch told about every URL of its redirect chain, by
+// linkVerdict on its final status; nothing when the answer says nothing
+// (a timeout, robots.txt, a redirect off the site).
 export function recordsFromFetch(chain: string[], r: CrawlFetch): LinkRecord[] {
   let rec: Omit<LinkRecord, 'url'> | null = null;
   if (r.ok) rec = { ok: true, status: r.notModified ? 304 : r.status, finalUrl: r.url };
-  else if (!r.skipped && r.status !== null && r.status >= 400 && r.status !== 429) rec = { ok: false, status: r.status, finalUrl: chain[chain.length - 1] ?? null };
+  else if (!r.skipped && r.status !== null && linkVerdict(r.status) !== null) rec = { ok: linkVerdict(r.status)!, status: r.status, finalUrl: chain[chain.length - 1] ?? null };
   if (!rec) return [];
   return chain.flatMap((c) => {
     const url = normalizeLink(c);
@@ -231,6 +432,8 @@ export interface CheckOptions {
   // Per external host.
   perHost?: number;
   hostIntervalMs?: number;
+  // Asked once per link before checking it: false leaves it unknown (a per-host rate limit).
+  allowHost?: (host: string) => Promise<boolean>;
 }
 
 const isTimeout = (e: unknown) => e instanceof Error && (e.name === 'TimeoutError' || e.name === 'AbortError' || /timed? ?out|abort/i.test(e.message));
@@ -289,8 +492,8 @@ export async function checkExternal(url: string, o: CheckOptions & { limiter: Ho
       }
       continue;
     }
-    if (res.status === 429) return null;
-    return { url, ok: res.status >= 200 && res.status < 300, status: res.status, finalUrl: current };
+    const verdict = linkVerdict(res.status);
+    return verdict === null ? null : { url, ok: verdict, status: res.status, finalUrl: current };
   }
   return { url, ok: false, status: null, finalUrl: current };
 }
@@ -311,6 +514,7 @@ export async function checkLinks(urls: string[], o: CheckOptions = {}): Promise<
   let next = 0;
   const one = async (url: string): Promise<LinkRecord | null> => {
     const u = new URL(url);
+    if (o.allowHost && !(await o.allowHost(u.hostname))) return null;
     if (o.site && normalizeSite(u.hostname) === o.site) {
       if (o.allowed && !o.allowed(u.pathname + u.search)) return null;
       let records: LinkRecord[] = [];

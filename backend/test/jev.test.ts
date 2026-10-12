@@ -379,8 +379,9 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.deepEqual(Object.keys(jev.calls[0].body.questions.overview.criteria), ['s0', 's1']);
   assert.equal(d.overview, 'https://hono.dev/docs/api/routing.md');
   assert.equal(d.jevTokens, 320);
-  // The 8 candidates, and the page itself (for isDevDocs).
-  assert.equal(site.hits.length, 9);
+  // The 8 candidates, robots.txt, and the page itself (for isDevDocs, robots.txt allowing).
+  assert.equal(site.hits.length, 10);
+  assert.ok(site.hits.includes('https://hono.dev/robots.txt'));
   assert.ok(site.hits.includes('https://hono.dev/docs/api/routing'));
   assert.deepEqual(d.isDevDocs, { verdict: 'yes', method: 'jev', score: 0.9 });
   // llms-full.txt here has no link: not a verified index, so no fullUrl.
@@ -389,7 +390,7 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   // Another page of the same site: only its own twins (and itself) are fetched.
   site.hits.length = 0;
   const other = await quickDiscover('https://hono.dev/docs/api/context', { fetchImpl: site.fetchImpl, jev: null, siteCache });
-  assert.deepEqual(site.hits.sort(), ['https://hono.dev/docs/api/context', 'https://hono.dev/docs/api/context.md', 'https://hono.dev/docs/api/context/index.md']);
+  assert.deepEqual(site.hits.sort(), ['https://hono.dev/docs/api/context', 'https://hono.dev/docs/api/context.md', 'https://hono.dev/docs/api/context/index.md', 'https://hono.dev/robots.txt']);
   // Without Jev: the most specific llms.txt.
   assert.equal(other.overview, 'https://hono.dev/llms.txt');
 

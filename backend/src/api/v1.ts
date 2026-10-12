@@ -8,9 +8,9 @@ import type { SkillRow } from '../db/store.ts';
 import type { Skill } from '../lib/types.ts';
 import { SLOTS } from '../index/classify.ts';
 import type { Slot } from '../index/classify.ts';
-import { indexDeps } from '../index/deps.ts';
+import { indexDeps, jevTokenCap } from '../index/deps.ts';
 import { workersAiEmbed } from '../index/embed.ts';
-import { addCost, indexPage, pageKey } from '../index/indexer.ts';
+import { addCost, indexPage, jevAllowance, pageKey } from '../index/indexer.ts';
 import { usdPerMTok, jevCostUsd } from '../lib/jev.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
@@ -27,8 +27,8 @@ import { ingestEvents } from '../telemetry/ingest.ts';
 import type { ApiUsage } from '../telemetry/ingest.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import type { PackageInput } from '../search/package.ts';
-import { siteInstructions } from '../agents/instructions.ts';
-import { checkLinks, linkStates, normalizeLink, queueLinks, rewriteLinks, saveLinks, statesFor } from '../links/links.ts';
+import { instructionsAllowed, siteInstructions } from '../agents/instructions.ts';
+import { addRefs, checkLinks, extractLinks, linkStates, normalizeLink, queueLinks, rewriteLinks, saveLinks, statesFor } from '../links/links.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
@@ -172,6 +172,21 @@ export async function renderPackage(db: D1Database, input: Omit<PackageInput, 'l
     [...input.chunks.map((c) => c.url), docsIndex?.url, docsIndex?.fullUrl, ...instructions.map((i) => i.url), ...(input.related ?? []).map((r) => r.url)],
   );
   return buildIndexPackage({ ...input, links, docsIndex, instructions });
+}
+
+// Live checks per target host per minute (LINKCHECK_HOST_LIMITER), so callers can't aim them at one site.
+const hostAllowance = (env: Env) =>
+  env.LINKCHECK_HOST_LIMITER ? async (host: string) => (await env.LINKCHECK_HOST_LIMITER!.limit({ key: host })).success : undefined;
+
+// Which of these URLs the library links to somewhere (link_refs).
+async function referenced(db: D1Database, urls: string[]): Promise<string[]> {
+  const out: string[] = [];
+  for (let i = 0; i < urls.length; i += 90) {
+    const part = urls.slice(i, i + 90);
+    const { results } = await db.prepare(`SELECT DISTINCT url FROM link_refs WHERE url IN (${part.map(() => '?').join(', ')})`).bind(...part).all<{ url: string }>();
+    out.push(...results.map((r) => r.url));
+  }
+  return out;
 }
 
 // The Cache API (absent outside Workers, e.g. in the node tests).
@@ -356,12 +371,17 @@ const routes: Route[] = [
         const u = normalizeLink(sec.url);
         return u ? [{ url: u, ok: true, status: 200, finalUrl: u }] : [];
       }), 'live');
-      const states = await statesFor(env.DB, served.site, served.sections.flatMap((sec) => (sec.content ? [{ text: sec.content, base: sec.url }] : [])), served.relatedLinks.map((l) => l.url));
+      const texts = served.sections.flatMap((sec) => (sec.content ? [{ text: sec.content, base: sec.url }] : []));
+      const states = await statesFor(env.DB, served.site, texts, served.relatedLinks.map((l) => l.url));
+      // The skill's links are served content: referenced, so kept and re-checked like a crawled page's.
+      await addRefs(env.DB, served.site, served.pageUrl, [...texts.flatMap((t) => extractLinks(t.text, t.base)), ...served.relatedLinks.map((l) => l.url)]);
       const related = new Set(served.relatedLinks.map((l) => normalizeLink(l.url)));
       const unknown = await env.DB.prepare('SELECT url FROM link_check_queue WHERE site = ? LIMIT 200').bind(served.site).all<{ url: string }>();
       const todo = unknown.results.map((r) => r.url).filter((u) => !states.has(u)).sort((a, b) => Number(related.has(b)) - Number(related.has(a)));
       if (todo.length) {
-        const live = await checkLinks(todo.slice(0, LIVE_CHECKS), { allowLocalhost: allowLocalhost(env), site: served.site, deadline: started + LIVE_CHECK_MS, timeoutMs: LIVE_CHECK_MS });
+        const live = await checkLinks(todo.slice(0, LIVE_CHECKS), {
+          allowLocalhost: allowLocalhost(env), site: served.site, deadline: started + LIVE_CHECK_MS, timeoutMs: LIVE_CHECK_MS, allowHost: hostAllowance(env),
+        });
         await saveLinks(env.DB, live, 'live');
       }
       return json(duplicate ? 200 : 201, { id, status: 'verified', duplicate });
@@ -460,10 +480,13 @@ const routes: Route[] = [
           allowLocalhost: allowLocalhost(env),
           deadline: started + LIVE_CHECK_MS,
           timeoutMs: LIVE_CHECK_MS,
+          allowHost: hostAllowance(env),
         });
         await saveLinks(env.DB, live, 'live');
         for (const r of live) states.set(r.url, r.ok ? 'ok' : 'bad');
-        await queueLinks(env.DB, unknown.filter((u) => !states.has(u)), null);
+        // Only links the library itself serves are queued, never arbitrary URLs from callers.
+        const left = unknown.filter((u) => !states.has(u));
+        if (left.length) await queueLinks(env.DB, await referenced(env.DB, left), null);
       }
       const out: { ok: string[]; bad: string[]; unknown: string[] } = { ok: [], bad: [], unknown: [] };
       for (const [raw, n] of norm) {
@@ -479,7 +502,13 @@ const routes: Route[] = [
     name: '/v1/quick',
     // Instant first answer for a page (src/search/quick.ts): the Markdown its
     // site publishes for agents, and whether the scoop.md index has the site.
-    handler: async ({ env, url, usage }) => {
+    handler: async ({ env, url, usage, ip }) => {
+      // Its probes fetch other sites and may ask Jev: its own, stricter limit.
+      if (env.QUICK_LIMITER && !(await env.QUICK_LIMITER.limit({ key: ipSubject(ip) })).success) {
+        const err = new ApiError('rate_limited', 'Too many requests; try again later', 429);
+        err.retryAfter = 60;
+        throw err;
+      }
       const raw = url.searchParams.get('url');
       if (!raw || raw.length > 1024) throw bad('url must be a string of 1–1024 characters');
       const pageUrl = normalizePageUrl(assertFetchable(raw, { allowLocalhost: allowLocalhost(env) }));
@@ -487,14 +516,28 @@ const routes: Route[] = [
       usage.site = site;
       const cache = edgeCache();
       const key = new Request(`https://quick-cache.scoop.md/v1?url=${encodeURIComponent(pageUrl)}`);
-      const [cached, status] = await Promise.all([cache?.match(key).catch(() => undefined), retryD1(() => siteStatus(env.DB, site))]);
+      // The first miss per target host per hour probes it; later misses answer from the site cache only.
+      const hostKey = new Request(`https://quick-cache.scoop.md/host?h=${encodeURIComponent(new URL(pageUrl).host)}`);
+      const [cached, status, probed, allowed] = await Promise.all([
+        cache?.match(key).catch(() => undefined),
+        retryD1(() => siteStatus(env.DB, site)),
+        cache?.match(hostKey).catch(() => undefined),
+        instructionsAllowed(env.DB, site, pageUrl).catch(() => false),
+      ]);
+      // Instructions for agents: only for an indexed, approved (or allowlisted) site.
+      const withInstructions = status.indexed && allowed;
       let found: Omit<QuickDiscovery, 'jevTokens'>;
       if (cached) {
         found = await cached.json();
       } else {
+        if (!probed) {
+          await cache?.put(hostKey, new Response('1', { headers: { 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` } })).catch(() => {});
+        }
         const d = await quickDiscover(pageUrl, {
           allowLocalhost: allowLocalhost(env),
-          jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY } : null,
+          probe: !probed,
+          instructions: withInstructions,
+          jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
           siteCache: cache && {
             get: async (k) => (await cache.match(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`)).catch(() => undefined))?.json() ?? null,
             put: (k, v) =>
@@ -515,7 +558,7 @@ const routes: Route[] = [
         200,
         {
           site, sources: found.sources, overview: found.overview, indexed: status.indexed, pages: status.pages,
-          isDevDocs: found.isDevDocs, llms: found.llms, agentInstructions: found.agentInstructions,
+          isDevDocs: found.isDevDocs, llms: found.llms, agentInstructions: withInstructions ? found.agentInstructions : [],
         },
         { 'cache-control': CACHE_LIST, 'x-scoop-cache': cached ? 'hit' : 'miss' },
       );
