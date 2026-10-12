@@ -120,7 +120,8 @@ export function compact(text) {
 export function verifyLlms(content) {
   if (typeof content !== 'string') return false;
   const first = content.split('\n').find((l) => l.trim());
-  return Boolean(first && /^#\s+\S/.test(first.trim()) && /\[[^\]]+\]\(https?:\/\/[^)\s]+\)/.test(content));
+  // A link: absolute, or site-relative (/docs/x.md, as twilio.com's llms.txt has them).
+  return Boolean(first && /^#\s+\S/.test(first.trim()) && /\[[^\]]+\]\((?:https?:\/\/|\/)[^)\s]+\)/.test(content));
 }
 
 const QUOTED_HEADING = '## What this site says to AI agents';

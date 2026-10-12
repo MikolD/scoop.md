@@ -47,6 +47,22 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/markdown' });
       return res.end('# Guide (Markdown twin)\n\nThe Markdown version of the guide, from the docs subdomain.\n');
     }
+    if (req.url === '/shop/' || req.url === '/shop/pricing') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      return res.end(`<html><head><title>Pricing | Shop</title></head><body><main><h1>Pricing</h1><p>${'Plans for every team, billed monthly or yearly. '.repeat(10)}</p></main></body></html>`);
+    }
+    if (req.url === '/shop/llms.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('# Shop\n\n- [Pricing](https://shop.example.net/pricing)\n');
+    }
+    if (req.url === '/sub/llms-rel.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('# Example docs\n\n> The example docs, with site-relative links.\n\n- [Guide](/guide.md): getting started\n');
+    }
+    if (req.url === '/sub/home.md') {
+      res.writeHead(200, { 'content-type': 'text/markdown' });
+      return res.end('---\n"@context": https://schema.org\nheadline: "Home"\n---\n\n# Example home\n\nWelcome to the example docs. Start with the guide.\n');
+    }
     if (req.url === '/sub/llms-big.txt') {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end(`# Big docs\n\n${'- [A page](https://docs.example.org/guide.md): what it covers, in a few words\n'.repeat(800)}`);
@@ -68,6 +84,7 @@ before(async () => {
     const s = String(url);
     if (s.startsWith(`https://${SITE}`)) return realFetch(s.replace(`https://${SITE}`, docsUrl), init);
     if (s.startsWith(`https://${SUB}`)) return realFetch(s.replace(`https://${SUB}`, `${docsUrl}/sub`), init);
+    if (s.startsWith('https://shop.example.net')) return realFetch(s.replace('https://shop.example.net', `${docsUrl}/shop`), init);
     if (s.startsWith('https://api.scoop.md/v1')) return realFetch(s.replace('https://api.scoop.md/v1', mock.url), init);
     if (s.includes('/v1/packages')) packageAttempts++;
     if (init?.method === 'HEAD') headRequests.push(s);
@@ -1291,3 +1308,35 @@ test('service worker: badge_verdict_shown per verdict, hourly, no sites', async 
   assert.equal(local.badgeVerdictsShown, undefined);
   assert.match(read('../extension/background.js'), /t\.track\('badge_verdict_shown', \{ verdict, count \}\)/);
 });
+
+test('the local guess: a marketing page with an llms.txt at the root is not developer docs (the library unreachable or slow)', () => withMock({ sites: {} }, async () => {
+  const p = await openPopup('https://shop.example.net/pricing', { local: { devLibraryUrl: 'http://localhost:9/v1' } });
+  await p.ready;
+  assert.equal(p.$('devdocs').dataset.state, 'no');
+  assert.equal(p.$('devdocs').title, 'No developer docs (guess)');
+}));
+
+test('docs entry point: site-relative links in the llms.txt become absolute; a .md home loses its front matter and gives its H1 as the title', async () => {
+  await withMock({ sites: { [SITE]: { docs: { found: true, root: `https://${SUB}/`, via: 'subdomain', verdict: 'no' }, llms: { url: `https://${SUB}/llms-rel.txt`, verified: true } } } }, async () => {
+    const p = await openPopup(`https://${SITE}/docs/links`);
+    await p.ready;
+    assert.match(p.clipboard.text, /\[Guide\]\(https:\/\/docs\.example\.org\/guide\.md\)/);
+    assert.ok(!p.clipboard.text.includes('](/guide.md)'));
+  });
+  await withMock({ sites: { [SITE]: { docs: { found: true, root: `https://${SUB}/home`, via: 'subdomain', verdict: 'no' } } } }, async () => {
+    const p = await openPopup(`https://${SITE}/docs/links`);
+    await p.ready;
+    assert.match(p.clipboard.text, /^# docs\.example\.org docs for Example home \(via scoop\.md\)$/m);
+    assert.ok(!p.clipboard.text.includes('"@context"'), 'no front matter');
+  });
+});
+
+test('search snippets drop Markdown heading marks', () => withMock({ sites: { [SITE]: { indexed: true, hits: [{ id: 'c1', url: `https://${SITE}/docs/a`, title: 'A', heading_path: 'A > B', snippet: '#### Verify manually ### Verify webhook signatures manually' }] } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-search').onclick();
+  p.$('search-q').value = 'verify';
+  p.$('search-q').oninput();
+  await waitFor(() => p.document.querySelector('.hit-snippet'));
+  assert.equal(p.document.querySelector('.hit-snippet').textContent, 'Verify manually Verify webhook signatures manually');
+}));
