@@ -105,7 +105,7 @@
   {"name":"Pydantic","site":"pydantic.dev","startUrl":"https://pydantic.dev/docs/","maxPages":200},
   {"name":"NumPy","site":"numpy.org","startUrl":"https://numpy.org/doc/stable/","maxPages":200},
   {"name":"pandas","site":"pandas.pydata.org","startUrl":"https://pandas.pydata.org/docs/","maxPages":200},
-  {"name":"PyTorch","site":"docs.pytorch.org","startUrl":"https://docs.pytorch.org/docs/stable/","maxPages":200},
+  {"name":"PyTorch","site":"docs.pytorch.org","startUrl":"https://docs.pytorch.org/docs/","maxPages":200},
   {"name":"uv","site":"docs.astral.sh","startUrl":"https://docs.astral.sh/uv/","maxPages":200},
   {"name":"GitLab","site":"docs.gitlab.com","startUrl":"https://docs.gitlab.com/","maxPages":200}
 ]

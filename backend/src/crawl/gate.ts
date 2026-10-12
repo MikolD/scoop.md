@@ -224,6 +224,34 @@ export function pageSignals(body: string, pageUrl: string, contentType: string):
   return { signals: s, facts };
 }
 
+// A redirect stub: a meta refresh, or a near-empty page whose only link is
+// another page of the same site (Kotlin's /docs/, PyTorch's /docs/stable/).
+// Returns the page it points to, if any.
+export function stubTarget(body: string, pageUrl: string, contentType: string): string | null {
+  const head = body.slice(0, 20_000);
+  if (head.replace(/<[^>]{0,2000}>/g, ' ').split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length > 40) return null;
+  const site = normalizeSite(new URL(pageUrl).hostname);
+  const resolve = (raw: string | undefined) => {
+    if (!raw) return null;
+    try {
+      const u = new URL(raw.trim().replace(/^['"]|['"]$/g, ''), pageUrl);
+      u.hash = '';
+      return (u.protocol === 'https:' || u.protocol === 'http:') && normalizeSite(u.hostname) === site && u.href !== pageUrl ? u.href : null;
+    } catch {
+      return null;
+    }
+  };
+  if (!looksLikeText(contentType, body)) {
+    const refresh = /<meta\b[^>]{0,300}http-equiv=["']?refresh["']?[^>]{0,300}>/i.exec(head)?.[0];
+    const url = refresh && /content=["']?\s*\d*\s*;?\s*url\s*=\s*([^"'>\s]{1,1000})/i.exec(refresh)?.[1];
+    if (url) return resolve(url);
+    const links = [...new Set([...head.matchAll(/<a\b[^>]{0,300}href=["']([^"']{1,1000})["']/gi)].map((m) => resolve(m[1])))];
+    return links.length === 1 ? links[0] : null;
+  }
+  const links = [...new Set([...head.matchAll(/\]\(\s*<?([^)\s>]{1,1000})>?\s*\)/g)].map((m) => resolve(m[1])))];
+  return links.length === 1 ? links[0] : null;
+}
+
 export interface Score {
   positive: number;
   negative: number;
@@ -390,12 +418,23 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
     const u = new URL(url);
     return robots.allowed(u.pathname + u.search);
   };
-  const get = (url: string, cap: number) => crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, allowed: robots.allowed });
+  const get = (url: string, cap: number, accept?: string) =>
+    crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, allowed: robots.allowed, accept });
+  // The start page as a browser would ask for it, after a Markdown-first
+  // request failed (some servers answer it with 404 or 500).
+  const HTML = 'text/html, application/xhtml+xml;q=0.9, */*;q=0.5';
   const pass = (reason: string): GateVerdict => ({ decision: 'crawl', category: null, confidence: 0, reason, method: 'signals', costUsd: 0 });
   // Discovery records a blocked site as such; nothing here to judge.
   if (!allowed(start.href)) return pass('start page disallowed by robots.txt; left to discovery');
 
-  const page = await get(start.href, START_CAP);
+  let page = await get(start.href, START_CAP);
+  if (!page.ok && page.status !== null && page.status >= 400) page = await get(start.href, START_CAP, HTML);
+  // Follow one redirect stub to the page it stands for.
+  const stub = page.ok && !page.notModified ? stubTarget(page.text, page.url, page.contentType) : null;
+  if (stub && allowed(stub)) {
+    const next = await get(stub, START_CAP);
+    if (next.ok && !next.notModified && next.text) page = next;
+  }
   const givenRoot = start.pathname === '/' ? '' : start.pathname;
   let llms = false;
   for (const base of llmsBases(start.origin, givenRoot, 2)) {
@@ -406,9 +445,10 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
       break;
     }
   }
-  if (!page.ok || page.notModified || page.over) {
+  // A page over the cap is judged on the part that was read.
+  if (!page.ok || page.notModified || !page.text) {
     if (llms) return { decision: 'crawl', category: 'devtool-docs', confidence: 0.7, reason: 'llms.txt found (start page unreadable)', method: 'signals', costUsd: 0 };
-    return pass(`start page unreadable (${page.ok ? 'too large' : page.reason}); left to discovery`.slice(0, REASON_MAX));
+    return pass(`start page unreadable (${page.ok ? (page.notModified ? 'not modified' : 'too large') : page.reason}); left to discovery`.slice(0, REASON_MAX));
   }
   const { signals, facts } = pageSignals(page.text, page.url, page.contentType);
   signals.llms = llms;

@@ -77,6 +77,8 @@ export interface CrawlFetchOptions {
   // robots.txt check for each redirect hop (the caller checks the first URL).
   allowed?: (pathAndQuery: string) => boolean;
   timeoutMs?: number;
+  // Defaults to Markdown first; some servers answer that with an error.
+  accept?: string;
 }
 
 export type CrawlFetch =
@@ -144,7 +146,7 @@ export async function crawlFetch(url: string, o: CrawlFetchOptions): Promise<Cra
     return { ok: false, url, status: null, reason: (e as Error).message };
   }
   const site = normalizeSite(current.hostname);
-  const headers: Record<string, string> = { 'user-agent': CRAWLER_UA, accept: 'text/markdown, text/plain;q=0.9, */*;q=0.5' };
+  const headers: Record<string, string> = { 'user-agent': CRAWLER_UA, accept: o.accept ?? 'text/markdown, text/plain;q=0.9, */*;q=0.5' };
   if (o.etag) headers['if-none-match'] = o.etag;
   if (o.lastModified) headers['if-modified-since'] = o.lastModified;
 
