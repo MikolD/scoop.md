@@ -249,7 +249,8 @@ export async function classifyWithJev(page: PageInput, o: JevClassifyOptions): P
     classification: {
       slot,
       topic_path: topicPathFor(segs, page.title, top),
-      summary: firstParagraph(page.markdown) || clean(page.title, SUMMARY_MAX),
+      // A page with no heading has its path as its title: no summary then.
+      summary: firstParagraph(page.markdown) || (page.title.startsWith('/') ? '' : clean(page.title, SUMMARY_MAX)),
       tasks: [],
       entities: codeEntities(page.markdown),
     },

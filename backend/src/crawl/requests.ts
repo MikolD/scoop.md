@@ -90,12 +90,15 @@ export function startUrlFor(pageUrl: string): string {
 }
 
 // A rough wait, for a progress message; never a promise. Fetching runs at
-// about 1 page/s and indexing at about 8 s a page (classification dominates;
-// measured locally at 10-12 s with one consumer). Before the page count is
-// known, a requested crawl is assumed to find EXPECTED_PAGES (the D1 docs
-// gave 55).
+// about 1 page/s, and since Jev classifies (about 0.25 s a page) indexing
+// keeps up with it: on staging docs.pola.rs fetched 73 pages in 133 s and
+// indexed them in 134 s, the last 13 s after the last fetch (with qwen,
+// docs.astral.sh indexed 9.8 pages a minute, finishing 7.4 minutes after
+// its crawl). INDEX_S is what a page still queued adds. Before the page
+// count is known, a requested crawl is assumed to find EXPECTED_PAGES (the
+// D1 docs gave 55).
 const FETCH_S = 1.2;
-const INDEX_S = 8;
+const INDEX_S = 1;
 const EXPECTED_PAGES = 60;
 export function etaSeconds(state: RequestState, phase: Phase, found: number, stored: number, indexed: number): number {
   if (state === 'complete' || state === 'rejected' || state === 'failed') return 0;
