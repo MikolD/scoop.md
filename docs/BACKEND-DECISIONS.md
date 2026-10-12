@@ -248,7 +248,10 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   topic counts. Classification comes after embedding so that a failure there
   costs nothing. The consumer never reads the crawler's `pages` table; the
   message and R2 are the whole contract. The message URL is normalised (parsed,
-  fragment dropped, `href`), so one page has one spelling.
+  `href`), so one page has one spelling. Plain anchors (`#intro`) are dropped;
+  a client-side route (`#/cdn`, as on docsify sites, one page per route) is
+  kept, minus any `?query` inside the fragment. The crawler sends URLs already
+  in this form.
 - **Classification cache:** a successful result is stored at
   `classify/<contentHash>.json` in R2 before anything else is written, and
   read back first on every attempt, so a retry after a Vectorize or D1 failure

@@ -14,11 +14,13 @@ export function parseMessage(body: unknown): IndexMessage {
   if (typeof b.url !== 'string' || typeof b.site !== 'string' || typeof b.contentHash !== 'string') {
     throw new PermanentError('message needs site, url and contentHash strings');
   }
-  // One spelling per page: parsed, fragment dropped, re-serialised.
+  // One spelling per page: parsed, plain anchors dropped, re-serialised. A
+  // client-side route (#/cdn on docsify-style sites) names its own page, so it
+  // stays, without any ?query inside the fragment.
   let u: URL;
   try { u = new URL(b.url); } catch { throw new PermanentError('url is not a URL'); }
   if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new PermanentError('url is not http(s)');
-  u.hash = '';
+  u.hash = u.hash.startsWith('#/') ? u.hash.split('?')[0] : '';
   const site = normalizeSite(b.site);
   if (siteOf(u.href) !== site) throw new PermanentError('url is not on site');
   if (!HEX64.test(b.contentHash)) throw new PermanentError('contentHash is not a sha256 hex digest');

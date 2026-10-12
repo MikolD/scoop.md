@@ -698,6 +698,11 @@ test('consumer acks indexed and invalid messages, retries failures with backoff'
   // URLs are normalised: fragment dropped, host lowercased, path percent-encoded.
   assert.equal(parseMessage({ site: 'ex.com', url: 'HTTPS://EX.com/a b#frag', contentHash: 'b'.repeat(64) }).url, 'https://ex.com/a%20b');
   assert.throws(() => parseMessage({ site: 'ex.com', url: 'ftp://ex.com/a', contentHash: 'b'.repeat(64) }), /http/);
+  // Client-side routes are pages of their own; anchors aren't.
+  const route = (url: string) => parseMessage({ site: 'docsify.js.org', url, contentHash: 'b'.repeat(64) }).url;
+  assert.equal(route('https://docsify.js.org/#/cdn'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#/cdn?id=latest'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#intro'), 'https://docsify.js.org/');
 });
 
 test('topic prefixes with non-BMP characters match (SQLite counts characters, not UTF-16 units)', async () => {
