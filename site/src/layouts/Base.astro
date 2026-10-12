@@ -14,9 +14,12 @@ import { GITHUB_URL } from '../lib/links';
 interface Props {
   title?: string;
   description?: string;
+  // Send no Referer from this page (the uninstall page).
+  noReferrer?: boolean;
 }
 
 const {
+  noReferrer = false,
   title,
   description = 'Scoop any doc. One click on any documentation site copies agent-ready Markdown for Claude Code, Codex, Cursor or any coding agent.',
 } = Astro.props;
@@ -34,6 +37,7 @@ const nav = [
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    {noReferrer && <meta name="referrer" content="no-referrer" />}
     <title>{fullTitle}</title>
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />

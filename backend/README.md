@@ -259,11 +259,16 @@ deletion, retention, platforms, geo, errors, API usage, website, export).
 
 `POST /v1/events` takes batches of usage events from the extension and
 scoop.md, and the API records its own usage; both go through the
-`telemetry-events` queue into D1 (`events`, `installs`, `install_days`,
-`events_daily`) and a gzipped NDJSON archive in the `TELEMETRY` bucket. Raw
-D1 events are pruned after 180 days by the daily cron. Event catalog, privacy
-rules, tables and resources: docs/TELEMETRY.md. Locally, `TELEMETRY_SALT`
-comes from `.dev.vars`; `wrangler dev` simulates the queue and the bucket.
+`telemetry-events` queue into a separate D1 database, `TELEMETRY_DB`
+(`events`, `installs`, `uninstalls`, `install_days`, `events_daily`, …;
+migrations in `migrations-telemetry/`), and a gzipped NDJSON archive in the
+`TELEMETRY` bucket. Flood limits: 30 requests/min per IP subject, 10 per
+install, daily quotas in the consumer, a daily ceiling and the
+`TELEMETRY_INGEST` switch (`on` | `lifecycle` | `off`). An hourly cron prunes
+raw events after 180 days and IP hashes after 30. Event catalog, privacy
+rules, tables and resources: docs/TELEMETRY.md. Locally:
+`npx wrangler d1 migrations apply TELEMETRY_DB --local`; `wrangler dev`
+simulates the queue and the bucket.
 
 ## Before the first deploy
 
@@ -370,15 +375,20 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
       npx wrangler queues create telemetry-events-$env
       npx wrangler queues create telemetry-events-dlq-$env
       npx wrangler r2 bucket create scoop-telemetry-$env
-      openssl rand -base64 32 | npx wrangler secret put TELEMETRY_SALT --env $env
+      # The archive is kept 13 months (docs/TELEMETRY.md, privacy policy).
+      npx wrangler r2 bucket lifecycle add scoop-telemetry-$env telemetry-raw-13-months telemetry/raw/ --expire-days 395
+      npx wrangler d1 migrations apply TELEMETRY_DB --env $env --remote   # migrations-telemetry/0001_telemetry.sql
     done
-    npx wrangler d1 migrations apply DB --env staging --remote      # 0008_telemetry.sql
     ```
-    The `EVENTS_LIMITER` namespaces `4131` (staging) / `4132` (production)
-    need no creation (`4130` is dev). `TELEMETRY_API_SAMPLE` (vars, default
-    `"1"`) is the share of API requests recorded. Never rotate or reuse
-    `TELEMETRY_SALT` elsewhere: it only salts daily hashes, but a leaked salt
-    would let someone test guesses of an IP against a day's hashes.
+    The telemetry D1 databases exist already (`scoop-telemetry-staging`,
+    `scoop-telemetry-production`; IDs in `wrangler.jsonc`). Telemetry is not
+    in the main DB's migrations. The rate-limit namespaces need no creation:
+    `EVENTS_LIMITER` 4130/4131/4132 and `EVENTS_INSTALL_LIMITER` 4133/4134/4135
+    (dev/staging/production). Vars, set in `wrangler.jsonc`: `TELEMETRY_INGEST`
+    (`on` | `lifecycle` | `off`: the kill switch), `TELEMETRY_API_SAMPLE`,
+    `TELEMETRY_DAILY_MAX` (2,000,000), `TELEMETRY_API_DAILY_MAX` (200,000).
+    No secret: the IP hash uses a random key per day, kept 48 hours in
+    `TELEMETRY_DB`. The hourly cron (`23 * * * *`) is created by deploy.
 
 ## Deploy
 

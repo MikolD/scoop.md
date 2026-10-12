@@ -44,7 +44,8 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   popup_open: ['extension', { trigger: oneOf('toolbar', 'shortcut') }],
   popup_close: ['extension', { durationMs: int }],
   // Scoops
-  scoop_start: ['extension', { site, path }],
+  // Names no site: whether the page is public is known only at scoop_result.
+  scoop_start: ['extension', {}],
   scoop_result: ['extension', {
     site, path,
     outcome: oneOf('copied_ready', 'empty', 'error', 'unsupported_page'),

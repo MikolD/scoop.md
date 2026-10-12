@@ -1,6 +1,7 @@
 ---
 // The extension's uninstall page (chrome.runtime.setUninstallURL):
-// /bye?i=<install ID>&v=<version>, or plain /bye when usage statistics were off.
+// /bye#i=<install ID>&v=<version>, or plain /bye when usage statistics were off.
+// The ID is in the fragment, so it never reaches a server log or a Referer.
 // It records the uninstall and an optional one-click reason (src/lib/beacon.ts).
 import Base from '../layouts/Base.astro';
 
@@ -14,7 +15,7 @@ const reasons = [
 ];
 ---
 
-<Base title="Uninstalled" description="scoop.md was removed from your browser.">
+<Base title="Uninstalled" description="scoop.md was removed from your browser." noReferrer>
   <article class="wrap page">
     <p class="eyebrow">uninstalled</p>
     <h1>Sorry to see you go.</h1>
@@ -38,7 +39,7 @@ const reasons = [
   import { send } from '../lib/beacon';
 
   const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  const q = new URLSearchParams(location.search);
+  const q = new URLSearchParams(location.hash.slice(1));
   const installId = q.get('i') ?? '';
   const version = (q.get('v') ?? '').slice(0, 32);
 
@@ -46,7 +47,7 @@ const reasons = [
   if (UUID.test(installId)) {
     send([{ name: 'uninstall', props: { installId, version } }]);
     // The ID shouldn't linger in the address bar or history.
-    history.replaceState(null, '', location.pathname);
+    history.replaceState(null, '', location.pathname + location.search);
     const why = document.getElementById('why')!;
     why.hidden = false;
     for (const b of why.querySelectorAll<HTMLButtonElement>('button[data-reason]')) {

@@ -106,10 +106,10 @@ test('schema: unknown events and props are dropped, strings capped, private host
   const b = validateEvents(envelope([
     ev('scoop_result', { site: 'Docs.Stripe.com', path: '/webhooks?utm_source=x&q=secret#frag', outcome: 'copied_ready', sizeBytes: 1234.7, sneaky: 'x', sourceKinds: ['page-md', 'evil'], isPublic: true }, 1),
     ev('made_up_event', {}, 2),
-    ev('scoop_start', { site: 'localhost' }, 3),
-    ev('scoop_start', { site: '192.168.0.4' }, 4),
-    ev('scoop_start', { site: 'wiki.corp.internal' }, 5),
-    ev('scoop_start', {}, 6),
+    ev('rebuild', { site: 'localhost' }, 3),
+    ev('rebuild', { site: '192.168.0.4' }, 4),
+    ev('rebuild', { site: 'wiki.corp.internal' }, 5),
+    ev('rebuild', {}, 6),
     ev('error', { where: 'scoop', code: 'TypeError', message: `Failed https://docs.x.io/a?b and docs.secret.dev/path ${'y'.repeat(400)}` }, 7),
     ev('page_view', { path: '/' }, 8), // a website event from the extension
     ev('settings_change', { key: 'share', value: 'false' }, 9),
@@ -151,7 +151,7 @@ test('schema: envelope checks, the 100-event cap and the ±7 day timestamp windo
 
 test('POST /v1/events: 202, enqueued with geo, UA family and a daily IP hash; the IP is never in the message', async () => {
   const s = setup();
-  const r = await post(s.env, envelope([ev('popup_open'), ev('scoop_start', { site: 'react.dev' }, 2), ev('scoop_start', { site: 'localhost' }, 3)]));
+  const r = await post(s.env, envelope([ev('popup_open'), ev('rebuild', { site: 'react.dev' }, 2), ev('rebuild', { site: 'localhost' }, 3)]));
   assert.equal(r.status, 202);
   assert.deepEqual(r.body, { accepted: 2, dropped: 1 });
   assert.equal(s.sent.length, 1);
@@ -708,4 +708,9 @@ test('deletion: the tombstone is written first, and archive reads also skip IDs 
     text += new TextDecoder().decode(value);
   }
   assert.equal(text, '');
+});
+
+test('scoop_start is accepted with no properties (the extension names no site on it)', () => {
+  const b = validateEvents(envelope([ev('scoop_start'), ev('scoop_start', { site: 'react.dev', path: '/learn' }, 2)]), T);
+  assert.deepEqual(b.events.map((e) => [e.name, e.site, e.path]), [['scoop_start', null, null], ['scoop_start', null, null]]);
 });

@@ -5,13 +5,15 @@ Usage statistics for scoop.md: who installs and keeps the extension, which docum
 ## Rules
 
 - **No identity.** No names, emails, Google account, cookies. The extension's random install ID is the only identifier.
-- **No IP addresses stored.** The IP is used at ingest for rate limiting (the IP subject: IPv4, or the IPv6 /64), for Cloudflare's country/region/continent/network lookup (`request.cf`), and for a daily-rotating salted hash `HMAC(TELEMETRY_SALT, "ip:" + day + subject)` kept for abuse analysis. The website's visitor ID is the same idea with the user agent added. Neither can be linked across days without the salt, and the raw IP never reaches the queue, D1 or R2.
+- **No IP addresses stored.** The IP is used at ingest for rate limiting (the IP subject: IPv4, or the IPv6 /64), for Cloudflare's country/region/continent/network lookup (`request.cf`), and for `ip_hash = HMAC(dayKey, "ip:" + subject)`, kept for abuse analysis. `dayKey` is a random 256-bit key per UTC day in `TELEMETRY_DB.day_keys`, deleted after 48 hours; after that nobody (admins included) can link a hash to an IP or to another day. `ip_hash` is never written to the R2 archive and is cleared in D1 after 30 days. The website's visitor ID is `HMAC(dayKey, "visitor:" + subject + user agent)`. The raw IP never reaches the queue, D1 or R2.
+- **A notice first.** The first popup shows "scoop.md sends anonymous usage statistics, including the hostname and path of public docs pages you scoop." with [Turn off] and [OK], whatever the sharing setting. Until it has been shown (`telemetryNoticeShown`), events carry no `site` or `path`; lifecycle events still go.
 - **Only the clicked tab.** Events describe the page the user clicked scoop.md on, nothing else.
-- **No private hosts.** Any event whose `site` is a private host (`isPrivateHost` in `extension/lib/hosts.js`: localhost, private and link-local IPs, `.local`, `.internal`, `.lan`, `.home.arpa`, single-label names) is dropped by the extension and again by the server.
-- **Paths only for public pages.** A page's path (no query string, no fragment unless it is a `#/` route, tracking parameters stripped) is sent only when its content was fetched without cookies. For a page that only renders signed in, events carry the hostname only. `scoop_start` therefore carries no path: whether the page is public is known only at `scoop_result`.
-- **Opt-out.** Settings → "Send usage statistics", on by default. Switching it off drops the unsent queue, sends exactly one `telemetry_opt_out`, and from then on nothing is sent (no daily ping either), and the uninstall page no longer gets the install ID. Switching it on sends `telemetry_opt_in` and `settings_change`.
-- **Website.** No cookies, no storage, no third-party scripts. Page views and CTA clicks are skipped when the browser sends Global Privacy Control or Do Not Track.
-- **API callers are not tracked.** Server-side API usage records the request, never an IP hash or install ID.
+- **No private hosts.** Nothing about a page on a private host (`isPrivateHost` in `extension/lib/hosts.js`: localhost, private, link-local, benchmarking (198.18/15) and multicast/reserved (224+) IPs, single-label names, `.local`, `.internal`, `.lan`, `.home.arpa`, `.home`, `.corp`, `.intranet`, `.private`, `.test`, `.example`, `.invalid`, `.onion`, `.i2p`). The extension sends no events for the scoop; the server drops any event naming one.
+- **Sites and paths.** `scoop_start` names no site. On `scoop_result` and the events after it (copy, share, vote, report, rebuild): the hostname when the page was public or the library has the site, else only its registrable domain (`extension/lib/hosts.js` `registrableDomain`: `acme.atlassian.net` → `atlassian.net`). A path only when the scoop found a docs source (`page-md`, `llms`, `llms-full`) or the page is public HTML that looks like docs (`docsLike`: a `docs.`/`developer.`/… host or a `/docs`/`/guide`/`/reference`/… path). Paths have no query string or fragment (a `#/` route stays, cut at `?`, `&` or a second `#`), tracking parameters are stripped, and secret-looking segments (`extension/lib/privacy.js` `SECRETISH`: long letters-and-digits, 12+ hex, UUIDs; readable slugs excepted) become `:id`, in the extension and again on the server.
+- **Error text** loses emails, URLs, hostnames and 24+ character tokens (`scrubText`), in the extension and again on the server.
+- **Opt-out.** Settings → "Send usage statistics", on by default (or [Turn off] on the notice). Switching it off drops the unsent queue, sends exactly one `telemetry_opt_out`, and from then on nothing is sent (no daily ping either); library requests carry `X-Scoop-Telemetry: off` so the API doesn't record them; the uninstall page no longer gets the install ID. Switching it on sends `telemetry_opt_in` and `settings_change`. A synced opt-out arriving on a new device: the service worker doesn't send at install, flushes 30 s later after rechecking, and drops the queue when the setting turns off.
+- **Website.** No cookies, no storage, no third-party scripts. Page views and CTA clicks are skipped when the browser sends Global Privacy Control or Do Not Track. `/bye` takes the install ID from the fragment (`#i=…&v=…`, never sent to Vercel) and sets `<meta name="referrer" content="no-referrer">`.
+- **API callers are not tracked.** Server-side API usage records the request with the country only and the time rounded to the hour: never an IP hash, install ID, region, network or user agent.
 
 ## Events
 
@@ -33,7 +35,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `telemetry_opt_out` / `telemetry_opt_in` | extension (options) | |
 | `popup_open` | popup | `trigger` (accepted, not sent: MV3 can't tell toolbar from shortcut) |
 | `popup_close` | popup | `durationMs` |
-| `scoop_start` | popup | `site` |
+| `scoop_start` | popup | (none: the site is named on `scoop_result`) |
 | `scoop_result` | popup | `site`, `path`, `outcome` (`copied_ready` / `empty` / `error` / `unsupported_page`), `sourceKinds[]`, `sources`, `sizeBytes`, `truncated`, `durationMs`, `libraryHit`, `libraryWorked`, `isPublic`, `relatedLinks`, `clipboard` |
 | `copy` | popup | `site`, `path`, `sizeBytes`, `trigger` (`auto` / `button`) |
 | `rebuild` | popup | `site`, `path` |
@@ -42,45 +44,57 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `report` | popup | `site`, `path`, `skillId`, `reason`, `ok` |
 | `settings_change` | popup, options | `key` (`share` / `theme` / `telemetry`), `value` |
 | `options_open` | options | |
-| `error` | popup | `where`, `code`, `message` (≤200 chars, URLs and hostnames removed on both sides) |
+| `error` | popup | `where`, `code`, `message` (≤200 chars; emails, URLs, hostnames and tokens removed on both sides) |
 | `page_view` | website | `path`, `referrerHost`, `utmSource`, `utmMedium`, `utmCampaign` |
 | `cta_click` | website | `target`, `path` |
-| `uninstall` | website (`/bye?i=<installId>&v=<version>`) | `installId`, `version` |
+| `uninstall` | website (`/bye#i=<installId>&v=<version>`) | `installId`, `version` |
 | `uninstall_reason` | website (`/bye`) | `installId`, `reason` (`too_noisy` / `didnt_work` / `privacy` / `other`) |
 | `api_search`, `api_packages`, `api_best`, `api_sites`, `api_site`, `api_profile`, `api_topics` | server | `route`, `status`, `latencyMs`, `q` (≤200), `topic`, `results`, `hit`, `client` (`X-Scoop-Client`) |
 
 The catalog lives in `backend/src/telemetry/schema.ts`; the reference server (`server/app.js`) keeps the same names, checked by a test.
 
-Server-added fields on every event: `received_at`, `country`, `region`, `continent`, `as_org` (from `request.cf`), `ua_browser` / `ua_os` (parsed family and major version, the raw user agent is not kept), `ip_hash` (extension and website only), `visitor_id` (website only), and `outcome` (the event's result, for rollups).
+Server-added fields on extension and website events: `received_at`, `country`, `region`, `continent`, `as_org` (from `request.cf`), `ua_browser` / `ua_os` (parsed family and major version, the raw user agent is not kept), `ip_hash`, `visitor_id` (website only), and `outcome` (the event's result, for rollups). API rows get `country` only, with `ts` and `received_at` rounded down to the hour.
+
+Lifecycle events (accepted under `TELEMETRY_INGEST=lifecycle` and above the daily ceiling): `install`, `update`, `browser_update`, `active_daily`, `telemetry_opt_out`, `telemetry_opt_in`, `uninstall`, `uninstall_reason`.
 
 ## Pipeline
 
-1. **Extension** (`extension/lib/telemetry.js`): `track()` appends to `chrome.storage.local.telemetryQueue` (≤500, oldest dropped). The popup sends its session's events with `navigator.sendBeacon` on `pagehide` (fetch `keepalive` if the beacon is refused) and drops them from the queue. The service worker (`extension/background.js`) flushes the whole queue on install/update/startup and on an hourly alarm, which also sends `active_daily` once per UTC day. Requests carry ≤100 events and ≤60 KB. A network error, 429 or 5xx keeps the queue and schedules a retry (1, 2, 4 … minutes, capped at 6 hours); a 4xx drops the refused batch. The endpoint is the library's base URL + `/events`, so `devLibraryUrl` works on unpacked installs.
-2. **Ingest** (`POST /v1/events`, `backend/src/telemetry/ingest.ts`): Origin must be the extension, `https://scoop.md`, absent, or localhost in dev. Rate limit `EVENTS_LIMITER` (120 requests/min) per IP subject, then per install ID. Body ≤64 KB, ≤100 events, strict schema, timestamps within ±7 days. Answers `202 {accepted, dropped}` after one `TELEMETRY_QUEUE.send`.
-3. **API usage**: after each response of the routes above, `ctx.waitUntil(recordApiUsage(...))` queues one event. `TELEMETRY_API_SAMPLE` (0–1, default 1) is the sampled share.
-4. **Consumer** (`telemetry-events-<env>`, `backend/src/telemetry/consumer.ts`): drops events of deleted installs, writes the batch to R2 (one gzipped NDJSON object per receive hour), then per message, in one D1 transaction: `INSERT OR IGNORE` into `events` (the ID is a hash of install or visitor, session, seq and name, so resends and redeliveries are stored once), `events_daily` counts, `install_days`, the `installs` upsert, opt-out state (the last toggle wins) and uninstall state. Failures retry with backoff; 10 retries, then the dead-letter queue.
-5. **Retention**: the daily cron (`17 4 * * *`) deletes `events` rows received more than 180 days ago. `events_daily`, `install_days`, `installs` and the R2 archive are kept.
+1. **Extension** (`extension/lib/telemetry.js`): `track()` appends to `chrome.storage.local.telemetryQueue` (≤500, oldest dropped). The popup sends its session's events with `navigator.sendBeacon` on `pagehide` (fetch `keepalive` if the beacon is refused) and drops them from the queue. The service worker (`extension/background.js`) schedules a flush 30 s after install/update (not at once, so a synced opt-out can land), flushes on startup, and runs an hourly alarm that flushes and sends `active_daily` once per UTC day. Requests carry ≤100 events and ≤60 KB. A network error, 429 or 5xx keeps the queue and schedules a retry (1, 2, 4 … minutes, capped at 6 hours); a 4xx drops the refused batch. The endpoint is the library's base URL + `/events`, so `devLibraryUrl` works on unpacked installs.
+2. **Ingest** (`POST /v1/events`, `backend/src/telemetry/ingest.ts`): Origin must be the extension, `https://scoop.md`, absent, or localhost in dev. Rate limits: `EVENTS_LIMITER` 30 requests/min per IP subject, `EVENTS_INSTALL_LIMITER` 10/min per install ID (a full 500-event queue needs 5). Body ≤64 KB, ≤100 events, strict schema, timestamps within ±7 days. `TELEMETRY_INGEST`: `on` (default), `lifecycle` (lifecycle events only) or `off` (nothing is queued; still `202`). Rows are split into queue messages of ≤90 KB (`sendBatch`; the queue's limit is 128 KB). Answers `202 {accepted, dropped}`.
+3. **API usage**: after each response of the routes above, `ctx.waitUntil(recordApiUsage(...))` queues one row, unless the request carries `X-Scoop-Telemetry: off` or `TELEMETRY_INGEST` isn't `on`. `TELEMETRY_API_SAMPLE` (0–1, default 1) is the sampled share.
+4. **Consumer** (`telemetry-events-<env>`, `max_concurrency` 1, `backend/src/telemetry/consumer.ts`), writing to `TELEMETRY_DB` only:
+   - drops events of deleted installs;
+   - applies the daily quotas (by received UTC day, counters in `quota_counters` and `ip_installs`): at most 20 new install IDs per `ip_hash`, 2,000 events per install, 20,000 events per `ip_hash`; above `TELEMETRY_DAILY_MAX` (default 2,000,000) events in a day, lifecycle events only; at most `TELEMETRY_API_DAILY_MAX` (default 200,000) API rows a day. A redelivered message counts toward the quotas twice (conservative);
+   - writes the kept rows to R2 (one gzipped NDJSON object per receive hour, without `ip_hash`);
+   - then per message, in one D1 transaction: `INSERT OR IGNORE` into `events` (the ID is a hash of install or visitor, session, seq and name, so resends and redeliveries are stored once), the quota counters, `events_daily` counts, `install_days` (by received day), the `installs` upsert (client fields from the latest event by time), opt-out state (only a toggle newer than `opted_changed_at` changes it) and `uninstalls` (an uninstall never creates an `installs` row; unknown IDs are counted apart).
+   Failures retry with backoff; 10 retries, then the dead-letter queue.
+5. **Retention** (hourly cron `23 * * * *`, `pruneTelemetry`): deletes `events` rows received more than 180 days ago and clears `ip_hash` after 30 days, in chunks of 5,000 until a chunk comes back short; deletes day keys older than 48 hours and quota rows older than 2 days. `events_daily`, `install_days`, `installs`, `uninstalls` stay; the R2 archive is deleted by a bucket lifecycle rule after 13 months.
 
 ## Storage
 
-D1 (`backend/migrations/0008_telemetry.sql`):
+Its own D1 database, binding `TELEMETRY_DB` (`backend/migrations-telemetry/0001_telemetry.sql`), so a flood of events can never fill the library's database:
 
 | Table | Holds | Kept |
 |---|---|---|
-| `events` | every event, enriched (indexes: name+ts, install_id+ts, site+ts, received_at, day) | 180 days |
-| `installs` | per install: first/last seen, install time, version, browser, OS, arch, locale, time zone, country, events/scoops/copies, opted out, uninstalled at and why | until deleted |
-| `install_days` | (install_id, day) pairs: DAU/WAU/MAU and retention past 180 days | until deleted |
+| `events` | every event, enriched (indexes: name+ts, install_id+ts, site+ts, received_at, day) | 180 days (`ip_hash` 30 days) |
+| `installs` | per install with extension events: first/last seen, install time, version, browser, OS, arch, locale, time zone, country, events/scoops/copies, opted out (and when it last changed), uninstalled at and why | until deleted |
+| `uninstalls` | every uninstall from `/bye`: time, reason, version, `known` (an installs row existed) | until deleted |
+| `install_days` | (install_id, received day) pairs: DAU/WAU/MAU and retention past 180 days | until deleted |
 | `events_daily` | count per (day, source, name, site, country, version, outcome); no install IDs | forever |
 | `telemetry_deletions` | install IDs whose data was deleted on request | forever |
+| `day_keys` | the random key per UTC day for `ip_hash` and `visitor_id` | 48 hours |
+| `quota_counters`, `ip_installs` | daily quota state | 2 days |
+
+The admin's figures read from `events` cover at most the last 180 days; pages say so when the window is longer. New installs and retention cohorts use `installed_at` (the `install` event), so existing users updating to 0.3.0 aren't counted as new; installs without one are left out of retention.
 
 R2 bucket `scoop-telemetry-<env>` (binding `TELEMETRY`; its own bucket so the archive's access, lifecycle and cost stay apart from the skills bucket):
 
-- `telemetry/raw/dt=YYYY-MM-DD/hour=HH/<uuid>.ndjson.gz`: one JSON row per line, the D1 columns. A redelivered message can archive an event twice: dedupe on `id`.
-- `telemetry/tombstones/<install_id>.json`: deletion tombstones. Objects are never rewritten; every read of the archive (`readArchive`, the admin export) skips tombstoned install IDs.
+- `telemetry/raw/dt=YYYY-MM-DD/hour=HH/<uuid>.ndjson.gz`: one JSON row per line, the D1 columns except `ip_hash`. A redelivered message can archive an event twice: dedupe on `id`. **Lifecycle rule (create it): delete objects under `telemetry/raw/` 13 months (395 days) after creation.**
+- `telemetry/tombstones/<install_id>.json`: deletion tombstones. Objects are never rewritten; every read of the archive (`readArchive`, the admin export) skips install IDs with a tombstone or a `telemetry_deletions` row.
 
 ## Deletion requests
 
-Users email team@ddamoah.com with the install ID shown on the extension's settings page. Admin console → Telemetry → Users → the install → "Delete all data for this install" (or `DELETE /api/telemetry/installs/<id>`): deletes its `events`, `installs` and `install_days` rows, records it in `telemetry_deletions` (the consumer then refuses its events), and writes the R2 tombstone. `events_daily` holds no install IDs and stays.
+Users email team@ddamoah.com with the install ID shown on the extension's settings page. Admin console → Telemetry → Users → the install → "Delete all data for this install" (or `DELETE /api/telemetry/installs/<id>`): writes the R2 tombstone first, then deletes its `events`, `installs`, `install_days`, `uninstalls` and `ip_installs` rows and records it in `telemetry_deletions` (the consumer then refuses its events). Its archived rows are skipped by every export and go when the lifecycle rule deletes their objects. `events_daily` holds no install IDs and stays.
 
 ## Admin console
 
@@ -92,11 +106,14 @@ JSON endpoints (`/api/telemetry/…`): `overview?days=`, `sites?days=`, `sites/:
 
 | Resource | Dev | Staging | Production |
 |---|---|---|---|
+| D1 database (`TELEMETRY_DB`) | local placeholder `00000000-0000-0000-0000-000000000001` | `scoop-telemetry-staging` (`d059ae06-4a40-40ac-b096-5d511b2b0b89`) | `scoop-telemetry-production` (`1ea9ed26-92e3-4d1e-a031-bba44dbd11e0`) |
+| Migrations | `migrations-telemetry/0001_telemetry.sql` | same | same |
 | Queue | `telemetry-events-dev` | `telemetry-events-staging` | `telemetry-events-production` |
 | Dead-letter queue | `telemetry-events-dlq-dev` | `telemetry-events-dlq-staging` | `telemetry-events-dlq-production` |
-| R2 bucket | `scoop-telemetry-dev` | `scoop-telemetry-staging` | `scoop-telemetry-production` |
-| Rate limit namespace (`EVENTS_LIMITER`) | 4130 | 4131 | 4132 |
-| Secret | `TELEMETRY_SALT` (`.dev.vars`) | `TELEMETRY_SALT` | `TELEMETRY_SALT` |
-| Migration | `0008_telemetry.sql` | same | same |
+| R2 bucket (+ 13-month lifecycle rule on `telemetry/raw/`) | `scoop-telemetry-dev` | `scoop-telemetry-staging` | `scoop-telemetry-production` |
+| `EVENTS_LIMITER` (30/min per IP subject) | 4130 | 4131 | 4132 |
+| `EVENTS_INSTALL_LIMITER` (10/min per install) | 4133 | 4134 | 4135 |
+| Vars | `TELEMETRY_INGEST`, `TELEMETRY_API_SAMPLE`, `TELEMETRY_DAILY_MAX`, `TELEMETRY_API_DAILY_MAX` | same | same |
+| Crons | `17 4 * * *`, `23 * * * *` | same | same |
 
-See backend/README.md, "Before the first deploy", step 11.
+No secret is needed: the day keys live in `TELEMETRY_DB`. See backend/README.md, "Before the first deploy", step 11.
