@@ -36,6 +36,7 @@ export interface CrawlParams {
   maxPages: number;
   maxMinutes: number; // browser crawl only
   force?: boolean; // skip the devtool gate
+  priorityUrl?: string; // crawl requests: the user's page, planned first
 }
 
 const PAGES_PER_STEP = 10;
@@ -107,6 +108,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           allowLocalhost: local,
           budget: p.maxPages,
           limiter: new HostLimiter({ intervalMs: interval }),
+          priorityUrl: p.priorityUrl,
         });
         await env.CRAWL.put(planKey(p.runId), JSON.stringify(plan), { httpMetadata: { contentType: 'application/json' } });
         return { ...rest, planSize: plan.length, html: plan.some((pl) => pl.kind === 'page-html') };

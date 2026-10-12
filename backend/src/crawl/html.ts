@@ -18,8 +18,24 @@ export interface ExtractedPage {
   links: string[];
 }
 
+const EMPTY: ExtractedPage = { title: null, markdown: '', words: 0, links: [] };
+
+// Never throws: a body that can't be read as a page extracts to nothing (0
+// words), which the callers treat as a failed page, not a failed crawl.
 export function extractPage(html: string, url: string): ExtractedPage {
-  const doc = new DOMParser().parseFromString(html, 'text/html') as unknown as DomNode;
+  try {
+    return extract(html, url);
+  } catch {
+    return EMPTY;
+  }
+}
+
+function extract(html: string, url: string): ExtractedPage {
+  // linkedom builds no document element for input without an <html> tag
+  // (an empty body, a comment, a fragment, plain text), and the extractor
+  // then throws; wrap such input in a document.
+  const source = /<html[\s>]/i.test(html) ? html : `<!doctype html><html><body>${html}</body></html>`;
+  const doc = new DOMParser().parseFromString(source, 'text/html') as unknown as DomNode;
   const main = pickMain(doc);
   const markdown = htmlToMarkdown(main, url);
   // The extractor's h1 has permalink markers ("¶") stripped; <title> otherwise.

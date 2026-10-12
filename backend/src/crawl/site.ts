@@ -4,6 +4,7 @@
 // facts and the list of Markdown sources to fetch. Plain TS over crawlFetch.
 
 import { normalizeSite } from '../lib/ssrf.ts';
+import { normalizePageUrl } from '../lib/urls.ts';
 import {
   docsRoot as pickDocsRoot,
   isMarkdownUrl,
@@ -80,6 +81,9 @@ export interface DiscoverOptions {
   limiter?: HostLimiter;
   budget?: number;
   timeoutMs?: number; // per request hop, after the politeness wait
+  // The page a crawl request came from: always planned, first (its Markdown
+  // twin when it has one, else its HTML), and the browser crawl starts there.
+  priorityUrl?: string;
 }
 
 export function robotsFrom(file: RobotsFile): Robots {
@@ -226,7 +230,31 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     out.twinRatio = (hits.suffix + hits.index) / sampled.length;
   }
 
-  // 4. The fetch plan, within budget: llms files, Markdown links from llms.txt,
+  // The requested page (crawl requests): its .md twin if it has one (the
+  // site's pattern first, then the other), else the page's own HTML. It goes
+  // first in the plan and is exempt from the skip list.
+  let priority: PlannedPage | null = null;
+  if (o.priorityUrl) {
+    const pu = normalizePageUrl(new URL(o.priorityUrl));
+    if (sameSite(pu) && pu.length <= MAX_URL && allowed(pu)) {
+      if (isMarkdownUrl(pu)) priority = { url: pu, sourceUrl: pu, kind: 'page-md' };
+      else if (!new URL(pu).hash) {
+        const patterns: TwinPattern[] = out.twinPattern === 'index' ? ['index', 'suffix'] : ['suffix', 'index'];
+        for (const pattern of patterns) {
+          const twin = twinUrl(pu, pattern);
+          if (!twin || twin.length > MAX_URL || !allowed(twin)) continue;
+          const r = await get(twin, 200_000);
+          if (r.ok && !r.notModified && !r.over && looksLikeText(r.contentType, r.text)) {
+            priority = { url: pu, sourceUrl: twin, kind: 'page-md' };
+            break;
+          }
+        }
+      }
+      priority ??= { url: pu, sourceUrl: pu, kind: 'page-html' };
+    }
+  }
+
+  // 4. The fetch plan, within budget: the requested page, llms files, Markdown links from llms.txt,
   // then twins of sitemap pages. Deduplicated by source URL; pages on the skip
   // list, over-long URLs and robots-disallowed sources are counted as skipped.
   const plan: PlannedPage[] = [];
@@ -243,6 +271,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   const keepOf = (urls: string[]) => new Set(skipLowValue(urls).kept);
   const useTwins = out.twinPattern !== null && (out.twinRatio ?? 0) >= TWIN_THRESHOLD;
   const mdLinks = links.filter((l) => isMarkdownUrl(l) && underRoot(l, out.docsRoot));
+  if (priority) add(priority, null);
   if (out.llmsUrl) add({ url: out.llmsUrl, sourceUrl: out.llmsUrl, kind: 'llms' }, null);
   // llms-full.txt repeats the site's pages; when those pages are available as
   // Markdown it is recorded in the profile but not fetched or indexed.
@@ -271,10 +300,17 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   const markdownPages = plan.filter((p) => p.kind === 'page-md').length;
   if (!out.llmsUrl && !out.llmsFullUrl && markdownPages === 0) {
     const r = await get(start.href);
-    const html = r.ok && !r.notModified && !r.over ? r.text : null;
-    out.clientShell = html === null ? null : looksLikeClientShell(html);
-    const page = html !== null && !out.clientShell ? extractPage(html, r.url) : null;
+    const body = r.ok && !r.notModified && !r.over ? r.text : null;
+    // Some servers (Read the Docs) answer our Accept header with Markdown: the
+    // page is readable as it is, and its links are Markdown links.
+    const negotiated = body !== null && r.ok && !r.notModified && looksLikeText(r.contentType, body);
+    const html = negotiated ? null : body;
+    out.clientShell = html === null ? (negotiated ? false : null) : looksLikeClientShell(html);
+    const page = negotiated
+      ? { words: MIN_WORDS, links: llmsLinks(body!, r.url) }
+      : html !== null && !out.clientShell ? extractPage(html, r.url) : null;
     if (page && page.words >= MIN_WORDS) {
+      // page-html sources: fetchPlanned keeps a Markdown answer as page-md.
       const candidates = [r.url, ...page.links, ...sitemapPages].filter(
         (u) => sameSite(u) && underRoot(u, out.docsRoot) && !/\.(?!html?$)[a-z0-9]{1,5}$/i.test(new URL(u).pathname),
       );
@@ -283,7 +319,11 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
       out.plan = plan;
     } else if (html !== null) {
       out.needsBrowser = true;
-      out.browserStartUrls = [start.href, ...sample(sitemapPages.filter((u) => u !== start.href), 20)];
+      out.browserStartUrls = [
+        ...(priority ? [priority.url] : []),
+        start.href,
+        ...sample(sitemapPages.filter((u) => u !== start.href && u !== priority?.url), 20),
+      ];
     }
   }
   out.requests = requests;

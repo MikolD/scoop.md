@@ -157,6 +157,7 @@ async function lastComplete(db: D1Database, site: string): Promise<CrawlRunRow |
 }
 
 const RECENT_STATUSES = new Set(['ready', 'empty', 'blocked']);
+const ACTIVE_STATES = new Set<RequestState>(['queued', 'running', 'indexing']);
 
 // Handles POST /v1/crawl-requests after validation. 202 when it starts a
 // crawl; 200 when it joins a queued/running one, when the site was crawled in
@@ -217,6 +218,8 @@ export async function requestCrawl(d: RequestDeps, input: RequestInput): Promise
     maxPages: REQUEST_MAX_PAGES,
     maxMinutes: REQUEST_MAX_MINUTES,
     force: false,
+    // The page the user is on is always crawled, first, so it anchors their package.
+    priorityUrl: input.pageUrl,
   });
   // Another request started one between our check and ours: join it.
   if (!runId) return answer('joined', await activeRun(d.db, input.site, now));
@@ -265,13 +268,19 @@ export async function siteStatus(db: D1Database, site: string, now = new Date())
     const v = viewOf(req, run, now);
     request = { id: v.id, state: v.state, phase: v.phase, pagesFound: v.pagesFound, pagesIndexed: v.pagesIndexed };
   }
-  const status = profile?.status ?? 'new';
+  // A finished crawl whose pages aren't indexed yet hasn't produced anything
+  // usable: a site's first crawl stays 'new' until a page is indexed (a
+  // re-crawl of a ready site has pages, so it stays 'ready').
+  const status = profile?.status === 'ready' && pages === 0 ? 'new' : (profile?.status ?? 'new');
   const fresh = profile ? Date.parse(profile.updated_at) > now.getTime() - STALE_RUN_HOURS * 3_600_000 : false;
+  // Crawling until the latest request is complete, indexing included (the
+  // run itself is over by then and crawl_state is already idle).
+  const requestActive = request !== null && ACTIVE_STATES.has(request.state);
   return {
     site,
     indexed: status === 'ready' && pages > 0,
     status,
-    crawling: profile?.crawl_state === 'crawling' && fresh,
+    crawling: (profile?.crawl_state === 'crawling' && fresh) || requestActive,
     pages,
     lastCrawledAt: profile?.last_crawled_at ?? null,
     request,

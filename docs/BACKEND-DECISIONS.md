@@ -1034,6 +1034,35 @@ BACKEND.md §5 "Crawl requests".
 - **Site status** reports `pages` as indexed pages (`page_index`) and
   `indexed` = `ready` and `pages > 0`; private hosts are 400 (checked like a
   fetch target) so the endpoint never confirms anything about internal names.
+  A `ready` profile with no indexed page is reported `new` (a first crawl
+  finishes before its pages are indexed), and `crawling` stays true until the
+  latest request is `complete`: the run ends, and `crawl_state` goes idle,
+  while its pages are still in the index queue. Found by the extension's real
+  run, which saw `ready`, `indexed: false`, `crawling: false` mid-indexing.
+- **The requested page is crawled first** (`priorityUrl`, passed from the
+  request through `startCrawl` to discovery): its `.md` twin when one answers
+  (the site's twin pattern first, then the other; a `.md` URL is used as is),
+  else the page's own HTML (`page-html`), at the head of the plan, ahead of
+  llms.txt and exempt from the skip list, so a 100-page crawl that starts at
+  the product root can't miss it. On a site that needs the browser, the
+  browser crawl starts at it. Off-site, robots-disallowed or over-long
+  requested URLs are ignored. A Markdown site whose requested page has no
+  twin and only renders client-side gets a `page-html` attempt that fails
+  (too few words); the rest of the crawl is unaffected. Live on
+  docs.python.org: without it, `/3/library/os.html` wasn't among the 21
+  pages the `/3/` crawl reached and its package fell back to path words.
+- **Markdown by content negotiation.** Some servers (Read the Docs, e.g.
+  flask.palletsprojects.com) answer our `Accept: text/markdown` with Markdown.
+  When the start page comes back as Markdown, discovery follows its Markdown
+  links (under the docs root, minus the skip list) as `page-html` sources,
+  which `fetchPlanned` keeps as `page-md`. Before this, the start page was fed
+  to the HTML extractor, found no `<a>` links, and a live Flask crawl planned
+  two pages; it now plans 30 of 30.
+- **`extractPage` never throws.** linkedom builds no document element for
+  input without an `<html>` tag (an empty body, a comment, a fragment, plain
+  text), and the extractor then threw, failing the whole crawl in discovery
+  (seen live on Flask). Such input is wrapped in a document, and any error
+  extracts to nothing (0 words): a failed page, not a failed crawl.
 - **Telemetry**: `api_crawl_request` through the existing API-usage path,
   with the request's state as both `props.state` and the row's `outcome`
   (`rate_limited` for 429s). The status and polling endpoints are not

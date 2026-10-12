@@ -117,6 +117,8 @@ export interface NewCrawl {
   maxPages: number;
   maxMinutes: number;
   force: boolean;
+  // Crawl requests only: the page the user is on, crawled first (src/crawl/site.ts).
+  priorityUrl?: string;
 }
 
 export const MAX_CRAWL_PAGES = 1000;

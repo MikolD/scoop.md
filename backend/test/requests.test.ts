@@ -17,6 +17,9 @@ import {
 } from '../src/crawl/requests.ts';
 import type { RequestDeps } from '../src/crawl/requests.ts';
 import { anchorCandidates, anchorQuery, pathQuery } from '../src/search/anchor.ts';
+import { discoverSite } from '../src/crawl/site.ts';
+import { HostLimiter } from '../src/crawl/polite.ts';
+import { extractPage } from '../src/crawl/html.ts';
 import { fakeD1, fakeR2 } from './helpers.ts';
 
 registerHooks({
@@ -127,6 +130,7 @@ test('a request for an unknown site starts a small crawl (202) and is recorded w
   assert.deepEqual(created[0].params, {
     runId: created[0].id, site: 'developers.cloudflare.com', startUrl: 'https://developers.cloudflare.com/d1/',
     maxPages: REQUEST_MAX_PAGES, maxMinutes: REQUEST_MAX_MINUTES, force: false,
+    priorityUrl: 'https://developers.cloudflare.com/d1/get-started/',
   });
   const row = raw.prepare('SELECT * FROM crawl_requests WHERE id = ?').get(r.body.id) as Record<string, string>;
   assert.equal(row.state, 'started');
@@ -220,6 +224,8 @@ test('siteStatus: unknown sites are new; a ready site with pages is indexed; the
   assert.deepEqual(during.request, { id: r.body.id, state: 'queued', phase: 'gate', pagesFound: 0, pagesIndexed: 0 });
 
   raw.prepare(`INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES ('https://docs.example.dev/guide', 'docs.example.dev', 'h', 'guide', 'm', 0, ?)`).run(T0.toISOString());
+  const runId = (raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(r.body.id) as { run_id: string }).run_id;
+  await store.updateRun(runId, { status: 'complete', phase: 'done', finished_at: T0.toISOString(), pages_new: 1, pages_indexed: 1 });
   await store.finishCrawl('docs.example.dev', 'ready', T0);
   const ready = await siteStatus(d1, 'docs.example.dev', T0);
   assert.deepEqual([ready.indexed, ready.status, ready.crawling, ready.pages, ready.lastCrawledAt], [true, 'ready', false, 1, T0.toISOString()]);
@@ -461,4 +467,110 @@ test('the Workflow writes its phase at step boundaries (gate → discover → fe
     sleep: async () => {},
   } as never).catch(() => {});
   assert.equal(firstPhase, 'gate');
+});
+
+test('site status while a request is indexing: crawling until complete; a first crawl stays new until a page is indexed', async () => {
+  const { d, d1, raw, store } = deps();
+  const r = await ask(d, 'https://fresh.example.dev/guide');
+  const runId = (raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(r.body.id) as { run_id: string }).run_id;
+  // The crawl finished: 5 pages stored, none indexed yet.
+  await store.beginCrawl('fresh.example.dev', T0);
+  await store.updateRun(runId, { status: 'complete', phase: 'done', finished_at: T0.toISOString(), pages_new: 5, path: 'markdown' });
+  await store.finishCrawl('fresh.example.dev', 'ready', T0);
+  const at = new Date(T0.getTime() + 60_000);
+  const indexing = await siteStatus(d1, 'fresh.example.dev', at);
+  assert.deepEqual([indexing.status, indexing.indexed, indexing.crawling, indexing.pages, indexing.request?.state], ['new', false, true, 0, 'indexing']);
+
+  // The first page is indexed: the site is ready (and still crawling until the request completes).
+  raw.prepare(`INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES ('https://fresh.example.dev/guide', 'fresh.example.dev', 'h', 'guide', 'm', 0, ?)`).run(T0.toISOString());
+  await store.updateRun(runId, { pages_indexed: 1 });
+  const partly = await siteStatus(d1, 'fresh.example.dev', at);
+  assert.deepEqual([partly.status, partly.indexed, partly.crawling, partly.request?.state], ['ready', true, true, 'indexing']);
+
+  await store.updateRun(runId, { pages_indexed: 5 });
+  const done = await siteStatus(d1, 'fresh.example.dev', at);
+  assert.deepEqual([done.status, done.indexed, done.crawling, done.request?.state], ['ready', true, false, 'complete']);
+
+  // A re-crawl (after the cooldown) keeps the last final status, crawling throughout.
+  const later = new Date(T0.getTime() + 8 * DAY);
+  const again = await ask({ ...d, now: later }, 'https://fresh.example.dev/other');
+  assert.equal(again.status, 202);
+  // (startCrawl stamps the run with the real clock, so read the status at it.)
+  const recrawl = await siteStatus(d1, 'fresh.example.dev', new Date());
+  assert.deepEqual([recrawl.status, recrawl.indexed, recrawl.crawling, recrawl.request?.state], ['ready', true, true, 'queued']);
+});
+
+// A small site for discovery with a requested page: llms.txt lists two pages,
+// the requested one isn't listed but has a .md twin.
+const text = (body: string, type = 'text/plain') => () => new Response(body, { headers: { 'content-type': type } });
+const mdBody = (t: string) => `# ${t}\n\n${'Some documentation text. '.repeat(10)}`;
+const fakeSite = (routes: Record<string, () => Response>) => async (url: string) => (routes[url] ?? (() => new Response('not found', { status: 404 })))();
+
+test('the requested page is planned first: its .md twin, even past the budget and the skip list', async () => {
+  const fetchImpl = fakeSite({
+    'https://docs.example.dev/llms.txt': text(`# Docs\n- [A](https://docs.example.dev/a.md)\n- [B](https://docs.example.dev/b.md)\n${'text '.repeat(20)}`),
+    'https://docs.example.dev/a.md': text(mdBody('A')),
+    'https://docs.example.dev/b.md': text(mdBody('B')),
+    'https://docs.example.dev/guides/deep/page.md': text(mdBody('Deep page')),
+  });
+  const o = { fetchImpl, limiter: new HostLimiter({ intervalMs: 0 }) };
+  const d = await discoverSite('https://docs.example.dev/', { state: 'missing', text: '' }, { ...o, budget: 2, priorityUrl: 'https://docs.example.dev/guides/deep/page#install' });
+  assert.deepEqual(d.plan.map((p) => [p.kind, p.url, p.sourceUrl]), [
+    ['page-md', 'https://docs.example.dev/guides/deep/page', 'https://docs.example.dev/guides/deep/page.md'],
+    ['llms', 'https://docs.example.dev/llms.txt', 'https://docs.example.dev/llms.txt'],
+  ]);
+  // No twin: the page's own HTML, still first.
+  const html = await discoverSite('https://docs.example.dev/', { state: 'missing', text: '' }, { ...o, priorityUrl: 'https://docs.example.dev/search' });
+  assert.deepEqual([html.plan[0].kind, html.plan[0].url], ['page-html', 'https://docs.example.dev/search']);
+  // Off-site or robots-disallowed requested pages are ignored.
+  const off = await discoverSite('https://docs.example.dev/', { state: 'ok', text: 'User-agent: *\nDisallow: /private' }, { ...o, priorityUrl: 'https://docs.example.dev/private/x' });
+  assert.equal(off.plan[0].kind, 'llms');
+});
+
+test('the requested page heads an HTML crawl, and a browser crawl starts there', async () => {
+  const words = Array.from({ length: 120 }, (_, i) => `word${i}`).join(' ');
+  const page = (title: string, links = '') => `<html><body><nav>${links}</nav><main><h1>${title}</h1><p>${words}</p></main></body></html>`;
+  const htmlSite = fakeSite({
+    'https://html.example.dev/3/': text(page('Index', '<a href="/3/a.html">A</a>'), 'text/html'),
+    'https://html.example.dev/3/a.html': text(page('A'), 'text/html'),
+    'https://html.example.dev/3/library/os.html': text(page('os'), 'text/html'),
+  });
+  const d = await discoverSite('https://html.example.dev/3/', { state: 'missing', text: '' }, {
+    fetchImpl: htmlSite, limiter: new HostLimiter({ intervalMs: 0 }), budget: 2, priorityUrl: 'https://html.example.dev/3/library/os.html',
+  });
+  assert.deepEqual(d.plan.map((p) => [p.kind, p.url]), [['page-html', 'https://html.example.dev/3/library/os.html'], ['page-html', 'https://html.example.dev/3/']]);
+
+  const shell = '<html><body><div id="app"></div><script src="/x.js"></script></body></html>';
+  const spa = fakeSite({ 'https://spa.example.dev/': text(shell, 'text/html') });
+  const b = await discoverSite('https://spa.example.dev/', { state: 'missing', text: '' }, {
+    fetchImpl: spa, limiter: new HostLimiter({ intervalMs: 0 }), priorityUrl: 'https://spa.example.dev/#/guide/',
+  });
+  assert.equal(b.needsBrowser, true);
+  assert.deepEqual(b.browserStartUrls.slice(0, 2), ['https://spa.example.dev/#/guide', 'https://spa.example.dev/']);
+});
+
+test('extractPage never throws: empty, comment-only, fragment and plain-text bodies (seen live on Flask)', () => {
+  for (const body of ['', '   ', '<!-- only a comment -->']) assert.deepEqual(extractPage(body, 'https://ex.com/'), { title: null, markdown: '', words: 0, links: [] });
+  const words = Array.from({ length: 60 }, (_, i) => `word${i}`).join(' ');
+  const frag = extractPage(`<main><h1>Fragment</h1><p>${words}</p><a href="/next">Next</a></main>`, 'https://ex.com/a');
+  assert.equal(frag.title, 'Fragment');
+  assert.ok(frag.words >= 60);
+  assert.ok(frag.links.includes('https://ex.com/next'));
+  assert.ok(extractPage(`plain text ${words}`, 'https://ex.com/').words >= 60);
+});
+
+test('a start page served as Markdown (content negotiation, as Read the Docs does) is crawled through its Markdown links', async () => {
+  const md = (t: string, links = '') => () => new Response(`# ${t}\n\n${'Some documentation text. '.repeat(10)}\n${links}`, { headers: { 'content-type': 'text/markdown; charset=utf-8' } });
+  const site = fakeSite({
+    'https://rtd.example.dev/en/': () => new Response(null, { status: 302, headers: { location: '/en/stable/' } }),
+    'https://rtd.example.dev/en/stable/': md('Index', '- [Quickstart](quickstart/)\n- [API](api/)\n- [index](genindex/)\n- [Elsewhere](https://other.example/x)'),
+  });
+  const d = await discoverSite('https://rtd.example.dev/en/', { state: 'missing', text: '' }, { fetchImpl: site, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.needsBrowser, false);
+  assert.equal(d.clientShell, false);
+  assert.deepEqual(d.plan.map((p) => p.url), [
+    'https://rtd.example.dev/en/stable/',
+    'https://rtd.example.dev/en/stable/quickstart/',
+    'https://rtd.example.dev/en/stable/api/',
+  ]); // genindex is on the skip list, other.example is off-site
 });

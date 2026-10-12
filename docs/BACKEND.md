@@ -187,14 +187,14 @@ Public, `cache-control: public, max-age=15, s-maxage=15`. Never 404: an unknown 
   "lastCrawledAt": "2026-10-12T07:16:18.000Z",
   "request": { "id": "rq_…", "state": "complete", "phase": "done", "pagesFound": 55, "pagesIndexed": 55 } }
 ```
-- `status`: `new | ready | not_devtool | blocked | failed | empty` (the last finished crawl's outcome).
+- `status`: `new | ready | not_devtool | blocked | failed | empty` (the last finished crawl's outcome). A site whose first crawl finished but has no page indexed yet is still `new`.
 - `indexed`: `status` is `ready` and `pages` (indexed pages) > 0.
-- `crawling`: a crawl is running now (also while a re-crawl of a `ready` site runs).
+- `crawling`: true while a crawl runs **and** until the latest request is complete (its pages still in the index queue count as crawling). A re-crawl keeps the previous final `status`, with `crawling: true`.
 - `request`: the site's most recent crawl request in the last 7 days, or null.
 
 #### `POST /v1/crawl-requests`
 Request: `{ "url": "<the page the user is on>" }` (≤ 1024 chars). Requires `X-Scoop-Install`; same CORS as other writes; the URL passes the same SSRF and site normalisation as any fetch (private host → 400). The site is the URL's host.
-- **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started (devtool gate first; at most 100 pages and 10 minutes; it starts at the URL's first path segment when the URL has a deeper path, e.g. `/d1/`, else at the site root).
+- **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started (devtool gate first; at most 100 pages and 10 minutes; it starts at the URL's first path segment when the URL has a deeper path, e.g. `/d1/`, else at the site root). The requested page itself is always crawled, first: its `.md` twin if it has one, else its HTML; on a client-rendered site the browser crawl starts there.
 - **200** with the full request view (below), without starting anything, when:
   - the site already has a crawl queued or running: the request joins it;
   - the site was crawled in the last 7 days (`ready`, `empty` or `blocked`): answered from that crawl (`complete`, or `indexing` if its pages are still being indexed);
