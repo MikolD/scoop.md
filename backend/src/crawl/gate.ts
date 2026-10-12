@@ -4,8 +4,9 @@
 // before any page is crawled. Cheapest first:
 //   1. lists (gate-lists.ts): known docs hosts pass, known non-devtools are
 //      rejected, with no request at all;
-//   2. signals from at most four polite requests (the start page, llms.txt at
-//      up to two bases, the start page's .md twin): docs paths and generators,
+//   2. signals from a few polite requests (the start page, and up to two
+//      redirect stubs it leads to, llms.txt at up to two bases, the start
+//      page's .md twin): docs paths and generators,
 //      code blocks, install commands and API terms for; Product JSON-LD,
 //      add-to-cart, prices, checkout links, Shopify and a search-results shape
 //      against;
@@ -301,15 +302,17 @@ The site is described inside the <site> block of the user message: its URL, titl
 
 Reply with a single JSON object and nothing else:
 {
-  "isDevtool": true only if this URL is developer documentation (or the home of a developer tool whose docs are on this site),
+  "isDevtool": true only if the product is mainly for software developers and this URL is its documentation or docs hub,
   "category": one of "devtool-docs", "devtool-marketing-only", "ecommerce", "search-engine", "social", "news", "other",
   "confidence": a number from 0 to 1,
   "reason": one short sentence, at most 200 characters
 }
 
-"devtool-docs": technical documentation, API/SDK reference or guides for developers. "devtool-marketing-only": a developer product's marketing pages with no documentation here. "ecommerce": shops, marketplaces, product pages. "search-engine": web search. "social": social networks, video and community platforms. "news": news and magazines. "other": anything else (banks, consumer apps, blogs that are not documentation, company sites).`;
+The crawler renders JavaScript-only pages in a browser later, so a page with little text (a JavaScript app shell, a redirect page) is judged by its URL, title, description and navigation: little text alone is not a reason to reject. When the page could not be read at all (a note says so), judge by the URL alone and lower your confidence if unsure.
 
-export function gateSummary(startUrl: string, facts: PageFacts, s: Signals): string {
+"devtool-docs": technical documentation, API/SDK reference or guides for developers. "devtool-marketing-only": a developer product's marketing pages with no documentation here. "ecommerce": shops, marketplaces, product pages. "search-engine": web search. "social": social networks, video and community platforms. "news": news and magazines. "other": anything else (banks, consumer apps, design or productivity tools for non-developers, blogs that are not documentation, company sites).`;
+
+export function gateSummary(startUrl: string, facts: PageFacts, s: Signals, note?: string): string {
   const attr = (v: string) => v.replace(/["<>\n\r]/g, ' ');
   const lines = [
     `title: ${facts.title}`,
@@ -321,6 +324,7 @@ export function gateSummary(startUrl: string, facts: PageFacts, s: Signals): str
       `product markup ${s.product ? 'yes' : 'no'}; add to cart ${s.addToCart ? 'yes' : 'no'}; price elements ${s.prices}; checkout links ${s.checkoutLinks}; ` +
       `shopify ${s.shopify ? 'yes' : 'no'}; search page ${s.searchPage ? 'yes' : 'no'}; news markup ${s.news ? 'yes' : 'no'}; words ${s.words}`,
   ];
+  if (note) lines.push(`note: ${note}`);
   const body = lines.map((l) => clean(l, 1500)).join('\n').slice(0, SUMMARY_MAX).replace(/<\/site>/gi, '<\\/site>');
   return `<site url="${attr(startUrl)}">\n${body}\n</site>`;
 }
@@ -429,11 +433,13 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
 
   let page = await get(start.href, START_CAP);
   if (!page.ok && page.status !== null && page.status >= 400) page = await get(start.href, START_CAP, HTML);
-  // Follow one redirect stub to the page it stands for.
-  const stub = page.ok && !page.notModified ? stubTarget(page.text, page.url, page.contentType) : null;
-  if (stub && allowed(stub)) {
+  // Follow up to two redirect stubs to the page they stand for.
+  for (let hop = 0; hop < 2; hop++) {
+    const stub = page.ok && !page.notModified ? stubTarget(page.text, page.url, page.contentType) : null;
+    if (!stub || !allowed(stub)) break;
     const next = await get(stub, START_CAP);
-    if (next.ok && !next.notModified && next.text) page = next;
+    if (!next.ok || next.notModified || !next.text) break;
+    page = next;
   }
   const givenRoot = start.pathname === '/' ? '' : start.pathname;
   let llms = false;
@@ -448,7 +454,11 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
   // A page over the cap is judged on the part that was read.
   if (!page.ok || page.notModified || !page.text) {
     if (llms) return { decision: 'crawl', category: 'devtool-docs', confidence: 0.7, reason: 'llms.txt found (start page unreadable)', method: 'signals', costUsd: 0 };
-    return pass(`start page unreadable (${page.ok ? (page.notModified ? 'not modified' : 'too large') : page.reason}); left to discovery`.slice(0, REASON_MAX));
+    const why = `start page unreadable (${page.ok ? (page.notModified ? 'not modified' : 'too large') : page.reason})`;
+    // Judged by its URL when a model is available; otherwise discovery finds out.
+    if (!o.ai) return pass(`${why}; left to discovery`.slice(0, REASON_MAX));
+    const none = pageSignals('', start.href, 'text/html').signals;
+    return aiVerdict(gateSummary(start.href, { title: '', description: '', headings: [], nav: [] }, none, why), o.ai, none);
   }
   const { signals, facts } = pageSignals(page.text, page.url, page.contentType);
   signals.llms = llms;
