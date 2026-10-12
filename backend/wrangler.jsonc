@@ -121,7 +121,7 @@
         "INDEX_DAILY_TOTAL_CAP_USD": "10"
       },
       "d1_databases": [
-        { "binding": "DB", "database_name": "scoop-production", "database_id": "REPLACE_ME_PRODUCTION_D1_ID", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "scoop-production", "database_id": "dfce240b-45c4-4ca1-a887-66be730d2b22", "migrations_dir": "migrations" }
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-production" },
