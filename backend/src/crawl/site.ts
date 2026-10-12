@@ -17,12 +17,13 @@ import {
   underRoot,
 } from './discover.ts';
 import type { TwinPattern } from './discover.ts';
-import { crawlFetch, HostLimiter } from './polite.ts';
+import { crawlFetch, HostLimiter, MAX_URL } from './polite.ts';
 import type { FetchImpl } from './polite.ts';
 import { ALLOW_ALL, DISALLOW_ALL, parseRobots } from './robots.ts';
 import type { Robots } from './robots.ts';
 import { parseSitemap } from './sitemap.ts';
 import { extractPage, MIN_WORDS } from './html.ts';
+import { skipLowValue } from './skip.ts';
 
 export const DEFAULT_PAGE_BUDGET = 500;
 const TWIN_SAMPLE = 10;
@@ -65,6 +66,9 @@ export interface Discovery {
   clientShell: boolean | null;
   needsBrowser: boolean;
   plan: PlannedPage[];
+  // Candidates left out: the skip list (lowValue, older changelog archives),
+  // URLs over MAX_URL, robots.txt.
+  skipped: number;
   // Where a browser crawl should start (start URL, then docs pages from the sitemap).
   browserStartUrls: string[];
   requests: number;
@@ -128,6 +132,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     clientShell: null,
     needsBrowser: false,
     plan: [],
+    skipped: 0,
     browserStartUrls: [],
     requests: 0,
   };
@@ -185,7 +190,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
       out.sitemapUrlsCount += map.entries.length;
       for (const e of map.entries) {
         if (pageUrls.size >= MAX_URLS_KEPT) break;
-        if (!sameSite(e.loc)) continue;
+        if (e.loc.length > MAX_URL || !sameSite(e.loc)) continue;
         const u = new URL(e.loc);
         u.hash = '';
         pageUrls.add(u.href);
@@ -222,29 +227,39 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   }
 
   // 4. The fetch plan, within budget: llms files, Markdown links from llms.txt,
-  // then twins of sitemap pages. Deduplicated by source URL.
+  // then twins of sitemap pages. Deduplicated by source URL; pages on the skip
+  // list, over-long URLs and robots-disallowed sources are counted as skipped.
   const plan: PlannedPage[] = [];
   const sources = new Set<string>();
-  const add = (p: PlannedPage) => {
-    if (plan.length >= budget || sources.has(p.sourceUrl) || !allowed(p.sourceUrl)) return;
+  const add = (p: PlannedPage, keep: Set<string> | null) => {
+    if (plan.length >= budget || sources.has(p.sourceUrl)) return;
     sources.add(p.sourceUrl);
+    if (p.url.length > MAX_URL || p.sourceUrl.length > MAX_URL || !allowed(p.sourceUrl) || (keep && !keep.has(p.url))) {
+      out.skipped++;
+      return;
+    }
     plan.push(p);
   };
-  if (out.llmsUrl) add({ url: out.llmsUrl, sourceUrl: out.llmsUrl, kind: 'llms' });
-  if (out.llmsFullUrl) add({ url: out.llmsFullUrl, sourceUrl: out.llmsFullUrl, kind: 'llms-full' });
+  const keepOf = (urls: string[]) => new Set(skipLowValue(urls).kept);
   const useTwins = out.twinPattern !== null && (out.twinRatio ?? 0) >= TWIN_THRESHOLD;
+  const mdLinks = links.filter((l) => isMarkdownUrl(l) && underRoot(l, out.docsRoot));
+  if (out.llmsUrl) add({ url: out.llmsUrl, sourceUrl: out.llmsUrl, kind: 'llms' }, null);
+  // llms-full.txt repeats the site's pages; when those pages are available as
+  // Markdown it is recorded in the profile but not fetched or indexed.
+  if (out.llmsFullUrl && !useTwins && !mdLinks.length) add({ url: out.llmsFullUrl, sourceUrl: out.llmsFullUrl, kind: 'llms-full' }, null);
+  const keep = keepOf([...links, ...sitemapPages]);
   for (const link of links) {
     if (!underRoot(link, out.docsRoot)) continue;
-    if (isMarkdownUrl(link)) add({ url: link, sourceUrl: link, kind: 'page-md' });
+    if (isMarkdownUrl(link)) add({ url: link, sourceUrl: link, kind: 'page-md' }, keep);
     else if (useTwins) {
       const twin = twinUrl(link, out.twinPattern!);
-      if (twin) add({ url: link, sourceUrl: twin, kind: 'page-md' });
+      if (twin) add({ url: link, sourceUrl: twin, kind: 'page-md' }, keep);
     }
   }
   if (useTwins) {
     for (const page of sitemapPages) {
       const twin = twinUrl(page, out.twinPattern!);
-      if (twin) add({ url: page, sourceUrl: twin, kind: 'page-md' });
+      if (twin) add({ url: page, sourceUrl: twin, kind: 'page-md' }, keep);
     }
   }
   out.plan = plan;
@@ -260,9 +275,11 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     out.clientShell = html === null ? null : looksLikeClientShell(html);
     const page = html !== null && !out.clientShell ? extractPage(html, r.url) : null;
     if (page && page.words >= MIN_WORDS) {
-      for (const u of [r.url, ...page.links, ...sitemapPages]) {
-        if (sameSite(u) && inRoot(u) && !/\.(?!html?$)[a-z0-9]{1,5}$/i.test(new URL(u).pathname)) add({ url: u, sourceUrl: u, kind: 'page-html' });
-      }
+      const candidates = [r.url, ...page.links, ...sitemapPages].filter(
+        (u) => sameSite(u) && underRoot(u, out.docsRoot) && !/\.(?!html?$)[a-z0-9]{1,5}$/i.test(new URL(u).pathname),
+      );
+      const keepHtml = keepOf(candidates);
+      for (const u of candidates) add({ url: u, sourceUrl: u, kind: 'page-html' }, keepHtml);
       out.plan = plan;
     } else if (html !== null) {
       out.needsBrowser = true;

@@ -18,6 +18,8 @@ import { E2BCrawler } from '../src/crawl/e2b.ts';
 import { runCrawl } from '../src/crawl/runner.ts';
 import { validateCrawl } from '../src/lib/validate.ts';
 import { parseMessage } from '../src/index/consumer.ts';
+import type { IndexMessage } from '../src/index/indexer.ts';
+import { archiveVersion, lowValue, skipLowValue } from '../src/crawl/skip.ts';
 import { fakeD1, fakeFetch, fakeR2 } from './helpers.ts';
 
 // --- robots.txt
@@ -295,7 +297,7 @@ test('classify: new, changed, unchanged (same hash or 304); only changes are ind
   assert.equal(pageKey(h), `pages/${h}.md`);
 });
 
-test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, queues only changes', async () => {
+test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, flags only changes in the outbox', async () => {
   const { d1, raw } = fakeD1();
   const { r2, objects } = fakeR2();
   const store = new CrawlStore(d1, r2);
@@ -308,26 +310,75 @@ test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, q
     etag,
     lastModified: null,
   });
+  const sent: IndexMessage[] = [];
+  const flush = () => store.flushIndex('ex.com', async (b) => { sent.push(...b); });
+
   const first = await store.record('cr_1', 'ex.com', [page('https://ex.com/a', md('A'), '"a1"'), page('https://ex.com/b', md('A'))]);
   assert.deepEqual([first.new, first.changed, first.unchanged], [2, 0, 0]);
   assert.equal(objects.size, 1); // same content, one object
-  assert.equal(first.toIndex.length, 2);
+  assert.equal(await store.pendingIndex('ex.com'), 2);
+  assert.equal(await flush(), 2);
+  assert.equal(await store.pendingIndex('ex.com'), 0);
 
   const puts = objects.size;
+  sent.length = 0;
   const second = await store.record('cr_2', 'ex.com', [page('https://ex.com/a', null, '"a1"'), page('https://ex.com/b', md('A')), page('https://ex.com/c', md('C'))]);
   assert.deepEqual([second.new, second.changed, second.unchanged], [1, 0, 2]);
-  assert.deepEqual(second.toIndex.map((m) => m.url), ['https://ex.com/c']);
+  await flush();
+  assert.deepEqual(sent.map((m) => m.url), ['https://ex.com/c']);
   assert.equal(objects.size, puts + 1);
 
+  sent.length = 0;
   const third = await store.record('cr_3', 'ex.com', [page('https://ex.com/a', md('A2'))]);
   assert.deepEqual([third.new, third.changed, third.unchanged], [0, 1, 0]);
-  assert.deepEqual(Object.keys(third.toIndex[0]).sort(), ['contentHash', 'site', 'url']); // the M4 message contract, exactly
-  assert.equal(third.toIndex[0].contentHash, await contentHash(md('A2')));
+  await flush();
+  assert.deepEqual(Object.keys(sent[0]).sort(), ['contentHash', 'site', 'url']); // the M4 message contract, exactly
+  assert.equal(sent[0].contentHash, await contentHash(md('A2')));
+  assert.ok(objects.has(`pages/${sent[0].contentHash}.md`));
   const row = raw.prepare("SELECT title, run_id, etag FROM pages WHERE url = 'https://ex.com/a'").get() as { title: string; run_id: string; etag: string | null };
   assert.equal(row.title, 'A2');
   assert.equal(row.run_id, 'cr_3');
   const b = raw.prepare("SELECT run_id, title FROM pages WHERE url = 'https://ex.com/b'").get() as { run_id: string; title: string };
   assert.deepEqual({ ...b }, { run_id: 'cr_2', title: 'A' });
+});
+
+test('HIGH-3: the index outbox survives a failed send and a retried step; nothing is lost', async () => {
+  const { d1 } = fakeD1();
+  const { r2 } = fakeR2();
+  const store = new CrawlStore(d1, r2);
+  const pages = Array.from({ length: 150 }, (_, i) => ({
+    url: `https://ex.com/p${i}`, sourceUrl: `https://ex.com/p${i}.md`, kind: 'page-md' as const, title: null, markdown: md(`P${i}`), etag: null, lastModified: null,
+  }));
+  await store.record('cr_1', 'ex.com', pages);
+  // The first flush dies after the queue accepted batch 1 (100) and before batch 2.
+  const delivered: IndexMessage[] = [];
+  let calls = 0;
+  await assert.rejects(store.flushIndex('ex.com', async (b) => {
+    if (++calls === 2) throw new Error('queue unavailable');
+    assert.ok(b.length <= 100);
+    delivered.push(...b);
+  }));
+  assert.equal(await store.pendingIndex('ex.com'), 50);
+  // The step is retried: the rest goes out; a page changed meanwhile is re-flagged with its new hash.
+  await store.record('cr_1', 'ex.com', [{ ...pages[0], markdown: md('P0 v2') }]);
+  await store.flushIndex('ex.com', async (b) => { delivered.push(...b); });
+  assert.equal(await store.pendingIndex('ex.com'), 0);
+  const latest = new Map(delivered.map((m) => [m.url, m.contentHash]));
+  assert.equal(latest.size, 150);
+  assert.equal(latest.get('https://ex.com/p0'), await contentHash(md('P0 v2')));
+});
+
+test('createRun: one queued or running crawl per site; stale runs stop blocking', async () => {
+  const { d1 } = fakeD1();
+  const { r2 } = fakeR2();
+  const store = new CrawlStore(d1, r2);
+  const t = new Date('2026-10-12T00:00:00Z');
+  assert.equal(await store.createRun('cr_1', 'ex.com', 'https://ex.com/', t), true);
+  assert.equal(await store.createRun('cr_2', 'ex.com', 'https://ex.com/', t), false);
+  assert.equal(await store.createRun('cr_3', 'other.com', 'https://other.com/', t), true);
+  await store.updateRun('cr_3', { status: 'complete' });
+  assert.equal(await store.createRun('cr_4', 'other.com', 'https://other.com/', t), true);
+  assert.equal(await store.createRun('cr_5', 'ex.com', 'https://ex.com/', new Date(t.getTime() + 7 * 3_600_000)), true);
 });
 
 test('fetchPlanned: conditional requests, HTML and failures are not stored', async () => {
@@ -423,16 +474,35 @@ test('browserPages: keeps same-site, robots-allowed, bounded, unique pages withi
     ],
   });
   const robots = parseRobots('User-agent: *\nDisallow: /private');
-  const pages = browserPages(raw, 'ex.com', robots, 10);
+  const { pages, skipped } = browserPages(raw, 'ex.com', robots, 10);
   assert.deepEqual(pages.map((p) => [p.url, p.title, p.kind]), [
     ['https://ex.com/#/a', 'A', 'browser'],
     ['https://ex.com/big', null, 'browser'],
     ['https://ex.com/c', 'C', 'browser'],
   ]);
+  assert.equal(skipped, 3); // evil.com, robots-disallowed, javascript:
   assert.equal(pages[1].markdown?.length, 300_000);
-  assert.equal(browserPages(raw, 'ex.com', robots, 1).length, 1);
-  assert.deepEqual(browserPages('not json', 'ex.com', robots, 10), []);
-  assert.deepEqual(browserPages('{"pages":5}', 'ex.com', robots, 10), []);
+  assert.equal(browserPages(raw, 'ex.com', robots, 1).pages.length, 1);
+  assert.deepEqual(browserPages('not json', 'ex.com', robots, 10), { pages: [], skipped: 0 });
+  assert.deepEqual(browserPages('{"pages":5}', 'ex.com', robots, 10), { pages: [], skipped: 0 });
+});
+
+test('browserPages: URLs in the indexer\'s canonical form, <= 1024 chars, skip list applied', () => {
+  const body = 'Readable docs text. '.repeat(10);
+  const raw = JSON.stringify({
+    pages: [
+      { url: 'https://ex.com/#/guide/', title: 'G', markdown: body },
+      { url: 'https://ex.com/#/', title: 'Root', markdown: body },
+      { url: 'https://ex.com/a#intro', title: 'A', markdown: body },
+      { url: 'https://ex.com/' + 'x'.repeat(1100), title: 'Long', markdown: body },
+      { url: 'https://ex.com/genindex.html', title: 'Index', markdown: body },
+      { url: 'https://ex.com/changelog/2023', title: 'Old', markdown: body },
+      { url: 'https://ex.com/changelog/2025', title: 'New', markdown: body },
+    ],
+  });
+  const { pages, skipped } = browserPages(raw, 'ex.com', parseRobots(''), 20);
+  assert.deepEqual(pages.map((p) => p.url), ['https://ex.com/#/guide', 'https://ex.com/', 'https://ex.com/a', 'https://ex.com/changelog/2025']);
+  assert.equal(skipped, 3);
 });
 
 // --- E2B over REST
@@ -461,7 +531,7 @@ test('E2BCrawler: creates a private sandbox, starts the job with a token, polls,
   const create = calls[0];
   assert.equal(create.headers['x-api-key'], 'key');
   const body = JSON.parse(create.body!);
-  assert.deepEqual([body.templateID, body.timeout, body.network], ['tpl', 300, { allowPublicTraffic: false }]);
+  assert.deepEqual([body.templateID, body.timeout, body.secure, body.network], ['tpl', 300, true, { allowPublicTraffic: false }]);
   const run = calls[1];
   assert.equal(run.headers['e2b-traffic-access-token'], 'traffic');
   const sent = JSON.parse(run.body!);
@@ -486,18 +556,19 @@ test('index-pages messages: client-side routes keep their #/ path, plain anchors
   assert.equal(parseMessage({ site: 'ex.com', url: 'https://ex.com/a#intro', contentHash: h }).url, 'https://ex.com/a');
 });
 
-test('E2BCrawler.result: streamed with a 20 MB cap, sent with both tokens', async () => {
+test('E2BCrawler.result: application/json only, streamed with a 25 MB cap, sent with both tokens', async () => {
   const handle = { id: 'sbx1', startedAt: 0, data: { domain: 'e2b.app', traffic: 'traffic', token: 'job' } };
   const seen: Record<string, string>[] = [];
+  const JSON_TYPE = { 'content-type': 'application/json' };
   const big = () =>
     new ReadableStream<Uint8Array>({
       start(c) {
         const chunk = new Uint8Array(1_000_000);
-        for (let i = 0; i < 21; i++) c.enqueue(chunk);
+        for (let i = 0; i < 26; i++) c.enqueue(chunk);
         c.close();
       },
     });
-  const make = (body: () => BodyInit, headers: Record<string, string> = {}) =>
+  const make = (body: () => BodyInit, headers: Record<string, string> = JSON_TYPE) =>
     new E2BCrawler({
       apiKey: 'key',
       templateId: 'tpl',
@@ -509,8 +580,39 @@ test('E2BCrawler.result: streamed with a 20 MB cap, sent with both tokens', asyn
   assert.equal(await make(() => '{"pages":[]}').result(handle), '{"pages":[]}');
   assert.equal(seen[0]['e2b-traffic-access-token'], 'traffic');
   assert.equal(seen[0].authorization, 'Bearer job');
-  await assert.rejects(make(big).result(handle), /over 20000000 bytes/);
-  await assert.rejects(make(() => 'x', { 'content-length': '30000000' }).result(handle), /over 20000000 bytes/);
+  await assert.rejects(make(big).result(handle), /over 25000000 bytes/);
+  await assert.rejects(make(() => 'x', { ...JSON_TYPE, 'content-length': '30000000' }).result(handle), /over 25000000 bytes/);
+  await assert.rejects(make(() => '<html>', { 'content-type': 'text/html' }).result(handle), /not application\/json/);
+});
+
+test('E2BCrawler: poll throws on 401/403; stopTagged kills only sandboxes carrying the run ID', async () => {
+  const handle = { id: 'sbx1', startedAt: 0, data: { domain: 'e2b.app', traffic: 'traffic', token: 'job' } };
+  const forbidden = new E2BCrawler({ apiKey: 'k', templateId: 't', fetchImpl: async () => new Response('', { status: 403 }) });
+  await assert.rejects(forbidden.poll(handle), /HTTP 403/);
+  const unauth = new E2BCrawler({
+    apiKey: 'k',
+    templateId: 't',
+    fetchImpl: async (url) => (url.includes('8080-') ? Promise.reject(new Error('down')) : new Response('', { status: 401 })),
+  });
+  await assert.rejects(unauth.poll(handle), /HTTP 401/);
+  const calls: string[] = [];
+  const lister = new E2BCrawler({
+    apiKey: 'k',
+    templateId: 't',
+    fetchImpl: async (url, init) => {
+      calls.push(`${init.method ?? 'GET'} ${url}`);
+      if (url.startsWith('https://api.e2b.app/v2/sandboxes?')) {
+        return Response.json([
+          { sandboxID: 'a', metadata: { runId: 'cr_1' } },
+          { sandboxID: 'b', metadata: { runId: 'cr_other' } }, // a filter we don't trust blindly
+        ]);
+      }
+      return new Response(null, { status: 204 });
+    },
+  });
+  assert.equal(await lister.stopTagged('cr_1'), 1);
+  assert.match(calls[0], /metadata=runId%3Dcr_1/);
+  assert.deepEqual(calls.slice(1), ['DELETE https://api.e2b.app/sandboxes/a']);
 });
 
 // --- server-rendered HTML converted in the Worker
@@ -618,4 +720,61 @@ test('HIGH-2: a 50,000-entry sitemap without lastmod parses in linear time, and 
   assert.equal(all.entries[0].lastmod, null);
   assert.ok(ms < 500, `took ${Math.round(ms)} ms`);
   assert.equal(parseSitemap(xml, 5001).entries.length, 5001);
+});
+
+test('skip list: generated indexes, search, 404, tag/category listings and old changelog archives', () => {
+  for (const u of [
+    'https://docs.python.org/3/genindex.html',
+    'https://docs.python.org/3/genindex-A.html',
+    'https://docs.python.org/3/py-modindex.html',
+    'https://ex.com/docs/search',
+    'https://ex.com/search.html',
+    'https://ex.com/404.html',
+    'https://ex.com/blog/tags/webhooks',
+    'https://ex.com/category/guides/',
+  ]) assert.equal(lowValue(u), true, u);
+  for (const u of ['https://ex.com/docs/searching-data', 'https://ex.com/docs/tagging', 'https://ex.com/changelog', 'https://ex.com/docs/http-404-errors']) {
+    assert.equal(lowValue(u), false, u);
+  }
+  assert.deepEqual(archiveVersion('https://ex.com/release-notes/v1.10'), [1, 10]);
+  assert.equal(archiveVersion('https://ex.com/changelog'), null);
+  const { kept, skipped } = skipLowValue([
+    'https://ex.com/changelog',
+    'https://ex.com/changelog/2023',
+    'https://ex.com/changelog/2025-01',
+    'https://ex.com/changelog/2024-12',
+    'https://ex.com/release-notes/v1.9',
+    'https://ex.com/release-notes/v1.10',
+    'https://ex.com/genindex.html',
+    'https://ex.com/guide',
+  ]);
+  assert.deepEqual(kept, ['https://ex.com/changelog', 'https://ex.com/changelog/2025-01', 'https://ex.com/release-notes/v1.10', 'https://ex.com/guide']);
+  assert.equal(skipped, 4);
+});
+
+test('discoverSite: llms-full.txt is recorded but not planned when the pages exist as Markdown', async () => {
+  const text = (body: string) => () => new Response(body, { headers: { 'content-type': 'text/plain' } });
+  const { impl } = fakeFetch({
+    'https://ex.com/llms.txt': text(`# Ex\n- [A](https://ex.com/a.md)\n- [Search](https://ex.com/search.md)\n${'text '.repeat(20)}`),
+    'https://ex.com/llms-full.txt': text(md('Everything')),
+    'https://ex.com/a.md': text(md('A')),
+  });
+  const d = await discoverSite('https://ex.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.llmsFullUrl, 'https://ex.com/llms-full.txt');
+  assert.deepEqual(d.plan.map((p) => [p.kind, p.url]), [['llms', 'https://ex.com/llms.txt'], ['page-md', 'https://ex.com/a.md']]);
+  assert.equal(d.skipped, 1); // search.md
+  // Without per-page Markdown, llms-full.txt is the content and is planned.
+  const { impl: only } = fakeFetch({ 'https://ex.com/llms-full.txt': text(md('Everything')) });
+  const d2 = await discoverSite('https://ex.com/', { state: 'missing', text: '' }, { fetchImpl: only, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.deepEqual(d2.plan.map((p) => p.kind), ['llms-full']);
+});
+
+test('MEDIUM-4: plan URLs are at most 1024 characters', async () => {
+  const long = 'https://ex.com/docs/' + 'a'.repeat(1100);
+  const { impl } = fakeFetch({
+    'https://ex.com/llms.txt': () => new Response(`# Ex\n- [Long](${long}.md)\n- [A](https://ex.com/docs/a.md)\n${'text '.repeat(20)}`, { headers: { 'content-type': 'text/plain' } }),
+  });
+  const d = await discoverSite('https://ex.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.ok(d.plan.every((p) => p.url.length <= 1024 && p.sourceUrl.length <= 1024));
+  assert.deepEqual(d.plan.map((p) => p.url), ['https://ex.com/llms.txt', 'https://ex.com/docs/a.md']);
 });

@@ -9,7 +9,7 @@
 import { readFileSync } from 'node:fs';
 import { chromium } from 'playwright';
 import { parseRobots } from './vendor/robots.ts';
-import { clipPage, followable, MAX_RESULT_BYTES, pageKey, requestAllowed, siteOf } from './lib.js';
+import { clipPage, followable, hostChecker, MAX_RESULT_BYTES, pageKey, requestAllowed, siteOf } from './lib.js';
 
 const UA = 'Mozilla/5.0 (compatible; scoop.md-bot/1; +https://scoop.md/bot) Chrome/140 Safari/537.36';
 const NAV_TIMEOUT_MS = 30_000;
@@ -72,11 +72,15 @@ export async function crawl(job, { onPage = () => {}, choose = () => 0 } = {}) {
   const browser = await chromium.launch({ args: ['--disable-dev-shm-usage'] });
   try {
     const context = await browser.newContext({ userAgent: UA, bypassCSP: true, acceptDownloads: false, serviceWorkers: 'block' });
-    // Only public http(s); skip heavy media we never read.
-    await context.route('**/*', (route) => {
+    // Only public http(s) on default ports, to names that resolve to public
+    // addresses; skip heavy media we never read.
+    const hostIsPublic = hostChecker();
+    await context.route('**/*', async (route) => {
       const req = route.request();
       if (!requestAllowed(req.url())) return route.abort('blockedbyclient');
       if (['image', 'media', 'font'].includes(req.resourceType())) return route.abort('blockedbyclient');
+      const u = new URL(req.url());
+      if ((u.protocol === 'http:' || u.protocol === 'https:') && !(await hostIsPublic(u.hostname))) return route.abort('blockedbyclient');
       return route.continue();
     });
     const page = await context.newPage();

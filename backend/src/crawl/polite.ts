@@ -94,7 +94,8 @@ export type CrawlFetch =
     }
   | { ok: false; url: string; status: number | null; reason: string; skipped?: boolean };
 
-async function readBytes(res: Response, cap: number): Promise<{ bytes: Uint8Array; over: boolean }> {
+// Reads a body up to `cap` bytes; `over` when it is longer (the rest is never read).
+export async function readBytes(res: Response, cap: number): Promise<{ bytes: Uint8Array; over: boolean }> {
   if (!res.body) return { bytes: new Uint8Array(), over: false };
   const reader = res.body.getReader();
   const parts: Uint8Array[] = [];

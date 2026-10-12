@@ -11,15 +11,22 @@
 // job server through localhost.
 
 import { assertFetchable } from '../lib/ssrf.ts';
+import { readBytes } from './polite.ts';
 import type { FetchImpl } from './polite.ts';
 import type { BrowserCrawler, CrawlJob, RunHandle, RunState } from './runner.ts';
 
 export const E2B_API = 'https://api.e2b.app';
 const JOB_PORT = 8080;
-// The crawler caps its own result at 20 MB (crawler/lib.js); the Worker
-// enforces the same limit when it reads the result.
-export const MAX_RESULT_BYTES = 20_000_000;
-const RESULT_TIMEOUT_MS = 120_000;
+// The crawler caps its own result at 20 MB (crawler/lib.js); the Worker reads
+// at most 25 MB, whatever the sandbox claims or sends.
+export const MAX_RESULT_BYTES = 25_000_000;
+// 25 MB over the E2B proxy at a pessimistic ~1 MB/s, plus margin. Well under
+// the collect step's 10-minute timeout.
+const RESULT_TIMEOUT_MS = 60_000;
+// Per call to the job server while starting: four tries fit comfortably in
+// the browser-start step's timeout (create <= 30 s + 4 x 10 s + 3 x 2 s).
+const RUN_TIMEOUT_MS = 10_000;
+const RUN_ATTEMPTS = 4;
 // Hobby plan sandboxes run for at most an hour.
 export const MAX_SANDBOX_SECONDS = 3600;
 // Template resources (crawler/package.json, template:build) and E2B's
@@ -53,6 +60,7 @@ export class E2BCrawler implements BrowserCrawler {
   }
 
   private async call(url: string, init: RequestInit = {}): Promise<Response> {
+    // Every outbound fetch goes through the SSRF guard, E2B's included.
     assertFetchable(url);
     return this.o.fetchImpl(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000), ...init });
   }
@@ -77,7 +85,10 @@ export class E2BCrawler implements BrowserCrawler {
     });
   }
 
-  async start(job: CrawlJob): Promise<RunHandle> {
+  // `tag` (the crawl run ID) goes into the sandbox metadata, so stopTagged()
+  // can find and kill every sandbox a run created, including orphans from a
+  // retried step.
+  async start(job: CrawlJob, tag = ''): Promise<RunHandle> {
     const timeout = Math.min(MAX_SANDBOX_SECONDS, Math.ceil(job.budget.maxMinutes * 60) + 180);
     const res = await this.api('/v2/sandboxes', {
       method: 'POST',
@@ -85,8 +96,9 @@ export class E2BCrawler implements BrowserCrawler {
         templateID: this.o.templateId,
         timeout,
         autoPause: false,
+        secure: true,
         network: { allowPublicTraffic: false },
-        metadata: { purpose: 'scoop-crawl', site: job.site },
+        metadata: { purpose: 'scoop-crawl', site: job.site, runId: tag },
       }),
     });
     if (!res.ok) throw new Error(`E2B create failed: HTTP ${res.status} ${(await res.text()).slice(0, 200)}`);
@@ -100,10 +112,14 @@ export class E2BCrawler implements BrowserCrawler {
       // The job server is snapshotted as running, but the proxy route can take
       // a moment to appear after create.
       let last = '';
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < RUN_ATTEMPTS; attempt++) {
         if (attempt) await this.o.sleep(2000);
         try {
-          const r = await this.job(handle, '/run', { method: 'POST', body: JSON.stringify({ token: handle.data!.token, job }) });
+          const r = await this.job(handle, '/run', {
+            method: 'POST',
+            body: JSON.stringify({ token: handle.data!.token, job }),
+            signal: AbortSignal.timeout(RUN_TIMEOUT_MS),
+          });
           if (r.status === 202) return handle;
           last = `HTTP ${r.status} ${(await r.text()).slice(0, 200)}`;
           if (r.status === 400 || r.status === 409) break;
@@ -118,20 +134,46 @@ export class E2BCrawler implements BrowserCrawler {
     }
   }
 
+  // Auth failures (401/403 from E2B's API or proxy) throw: retrying won't fix
+  // a revoked key or a wrong traffic token, and 'running' would poll forever.
   async poll(h: RunHandle): Promise<RunState> {
+    let r: Response | null = null;
     try {
-      const r = await this.job(h, '/status');
+      r = await this.job(h, '/status');
+    } catch {
+      // network trouble: ask the API whether the sandbox still exists
+    }
+    if (r) {
       if (r.ok) {
         const s = (await r.json()) as { state: string };
         return s.state === 'finished' || s.state === 'failed' ? 'finished' : 'running';
       }
       await r.body?.cancel();
-    } catch {
-      // fall through to asking the API whether the sandbox still exists
+      if (r.status === 401 || r.status === 403) throw new Error(`E2B refused the job server call: HTTP ${r.status}`);
     }
     const info = await this.api(`/sandboxes/${encodeURIComponent(h.id)}`);
     await info.body?.cancel();
+    if (info.status === 401 || info.status === 403) throw new Error(`E2B refused the API key: HTTP ${info.status}`);
     return info.status === 404 ? 'gone' : 'running';
+  }
+
+  // Kills every live sandbox whose metadata carries this run ID. Returns how
+  // many were killed.
+  async stopTagged(tag: string): Promise<number> {
+    const q = new URLSearchParams({ metadata: `runId=${tag}`, state: 'running,paused' });
+    const r = await this.api(`/v2/sandboxes?${q}`);
+    if (!r.ok) {
+      await r.body?.cancel();
+      throw new Error(`E2B list failed: HTTP ${r.status}`);
+    }
+    const list = (await r.json()) as { sandboxID: string; metadata?: Record<string, string> }[];
+    let n = 0;
+    for (const sb of list) {
+      if (sb.metadata?.runId !== tag) continue; // never trust a filter we can check
+      await this.stop({ id: sb.sandboxID, startedAt: 0 });
+      n++;
+    }
+    return n;
   }
 
   // Status details for logs and errors.
@@ -152,24 +194,17 @@ export class E2BCrawler implements BrowserCrawler {
       await r.body?.cancel();
       return null;
     }
+    if (!/^application\/json\b/i.test(r.headers.get('content-type') ?? '')) {
+      await r.body.cancel();
+      throw new Error('crawl result is not application/json');
+    }
     if (Number(r.headers.get('content-length')) > MAX_RESULT_BYTES) {
       await r.body.cancel();
       throw new Error(`crawl result is over ${MAX_RESULT_BYTES} bytes`);
     }
-    const reader = r.body.getReader();
-    const decoder = new TextDecoder();
-    let size = 0;
-    let text = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) return text + decoder.decode();
-      size += value.byteLength;
-      if (size > MAX_RESULT_BYTES) {
-        await reader.cancel();
-        throw new Error(`crawl result is over ${MAX_RESULT_BYTES} bytes`);
-      }
-      text += decoder.decode(value, { stream: true });
-    }
+    const { bytes, over } = await readBytes(r, MAX_RESULT_BYTES);
+    if (over) throw new Error(`crawl result is over ${MAX_RESULT_BYTES} bytes`);
+    return new TextDecoder().decode(bytes);
   }
 
   async stop(h: RunHandle): Promise<void> {

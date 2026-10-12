@@ -40,6 +40,7 @@ export interface CrawlRunRow {
   pages_changed: number;
   pages_unchanged: number;
   pages_failed: number;
+  pages_skipped: number;
   browser_seconds: number;
   cost_usd: number;
   error: string | null;
@@ -49,8 +50,13 @@ export interface RecordStats {
   new: number;
   changed: number;
   unchanged: number;
-  toIndex: IndexMessage[];
 }
+
+// A run older than this that never finished (its Workflow died) no longer
+// blocks a new crawl of the same site.
+const STALE_RUN_HOURS = 6;
+// sendBatch takes at most 100 messages.
+const OUTBOX_BATCH = 100;
 
 // D1 allows 100 bound parameters per statement.
 const IN_CHUNK = 90;
@@ -64,11 +70,20 @@ export class CrawlStore {
     this.bucket = bucket;
   }
 
-  async createRun(id: string, site: string, startUrl: string, now = new Date()): Promise<void> {
-    await this.db
-      .prepare(`INSERT INTO crawl_runs (id, site, start_url, started_at, status) VALUES (?, ?, ?, ?, 'queued')`)
-      .bind(id, site, startUrl, now.toISOString())
+  // Creates a queued run unless the site already has a queued or running one
+  // (started in the last STALE_RUN_HOURS). One statement, so two concurrent
+  // requests can't both win. Returns false when another run is active.
+  async createRun(id: string, site: string, startUrl: string, now = new Date()): Promise<boolean> {
+    const since = new Date(now.getTime() - STALE_RUN_HOURS * 3_600_000).toISOString();
+    const r = await this.db
+      .prepare(
+        `INSERT INTO crawl_runs (id, site, start_url, started_at, status)
+         SELECT ?1, ?2, ?3, ?4, 'queued'
+         WHERE NOT EXISTS (SELECT 1 FROM crawl_runs WHERE site = ?2 AND status IN ('queued', 'running') AND started_at > ?5)`,
+      )
+      .bind(id, site, startUrl, now.toISOString(), since)
       .run();
+    return r.meta.changes === 1;
   }
 
   async getRun(id: string): Promise<CrawlRunRow | null> {
@@ -85,13 +100,13 @@ export class CrawlStore {
   }
 
   // Adds page counts to a run (each Workflow step reports its own batch).
-  async addRunCounts(id: string, c: { new: number; changed: number; unchanged: number; failed: number }): Promise<void> {
+  async addRunCounts(id: string, c: { new: number; changed: number; unchanged: number; failed: number; skipped: number }): Promise<void> {
     await this.db
       .prepare(
         `UPDATE crawl_runs SET pages_new = pages_new + ?, pages_changed = pages_changed + ?,
-           pages_unchanged = pages_unchanged + ?, pages_failed = pages_failed + ? WHERE id = ?`,
+           pages_unchanged = pages_unchanged + ?, pages_failed = pages_failed + ?, pages_skipped = pages_skipped + ? WHERE id = ?`,
       )
-      .bind(c.new, c.changed, c.unchanged, c.failed, id)
+      .bind(c.new, c.changed, c.unchanged, c.failed, c.skipped, id)
       .run();
   }
 
@@ -142,11 +157,12 @@ export class CrawlStore {
   }
 
   // Records a batch of fetched pages: new or changed content goes to R2 (once
-  // per hash) and is returned for indexing; unchanged pages only get their
-  // fetched_at (and validators) refreshed.
+  // per hash) and is marked index_pending in the same D1 batch as the row, so
+  // a lost queue send is retried by the next flush; unchanged pages only get
+  // their fetched_at (and validators) refreshed.
   async record(runId: string, site: string, pages: FetchedSource[], now = new Date()): Promise<RecordStats> {
     const prev = await this.prevPages(pages.map((p) => p.url));
-    const stats: RecordStats = { new: 0, changed: 0, unchanged: 0, toIndex: [] };
+    const stats: RecordStats = { new: 0, changed: 0, unchanged: 0 };
     const at = now.toISOString();
     const writes: D1PreparedStatement[] = [];
     for (const p of pages) {
@@ -171,18 +187,44 @@ export class CrawlStore {
       writes.push(
         this.db
           .prepare(
-            `INSERT INTO pages (url, site, source_url, source_kind, title, content_hash, bytes, etag, last_modified, fetched_at, changed_at, run_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11)
+            `INSERT INTO pages (url, site, source_url, source_kind, title, content_hash, bytes, etag, last_modified, fetched_at, changed_at, run_id, index_pending)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10, ?11, 1)
              ON CONFLICT (url) DO UPDATE SET site = excluded.site, source_url = excluded.source_url, source_kind = excluded.source_kind,
                title = excluded.title, content_hash = excluded.content_hash, bytes = excluded.bytes, etag = excluded.etag,
-               last_modified = excluded.last_modified, fetched_at = excluded.fetched_at, changed_at = excluded.changed_at, run_id = excluded.run_id`,
+               last_modified = excluded.last_modified, fetched_at = excluded.fetched_at, changed_at = excluded.changed_at, run_id = excluded.run_id,
+               index_pending = 1`,
           )
           .bind(p.url, site, p.sourceUrl, p.kind, p.title, hash, new TextEncoder().encode(markdown).byteLength, p.etag, p.lastModified, at, runId),
       );
-      stats.toIndex.push({ site, url: p.url, contentHash: hash! });
     }
     if (writes.length) await this.db.batch(writes);
     return stats;
+  }
+
+  // Sends the site's pending index messages ({ site, url, contentHash }) in
+  // batches of 100 and clears each flag only if the page's hash is still the
+  // one sent. Safe to repeat: a resend after a failure is harmless, since the
+  // consumer is idempotent on (url, contentHash). Returns how many were sent.
+  async flushIndex(site: string, send: (batch: IndexMessage[]) => Promise<void>, maxBatches = 50): Promise<number> {
+    let sent = 0;
+    for (let i = 0; i < maxBatches; i++) {
+      const { results } = await this.db
+        .prepare('SELECT url, content_hash FROM pages WHERE site = ? AND index_pending = 1 ORDER BY url LIMIT ?')
+        .bind(site, OUTBOX_BATCH)
+        .all<{ url: string; content_hash: string }>();
+      if (!results.length) break;
+      await send(results.map((r) => ({ site, url: r.url, contentHash: r.content_hash })));
+      await this.db.batch(
+        results.map((r) => this.db.prepare('UPDATE pages SET index_pending = 0 WHERE url = ? AND content_hash = ?').bind(r.url, r.content_hash)),
+      );
+      sent += results.length;
+    }
+    return sent;
+  }
+
+  async pendingIndex(site: string): Promise<number> {
+    const row = await this.db.prepare('SELECT COUNT(*) AS n FROM pages WHERE site = ? AND index_pending = 1').bind(site).first<{ n: number }>();
+    return row?.n ?? 0;
   }
 
   // A sample of the pages a run fetched, for the admin status view.

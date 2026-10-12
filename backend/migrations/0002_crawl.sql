@@ -5,7 +5,7 @@
 -- One row per site (hostname, normalised like skills.site).
 CREATE TABLE site_profiles (
   site               TEXT PRIMARY KEY,
-  status             TEXT NOT NULL,          -- crawling | ready | needs_browser | empty | blocked | failed
+  status             TEXT NOT NULL,          -- crawling | ready | empty | blocked | failed (needs_browser is its own column)
   docs_root          TEXT NOT NULL DEFAULT '/',
   has_llms           INTEGER NOT NULL DEFAULT 0,
   has_llms_full      INTEGER NOT NULL DEFAULT 0,
@@ -35,11 +35,13 @@ CREATE TABLE crawl_runs (
   pages_changed   INTEGER NOT NULL DEFAULT 0,
   pages_unchanged INTEGER NOT NULL DEFAULT 0,
   pages_failed    INTEGER NOT NULL DEFAULT 0,
+  pages_skipped   INTEGER NOT NULL DEFAULT 0, -- kept out by robots.txt, redirects off the site, the skip list or URL length
   browser_seconds REAL NOT NULL DEFAULT 0,   -- sandbox wall time, when escalated
   cost_usd        REAL NOT NULL DEFAULT 0,   -- estimated sandbox cost
   error           TEXT
 );
 CREATE INDEX crawl_runs_site ON crawl_runs (site, started_at DESC);
+CREATE INDEX crawl_runs_active ON crawl_runs (site) WHERE status IN ('queued', 'running');
 
 CREATE TABLE pages (
   url           TEXT PRIMARY KEY,            -- the page's URL (the HTML page, not its .md twin)
@@ -53,7 +55,11 @@ CREATE TABLE pages (
   last_modified TEXT,
   fetched_at    TEXT NOT NULL,               -- last time we fetched it (any outcome but failure)
   changed_at    TEXT NOT NULL,               -- last time its content hash changed
-  run_id        TEXT NOT NULL                -- last run that fetched it
+  run_id        TEXT NOT NULL,               -- last run that fetched it
+  -- Outbox for the index-pages queue: set in the same write as a new or
+  -- changed content_hash, cleared once the message for that hash is sent.
+  index_pending INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX pages_site ON pages (site, url);
 CREATE INDEX pages_hash ON pages (content_hash);
+CREATE INDEX pages_index_pending ON pages (site) WHERE index_pending = 1;

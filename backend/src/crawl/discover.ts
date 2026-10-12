@@ -37,7 +37,7 @@ export function looksLikeText(contentType: string, body: string): boolean {
 export function llmsLinks(text: string, fileUrl: string): string[] {
   const site = normalizeSite(new URL(fileUrl).hostname);
   const seen = new Set<string>();
-  for (const m of text.matchAll(/\[[^\]\n]{0,500}\]\(\s*<?([^)\s>]{1,2048})>?(?:\s+"[^"\n]{0,300}")?\s*\)/g)) {
+  for (const m of text.matchAll(/\[[^\]\n]{0,500}\]\(\s*<?([^)\s>]{1,1024})>?(?:\s+"[^"\n]{0,300}")?\s*\)/g)) {
     let u: URL;
     try { u = new URL(m[1], fileUrl); } catch { continue; }
     if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;

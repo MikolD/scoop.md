@@ -124,6 +124,8 @@ async function requireAdmin(c: Ctx): Promise<void> {
   if (!token || !(await safeEqual(given, `Bearer ${token}`))) throw notFound();
 }
 
+const FINAL_PROFILE = new Set(['ready', 'empty', 'blocked', 'failed']);
+
 function profileJson(r: SiteProfileRow) {
   return {
     site: r.site,
@@ -141,7 +143,6 @@ function profileJson(r: SiteProfileRow) {
     needsBrowser: Boolean(r.needs_browser),
     crawlDelay: r.crawl_delay,
     lastCrawledAt: r.last_crawled_at,
-    lastRunId: r.last_run_id,
     updatedAt: r.updated_at,
   };
 }
@@ -159,6 +160,7 @@ function runJson(r: CrawlRunRow) {
     pagesChanged: r.pages_changed,
     pagesUnchanged: r.pages_unchanged,
     pagesFailed: r.pages_failed,
+    pagesSkipped: r.pages_skipped,
     browserSeconds: r.browser_seconds,
     costUsd: r.cost_usd,
     error: r.error,
@@ -290,8 +292,18 @@ const routes: Route[] = [
       await requireAdmin(c);
       const crawl = validateCrawl(await readJson(c.req), allowLocalhost(c.env));
       const runId = newId('cr');
-      await new CrawlStore(c.env.DB, c.env.SKILLS).createRun(runId, crawl.site, crawl.startUrl);
-      await c.env.CRAWL_SITE.create({ id: runId, params: { runId, ...crawl } });
+      const crawls = new CrawlStore(c.env.DB, c.env.SKILLS);
+      // One queued or running crawl per site.
+      if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl))) {
+        throw new ApiError('conflict', `A crawl of ${crawl.site} is already queued or running`, 409);
+      }
+      try {
+        await c.env.CRAWL_SITE.create({ id: runId, params: { runId, ...crawl } });
+      } catch (e) {
+        // No Workflow will ever finish this run; don't leave it blocking the site.
+        await crawls.updateRun(runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'Workflow could not be created' });
+        throw e;
+      }
       return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl });
     },
   },
@@ -322,7 +334,8 @@ const routes: Route[] = [
       let raw: string;
       try { raw = decodeURIComponent(params[0]); } catch { throw notFound('No profile for this site'); }
       const row = await new CrawlStore(env.DB, env.SKILLS).getProfile(normalizeSite(raw));
-      if (!row) throw notFound('No profile for this site');
+      // Only profiles of finished crawls are public.
+      if (!row || !FINAL_PROFILE.has(row.status)) throw notFound('No profile for this site');
       return json(200, { profile: profileJson(row) }, { 'cache-control': CACHE_LIST });
     },
   },

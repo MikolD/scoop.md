@@ -106,7 +106,7 @@ export function validateCrawl(body: unknown, allowLocalhost: boolean): NewCrawl 
   if (!isObject(body)) throw bad('Body must be a JSON object');
   const site = normalizeSite(str(body.site, 'site', 253));
   if (site === 'scoop.md' || site.endsWith('.scoop.md')) throw bad('scoop.md itself cannot be crawled');
-  const startUrl = body.startUrl === undefined ? `https://${site}/` : str(body.startUrl, 'startUrl', 2048);
+  const startUrl = body.startUrl === undefined ? `https://${site}/` : str(body.startUrl, 'startUrl', 1024);
   assertFetchable(startUrl, { allowLocalhost });
   if (siteOf(startUrl) !== site) throw new ApiError('site_mismatch', `startUrl is not on ${site}`);
   const int = (v: unknown, name: string, dflt: number, max: number) => {

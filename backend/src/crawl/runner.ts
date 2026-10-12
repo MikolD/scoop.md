@@ -46,7 +46,8 @@ export interface RunHandle {
 export type RunState = 'running' | 'finished' | 'gone';
 
 export interface BrowserCrawler {
-  start(job: CrawlJob): Promise<RunHandle>;
+  // `tag` labels the run (the crawl run ID) so stopTagged() can find it.
+  start(job: CrawlJob, tag?: string): Promise<RunHandle>;
   // 'finished' when the crawler has exited; 'gone' when the run no longer exists.
   poll(handle: RunHandle): Promise<RunState>;
   // Reads the result when the backend can hand it over directly (dev without
@@ -54,6 +55,9 @@ export interface BrowserCrawler {
   result(handle: RunHandle): Promise<string | null>;
   // Always called, whatever happened. Must be idempotent.
   stop(handle: RunHandle): Promise<void>;
+  // Stops every run carrying this tag, including ones whose handle was lost
+  // (a step that started a run and then failed before returning it).
+  stopTagged(tag: string): Promise<number>;
 }
 
 // For callers that can wait (Node scripts, tests): start, poll, read, stop.
