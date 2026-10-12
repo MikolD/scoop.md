@@ -5,6 +5,7 @@ import { STALE_RUN_HOURS } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { FAILED } from '../index/classify.ts';
 import { ALL_SITES, UNCLASSIFIED } from '../index/indexer.ts';
+import type { RequestRow } from '../crawl/requests.ts';
 
 export const today = (now: Date) => now.toISOString().slice(0, 10);
 const daysAgo = (now: Date, n: number) => new Date(now.getTime() - n * 86_400_000).toISOString().slice(0, 10);
@@ -328,4 +329,34 @@ export async function costs(db: D1Database, days: number, now = new Date()) {
     Object.assign(d, { runs: num(r.runs), browserSeconds: num(r.seconds), e2bUsd: num(r.e2b), gateUsd: num(r.gate) });
   }
   return [...byDay.values()];
+}
+
+// Crawl requests from the extension (src/crawl/requests.ts), newest first,
+// each with its run (for the live state and cost). The install shows only as
+// the first 8 hex characters of its HMAC.
+export async function crawlRequests(db: D1Database, f: { site?: string; limit: number; offset: number }) {
+  const { results } = await db
+    .prepare(
+      `SELECT * FROM crawl_requests ${f.site ? 'WHERE site = ?' : ''} ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`,
+    )
+    .bind(...(f.site ? [f.site] : []), f.limit + 1, f.offset)
+    .all<RequestRow>();
+  const rows = results.slice(0, f.limit);
+  const ids = [...new Set(rows.map((r) => r.run_id).filter((id): id is string => Boolean(id)))];
+  const runs = new Map<string, CrawlRunRow>();
+  if (ids.length) {
+    const { results: rr } = await db.prepare(`SELECT * FROM crawl_runs WHERE id IN (${ids.map(() => '?').join(', ')})`).bind(...ids).all<CrawlRunRow>();
+    for (const r of rr) runs.set(r.id, r);
+  }
+  return { rows: rows.map((r) => ({ row: r, run: r.run_id ? (runs.get(r.run_id) ?? null) : null })), more: results.length > f.limit };
+}
+
+// Today's requests by outcome; 'started' is what CRAWL_REQUESTS_DAILY_MAX caps.
+export async function requestCounts(db: D1Database, now = new Date()) {
+  const { results } = await db
+    .prepare('SELECT state, COUNT(*) AS n FROM crawl_requests WHERE day = ? GROUP BY state')
+    .bind(today(now))
+    .all<{ state: string; n: number }>();
+  const by = Object.fromEntries(results.map((r) => [r.state, r.n]));
+  return { total: results.reduce((n, r) => n + r.n, 0), started: num(by.started), byOutcome: by };
 }

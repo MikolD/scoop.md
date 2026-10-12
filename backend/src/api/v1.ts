@@ -14,6 +14,8 @@ import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { startCrawl } from '../crawl/start.ts';
+import { DEFAULT_REQUESTS_DAILY_MAX, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
+import { anchoredChunks } from '../search/anchor.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { withServerText } from '../lib/skilltext.ts';
@@ -37,6 +39,10 @@ const LIMITS = {
   shareIp: 60,
   voteInstall: 120,
   voteIp: 600,
+  // POST /v1/crawl-requests, any outcome: each one writes a row. Starting a
+  // crawl has its own daily limits (src/crawl/requests.ts).
+  crawlRequestInstall: 60,
+  crawlRequestIp: 300,
 };
 
 interface Ctx {
@@ -94,6 +100,21 @@ async function limitSearch(env: Env, ip: string): Promise<void> {
 }
 
 const MAX_QUERY = 200;
+// GET /v1/sites/:site/status: the popup asks on every open, so a short cache.
+const CACHE_STATUS = 'public, max-age=15, s-maxage=15';
+
+// A site the API may talk about: a public hostname (400 for IP literals,
+// localhost, .local, .internal and the like, as for any fetch).
+function publicSite(raw: string, env: Env): string {
+  const site = siteParam(raw);
+  assertFetchable(`https://${site}/`, { allowLocalhost: allowLocalhost(env) });
+  return site;
+}
+
+export function requestsDailyMax(env: Env): number {
+  const n = Math.trunc(Number(env.CRAWL_REQUESTS_DAILY_MAX));
+  return env.CRAWL_REQUESTS_DAILY_MAX !== undefined && Number.isFinite(n) && n >= 0 ? n : DEFAULT_REQUESTS_DAILY_MAX;
+}
 const TOPIC = /^[\p{L}\p{N}._-]+(\/[\p{L}\p{N}._-]+){0,3}$/u;
 
 function queryParam(url: URL): string {
@@ -384,6 +405,56 @@ const routes: Route[] = [
   },
   {
     method: 'GET',
+    pattern: /^\/v1\/sites\/([^/]+)\/status$/,
+    name: '/v1/sites/:site/status',
+    // Never a 404: an unknown site is { indexed: false, status: 'new' }.
+    handler: async ({ params, env }) => json(200, await siteStatus(env.DB, publicSite(params[0], env)), { 'cache-control': CACHE_STATUS }),
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/crawl-requests$/,
+    name: '/v1/crawl-requests',
+    // The extension asks for a site the library hasn't crawled (src/crawl/requests.ts).
+    handler: async ({ req, env, ip, usage }) => {
+      const install = installId(req.headers.get('x-scoop-install'));
+      const body = await readJson(req);
+      const raw = (body as { url?: unknown } | null)?.url;
+      if (typeof raw !== 'string' || !raw || raw.length > 1024) throw bad('url must be a string of 1–1024 characters');
+      const pageUrl = normalizePageUrl(assertFetchable(raw, { allowLocalhost: allowLocalhost(env) }));
+      const site = siteOf(pageUrl);
+      if (site === 'scoop.md' || site.endsWith('.scoop.md')) throw bad('scoop.md itself cannot be crawled');
+      usage.site = site;
+      try {
+        await checkHourly(env.DB, env.RATE_KEY, [
+          { bucket: 'crawlreq-any:install', subject: install, limit: LIMITS.crawlRequestInstall },
+          { bucket: 'crawlreq-any:ip', subject: ipSubject(ip), limit: LIMITS.crawlRequestIp },
+        ]);
+        const r = await requestCrawl(
+          { db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE, rateKey: env.RATE_KEY, dailyMax: requestsDailyMax(env) },
+          { pageUrl, site, install, ip },
+        );
+        usage.state = r.body.state;
+        if (r.status === 202) return json(202, { id: r.body.id, site, state: 'queued', etaSeconds: r.body.etaSeconds });
+        return json(200, r.body);
+      } catch (e) {
+        if (e instanceof ApiError && e.code === 'rate_limited') usage.state = 'rate_limited';
+        throw e;
+      }
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/crawl-requests\/(rq_[0-9A-Z]{26})$/,
+    name: '/v1/crawl-requests/:id',
+    // Public: the ID is unguessable (80 random bits).
+    handler: async ({ params, env }) => {
+      const view = await requestView(env.DB, params[0]);
+      if (!view) throw notFound('No such crawl request');
+      return json(200, view);
+    },
+  },
+  {
+    method: 'GET',
     pattern: /^\/v1\/admin\/reports$/,
     name: '/v1/admin/reports',
     handler: async (c) => {
@@ -438,9 +509,28 @@ const routes: Route[] = [
       const site = siteParam(url.searchParams.get('site') ?? '');
       usage.site = site;
       const topic = url.searchParams.get('topic');
+      const pageParam = url.searchParams.get('url');
       const budget = intParam(url, 'budget', DEFAULT_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET);
       let label: string;
       let chunks;
+      if (pageParam !== null) {
+        // Anchored on the page the user is on: that page first, then related chunks.
+        if (topic !== null || url.searchParams.has('q')) throw bad('Pass url, q or topic, not more than one');
+        if (pageParam.length > 1024) throw bad('url is over 1024 characters');
+        const pageUrl = normalizePageUrl(assertFetchable(pageParam, { allowLocalhost: allowLocalhost(env) }));
+        if (siteOf(pageUrl) !== site) throw new ApiError('site_mismatch', `url is not on ${site}`, 400);
+        if (!(await siteTopics(env.DB, site)).pages) {
+          Object.assign(usage, { results: 0, hit: false });
+          throw new ApiError('not_indexed', `${site} has no index yet`, 404);
+        }
+        await limitSearch(env, ip);
+        const anchored = await anchoredChunks(searchDeps(env), site, pageUrl);
+        Object.assign(usage, { results: anchored?.chunks.length ?? 0, hit: Boolean(anchored?.anchored) });
+        if (!anchored) throw notFound('Nothing indexed matches');
+        return new Response(buildIndexPackage({ site, label: anchored.label, chunks: anchored.chunks, budget }), {
+          headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
+        });
+      }
       if (topic !== null) {
         if (url.searchParams.has('q')) throw bad('Pass q or topic, not both');
         label = topic.trim().toLowerCase();

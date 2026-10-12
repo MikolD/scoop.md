@@ -11,6 +11,7 @@ export type ErrorCode =
   | 'rate_limited'
   | 'conflict'
   | 'forbidden'
+  | 'not_indexed'
   | 'internal';
 
 export class ApiError extends Error {

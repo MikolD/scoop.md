@@ -59,6 +59,7 @@ export const API_ROUTES: Record<string, string> = {
   '/v1/sites/:site': 'api_site',
   '/v1/sites/:site/profile': 'api_profile',
   '/v1/sites/:site/topics': 'api_topics',
+  '/v1/crawl-requests': 'api_crawl_request',
 };
 
 // What an API handler learned about the request, for usage telemetry.
@@ -68,6 +69,8 @@ export interface ApiUsage {
   topic?: string;
   hit?: boolean;
   results?: number;
+  // Crawl requests: what the request led to (src/crawl/requests.ts), or 'rate_limited'.
+  state?: string;
 }
 
 const allowLocalhost = (env: Env) => env.ENVIRONMENT === 'dev' && env.ALLOW_LOCALHOST === '1';
@@ -117,6 +120,7 @@ const eventId = async (...parts: (string | number | null)[]) => (await sha256Hex
 export function outcomeOf(name: string, props: Record<string, unknown>): string | null {
   if (typeof props.outcome === 'string') return props.outcome;
   if (typeof props.hit === 'boolean') return props.hit ? 'hit' : 'miss';
+  if (name === 'api_crawl_request' && typeof props.state === 'string') return props.state;
   if (name === 'vote' && typeof props.worked === 'boolean') return props.worked ? 'worked' : 'failed';
   if (name === 'settings_change' && props.key) return `${props.key}=${props.value ?? ''}`;
   if (typeof props.reason === 'string') return props.reason;
@@ -269,6 +273,7 @@ export async function recordApiUsage(
   if (u.q) props.q = cleanText(u.q, 200);
   if (u.topic) props.topic = cleanText(u.topic, 200);
   if (u.results !== undefined) props.results = u.results;
+  if (u.state) props.state = u.state;
   if (hit !== undefined) props.hit = hit;
   if (client) props.client = client;
   const hour = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000);

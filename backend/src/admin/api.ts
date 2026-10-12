@@ -5,7 +5,9 @@
 import seedList from '../../seeds/devtools.json' with { type: 'json' };
 import { buildPackage, withCurrentPage } from '../../../extension/lib/package.js';
 import { json, readJson } from '../api/http.ts';
-import { profileJson, runJson, searchDeps } from '../api/v1.ts';
+import { profileJson, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
+import { viewOf } from '../crawl/requests.ts';
+import { runCosts } from '../db/crawl.ts';
 import { runPrefix } from '../crawl/collect.ts';
 import { E2BCrawler, e2bDailyCap } from '../crawl/e2b.ts';
 import { startCrawl } from '../crawl/start.ts';
@@ -176,6 +178,8 @@ const routes: Route[] = [
         secrets: { openrouter: Boolean(env.OPENROUTER_API_KEY), e2b: Boolean(env.E2B_API_KEY) },
         ...(await q.overview(env.DB, { dailyCapUsd, totalCapUsd })),
         e2bCapUsd: e2bDailyCap(env),
+        // Today's crawl requests from the extension; `started` is what the cap counts.
+        crawlRequests: { ...(await q.requestCounts(env.DB)), capPerDay: requestsDailyMax(env) },
       });
     },
   },
@@ -551,6 +555,37 @@ const routes: Route[] = [
       if (!(await store.getRow(params[0]))) throw notFound('No such skill');
       await store.remove(params[0]);
       return json(200, { ok: true });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/api\/crawl-requests$/,
+    handler: async ({ env, url }) => {
+      const p = page(url);
+      const site = url.searchParams.get('site') ? siteArg(url.searchParams.get('site')) : undefined;
+      const { rows, more } = await q.crawlRequests(env.DB, { site, limit: p.limit, offset: p.offset });
+      return json(200, {
+        requests: rows.map(({ row, run }) => {
+          const live = viewOf(row, run);
+          return {
+            id: row.id,
+            site: row.site,
+            url: row.url,
+            install: row.install_hash.slice(0, 8),
+            outcome: row.state,
+            state: live.state,
+            phase: live.phase,
+            pagesFound: live.pagesFound,
+            pagesIndexed: live.pagesIndexed,
+            reason: live.reason,
+            runId: row.run_id,
+            costs: run ? runCosts(run) : null,
+            createdAt: row.created_at,
+          };
+        }),
+        next: p.next(more),
+        capPerDay: requestsDailyMax(env),
+      });
     },
   },
   {
