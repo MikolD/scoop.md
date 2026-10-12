@@ -17,7 +17,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 // The reference server checks the envelope and the caps, and keeps events in memory.
 export const EVENT_NAMES = {
   extension: new Set(['install', 'update', 'browser_update', 'active_daily', 'telemetry_opt_out', 'telemetry_opt_in', 'popup_open', 'popup_close',
-    'scoop_start', 'scoop_result', 'copy', 'rebuild', 'share_result', 'vote', 'report', 'settings_change', 'options_open', 'error']),
+    'scoop_start', 'scoop_result', 'copy', 'rebuild', 'copied_animation_shown', 'crawl_request', 'crawl_wait',
+    'share_result', 'vote', 'report', 'settings_change', 'options_open', 'error']),
   site: new Set(['page_view', 'cta_click', 'uninstall', 'uninstall_reason']),
 };
 const MAX_EVENTS_BODY = 64 * 1024;

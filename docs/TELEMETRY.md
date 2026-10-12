@@ -36,9 +36,12 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `popup_open` | popup | `trigger` (accepted, not sent: MV3 can't tell toolbar from shortcut) |
 | `popup_close` | popup | `durationMs` |
 | `scoop_start` | popup | (none: the site is named on `scoop_result`) |
-| `scoop_result` | popup | `site`, `path`, `outcome` (`copied_ready` / `empty` / `error` / `unsupported_page`), `sourceKinds[]`, `sources`, `sizeBytes`, `truncated`, `durationMs`, `libraryHit`, `libraryWorked`, `isPublic`, `relatedLinks`, `clipboard` |
+| `scoop_result` | popup | `site`, `path`, `outcome` (`copied_ready` / `empty` / `error` / `unsupported_page`), `sourceKinds[]`, `sources`, `sizeBytes`, `truncated`, `durationMs`, `libraryHit`, `libraryWorked`, `indexHit`, `isPublic`, `relatedLinks`, `clipboard` (`sourceKinds` is `["index"]` for a package from the docs index) |
 | `copy` | popup | `site`, `path`, `sizeBytes`, `trigger` (`auto` / `button`) |
 | `rebuild` | popup | `site`, `path` |
+| `copied_animation_shown` | popup | `reducedMotion` (the "copied to your clipboard" moment played; never for private hosts) |
+| `crawl_request` | popup | `site`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` / `error` when the request itself failed) |
+| `crawl_wait` | popup | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it)) |
 | `share_result` | popup | `site`, `path`, `outcome` (`shared` / `duplicate` / `not_shared`), `reason` (`sharing_off`, `private_host`, `signed_in`, or the library's error code) |
 | `vote` | popup | `site`, `path`, `skillId`, `worked`, `ok` |
 | `report` | popup | `site`, `path`, `skillId`, `reason`, `ok` |

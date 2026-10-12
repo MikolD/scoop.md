@@ -8,6 +8,10 @@ import { readFileSync } from 'node:fs';
 import { parseHTML, DOMParser } from 'linkedom';
 import { Store } from '../server/store.js';
 import { createApp } from '../server/app.js';
+import { timing } from '../extension/lib/ux.js';
+
+// The loader and the copied moment are covered in popup-ux.test.js; here they only cost time.
+Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0 });
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(read('../extension/manifest.json'));
@@ -210,7 +214,9 @@ test('telemetry: a public scoop queues scoop_start, scoop_result with the path, 
   assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
   await new Promise((r) => setTimeout(r, 20));
   const events = local.telemetryQueue;
-  assert.deepEqual(events.map((e) => e.name), ['popup_open', 'scoop_start', 'scoop_result', 'copy', 'share_result']);
+  const names = events.map((e) => e.name);
+  assert.deepEqual(names.filter((n) => n !== 'copied_animation_shown'), ['popup_open', 'scoop_start', 'scoop_result', 'copy', 'share_result']);
+  assert.ok(names.indexOf('copied_animation_shown') > names.indexOf('copy'), 'the animation plays after the copy');
   const byName = Object.fromEntries(events.map((e) => [e.name, e.props]));
   assert.deepEqual(byName.scoop_start, {}, 'the site is named once it is known to be public');
   const r = byName.scoop_result;

@@ -29,7 +29,7 @@ const str = (max: number): Spec => ({ t: 'str', max });
 const oneOf = (...values: string[]): Spec => ({ t: 'enum', values });
 const version = str(32);
 
-const SOURCE_KINDS = ['page-md', 'llms', 'llms-full', 'page-html'];
+const SOURCE_KINDS = ['page-md', 'llms', 'llms-full', 'page-html', 'index'];
 
 // name → [source, props]. Everything the extension and the website may send.
 export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
@@ -51,10 +51,14 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
     outcome: oneOf('copied_ready', 'empty', 'error', 'unsupported_page'),
     sourceKinds: { t: 'list', values: SOURCE_KINDS },
     sources: int, sizeBytes: int, truncated: bool, durationMs: int,
-    libraryHit: bool, libraryWorked: int, isPublic: bool, relatedLinks: int, clipboard: bool,
+    libraryHit: bool, libraryWorked: int, indexHit: bool, isPublic: bool, relatedLinks: int, clipboard: bool,
   }],
   copy: ['extension', { site, path, sizeBytes: int, trigger: oneOf('auto', 'button') }],
   rebuild: ['extension', { site, path }],
+  copied_animation_shown: ['extension', { reducedMotion: bool }],
+  // The docs index: asking for a crawl and waiting for it
+  crawl_request: ['extension', { site, state: oneOf('queued', 'running', 'indexing', 'complete', 'rejected', 'failed', 'rate_limited', 'error') }],
+  crawl_wait: ['extension', { durationMs: int, outcome: oneOf('complete', 'rejected', 'failed', 'copied_page', 'closed') }],
   // Library
   share_result: ['extension', { site, path, outcome: oneOf('shared', 'duplicate', 'not_shared'), reason: str(40) }],
   vote: ['extension', { site, path, skillId: { t: 'skill' }, worked: bool, ok: bool }],

@@ -6,13 +6,17 @@ export const DEFAULT_LIBRARY = 'https://api.scoop.md/v1';
 export const BEST_TIMEOUT_MS = 3_000;
 export const SHARE_TIMEOUT_MS = 25_000; // the server fetches every source to verify it
 export const VOTE_TIMEOUT_MS = 8_000;
+export const STATUS_TIMEOUT_MS = 3_000;
+export const CRAWL_TIMEOUT_MS = 8_000;
+export const PACKAGE_TIMEOUT_MS = 10_000;
 
 // telemetry: false sends X-Scoop-Telemetry: off, so the library doesn't record
 // these requests in its usage statistics either.
 export function createLibrary({ baseUrl, installId, client, telemetry = true, fetchImpl = fetch }) {
   const base = (baseUrl || '').replace(/\/+$/, '');
 
-  async function call(method, path, body, timeoutMs) {
+  // as: 'text' reads a successful body as text (GET /packages answers Markdown).
+  async function call(method, path, body, timeoutMs, as = 'json') {
     if (!base) return { ok: false, status: 0, error: { code: 'offline', message: 'No library configured' } };
     const headers = { 'x-scoop-client': client };
     if (!telemetry) headers['x-scoop-telemetry'] = 'off';
@@ -32,9 +36,11 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(timeoutMs),
       });
+      if (res.ok && as === 'text') return { ok: true, status: res.status, data: await res.text() };
       const data = await res.json().catch(() => null);
       if (res.ok) return { ok: true, status: res.status, data };
-      return { ok: false, status: res.status, error: data?.error ?? { code: 'internal', message: `HTTP ${res.status}` } };
+      const retryAfter = Number(res.headers?.get?.('retry-after')) || undefined;
+      return { ok: false, status: res.status, retryAfter, error: data?.error ?? { code: res.status === 429 ? 'rate_limited' : 'internal', message: `HTTP ${res.status}` } };
     } catch (e) {
       const code = e?.name === 'TimeoutError' ? 'timeout' : 'offline';
       return { ok: false, status: 0, error: { code, message: String(e?.message || e) } };
@@ -46,6 +52,12 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
     share: (skill) => call('POST', '/skills', skill, SHARE_TIMEOUT_MS),
     feedback: (id, worked) => call('POST', `/skills/${encodeURIComponent(id)}/feedback`, { worked }, VOTE_TIMEOUT_MS),
     report: (skillId, reason) => call('POST', '/reports', { skillId, reason }, VOTE_TIMEOUT_MS),
+    // The docs index (lib/crawl.js): whether a site is indexed or being crawled,
+    // asking for a crawl, following one, and a package anchored on a page.
+    siteStatus: (site) => call('GET', `/sites/${encodeURIComponent(site)}/status`, undefined, STATUS_TIMEOUT_MS),
+    requestCrawl: (url) => call('POST', '/crawl-requests', { url }, CRAWL_TIMEOUT_MS),
+    crawlRequest: (id) => call('GET', `/crawl-requests/${encodeURIComponent(id)}`, undefined, VOTE_TIMEOUT_MS),
+    pagePackage: (site, url) => call('GET', `/packages?site=${encodeURIComponent(site)}&url=${encodeURIComponent(url)}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),
   };
 }
 

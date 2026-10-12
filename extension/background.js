@@ -1,9 +1,13 @@
 // Service worker: install, update and browser-update events, the daily active
-// ping, the uninstall page's URL, and sending queued usage statistics
-// (lib/telemetry.js). It never touches tabs or page content. Listeners are
-// registered synchronously, as MV3 requires.
+// ping, the uninstall page's URL, sending queued usage statistics
+// (lib/telemetry.js), and following crawl requests the popup was closed on
+// (lib/crawl.js: polled every 30 s, progress on the toolbar badge). It never
+// touches tabs or page content. Listeners are registered synchronously, as
+// MV3 requires.
 
-import { createTelemetry, FLUSH_ALARM, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, uninstallUrl } from './lib/telemetry.js';
+import { createTelemetry, FLUSH_ALARM, getInstallId, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, telemetryEnabled, uninstallUrl } from './lib/telemetry.js';
+import { createLibrary, libraryUrl } from './lib/library.js';
+import { CRAWL_ALARM, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
 const BROWSER_KEY = 'telemetryBrowserVersion';
@@ -29,6 +33,21 @@ async function activePing(t) {
 
 async function ensureAlarms() {
   if (!(await chrome.alarms.get(HOURLY_ALARM))) chrome.alarms.create(HOURLY_ALARM, { delayInMinutes: 1, periodInMinutes: 60 });
+  // A crawl still running when the browser closed: keep following it.
+  const pending = await loadPending(chrome);
+  if (Object.values(pending).some((e) => !isTerminal(e.state)) && !(await chrome.alarms.get(CRAWL_ALARM))) {
+    chrome.alarms.create(CRAWL_ALARM, { periodInMinutes: 0.5 });
+  }
+  await updateBadge(chrome, pending);
+}
+
+async function library() {
+  return createLibrary({
+    baseUrl: await libraryUrl(chrome),
+    installId: await getInstallId(chrome),
+    client: `extension/${chrome.runtime.getManifest().version}`,
+    telemetry: await telemetryEnabled(chrome),
+  });
 }
 
 chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
@@ -62,6 +81,10 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener(({ name }) => {
+  if (name === CRAWL_ALARM) {
+    (async () => pollPending(chrome, await library()))().catch(() => {});
+    return;
+  }
   if (name !== HOURLY_ALARM && name !== FLUSH_ALARM) return;
   (async () => {
     const t = createTelemetry({ beacon: null });

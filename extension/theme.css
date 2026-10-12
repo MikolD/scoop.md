@@ -15,6 +15,7 @@
   /* Space and shape */
   --width: 360px; --options-width: 560px; --pad: 20px; --gap: 12px; --gap-sm: 8px; --card-pad: 16px;
   --radius-card: 16px; --radius: 12px; --radius-sm: 8px; --icon: 18px; --icon-button: 32px;
+  --stage-height: 220px; --celebrate-size: 72px; --reveal-ms: 220ms;
 
   color-scheme: light;
 }
