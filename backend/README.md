@@ -238,6 +238,20 @@ Endpoints (all GET unless noted): `overview`, `runs?status=&site=&cursor=`,
 `library/:site`, `skills/:id`, DELETE `skills/:id`, `reports?all=1`,
 `costs?days=14`.
 
+The **Telemetry** section (usage statistics, docs/TELEMETRY.md) has its own
+endpoints under `/api/telemetry/` (overview, sites, installs and per-install
+deletion, retention, platforms, geo, errors, API usage, website, export).
+
+## Usage telemetry
+
+`POST /v1/events` takes batches of usage events from the extension and
+scoop.md, and the API records its own usage; both go through the
+`telemetry-events` queue into D1 (`events`, `installs`, `install_days`,
+`events_daily`) and a gzipped NDJSON archive in the `TELEMETRY` bucket. Raw
+D1 events are pruned after 180 days by the daily cron. Event catalog, privacy
+rules, tables and resources: docs/TELEMETRY.md. Locally, `TELEMETRY_SALT`
+comes from `.dev.vars`; `wrangler dev` simulates the queue and the bucket.
+
 ## Before the first deploy
 
 Nothing below exists yet; the owner creates it. Never touch unrelated resources
@@ -333,6 +347,22 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
     `crawl-batch-staging` / `crawl-batch`, the static assets, and the
     `ADMIN_AUTH_LIMITER` namespaces `4121` (staging) / `4122` (production)
     (`4120` is dev; change them if another Worker uses those numbers).
+11. Usage telemetry (docs/TELEMETRY.md), per environment, before deploying the
+    Worker and before publishing extension 0.3.0:
+    ```sh
+    for env in staging production; do
+      npx wrangler queues create telemetry-events-$env
+      npx wrangler queues create telemetry-events-dlq-$env
+      npx wrangler r2 bucket create scoop-telemetry-$env
+      openssl rand -base64 32 | npx wrangler secret put TELEMETRY_SALT --env $env
+    done
+    npx wrangler d1 migrations apply DB --env staging --remote      # 0008_telemetry.sql
+    ```
+    The `EVENTS_LIMITER` namespaces `4131` (staging) / `4132` (production)
+    need no creation (`4130` is dev). `TELEMETRY_API_SAMPLE` (vars, default
+    `"1"`) is the share of API requests recorded. Never rotate or reuse
+    `TELEMETRY_SALT` elsewhere: it only salts daily hashes, but a leaked salt
+    would let someone test guesses of an IP against a day's hashes.
 
 ## Deploy
 

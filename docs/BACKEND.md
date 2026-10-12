@@ -170,6 +170,9 @@ Anyone can flag a skill (wrong content, malicious instructions, copyright).
 
 Request: `{ "skillId": "sk_…", "reason": "malicious" | "wrong" | "copyright" | "other", "details": "optional, ≤ 2000 chars" }`. Requires `X-Scoop-Install`. `202 { "ok": true }`. Store it; don't act automatically.
 
+#### `POST /v1/events`
+Usage telemetry from the extension and scoop.md: up to 100 events, 64 KB. Answers `202 {accepted, dropped}`. Catalog, limits and storage: docs/TELEMETRY.md.
+
 #### `DELETE /v1/admin/skills/:id`
 Takedown. Requires `Authorization: Bearer <ADMIN_TOKEN>` (Workers secret; compare in constant time). Marks the skill removed (keep the row for audit, delete the R2 object). `200 { "ok": true }`. Wrong or missing token → `404` (don't reveal the endpoint).
 
