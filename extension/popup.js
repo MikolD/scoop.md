@@ -107,9 +107,11 @@ function scoopResult(outcome, { scoop, text, sections = [], shared = null, clipb
   if (!current || current.done) return;
   current.done = true;
   const isPublic = Boolean(scoop?.isPublic);
+  // Later events about this scoop (copy, share, vote) carry the same path.
+  current.path = isPublic ? pagePath(tab.url) : undefined;
   track('scoop_result', {
     site: current.site,
-    path: isPublic ? pagePath(tab.url) : undefined,
+    path: current.path,
     outcome,
     sourceKinds: [...new Set(sections.map((s) => s.kind))],
     sources: sections.length,
@@ -150,7 +152,7 @@ async function run({ skipLibrary = false } = {}) {
     const ok = await copy(text);
     copied(ok);
     scoopResult('copied_ready', { scoop, text, sections, shared, clipboard: ok });
-    if (ok) track('copy', { site, sizeBytes: sizeOf(text), trigger: 'auto' });
+    if (ok) track('copy', { site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
     note('summary', `${kb(text)} · shared, worked for ${plural(shared.worked, 'person', 'people')}`);
     $('rebuild').hidden = false;
     showFeedback(shared.id);
@@ -163,7 +165,7 @@ async function run({ skipLibrary = false } = {}) {
   const ok = await copy(text);
   copied(ok);
   scoopResult('copied_ready', { scoop, text, sections: scoop.sections, clipboard: ok });
-  if (ok) track('copy', { site, sizeBytes: sizeOf(text), trigger: 'auto' });
+  if (ok) track('copy', { site, path: current.path, sizeBytes: sizeOf(text), trigger: 'auto' });
   note('summary', `${kb(text)} · ${plural(scoop.sections.length, 'source')} on ${site}`);
   await share(scoop);
 }
@@ -171,7 +173,7 @@ async function run({ skipLibrary = false } = {}) {
 const NO_TEXT = 'Could not find any documentation text on this page.';
 
 function shareResult(outcome, reason) {
-  track('share_result', { site: current?.site, outcome, reason });
+  track('share_result', { site: current?.site, path: current?.path, outcome, reason });
 }
 
 async function share(scoop) {
@@ -202,7 +204,7 @@ async function share(scoop) {
 
 async function vote(worked) {
   const res = await library.feedback(skillId, worked);
-  track('vote', { site: current?.site, skillId, worked, ok: res.ok });
+  track('vote', { site: current?.site, path: current?.path, skillId, worked, ok: res.ok });
   note('voted', res.ok
     ? `Thanks. It worked for ${plural(res.data.worked, 'person', 'people')} and didn't for ${res.data.failed}.`
     : "Couldn't record your vote. Try again in a moment.");
@@ -210,7 +212,7 @@ async function vote(worked) {
 
 async function report(reason) {
   const res = await library.report(skillId, reason);
-  track('report', { site: current?.site, skillId, reason, ok: res.ok });
+  track('report', { site: current?.site, path: current?.path, skillId, reason, ok: res.ok });
   $('report').hidden = true;
   note('voted', res.ok ? 'Reported. Thanks, we will review it.' : "Couldn't send the report. Try again in a moment.");
 }
@@ -247,13 +249,13 @@ $('theme').onclick = async () => {
 };
 $('copy').onclick = async () => {
   if (!(await writeClipboard(clipboardText))) return status("Couldn't copy. Try again.", 'err');
-  track('copy', { site: current?.site, sizeBytes: sizeOf(clipboardText), trigger: 'button' });
+  track('copy', { site: current?.site, path: current?.path, sizeBytes: sizeOf(clipboardText), trigger: 'button' });
   status('Copied again.');
   $('copy-label').textContent = 'Copied';
   setTimeout(() => { $('copy-label').textContent = 'Copy for your agent'; }, 1500);
 };
 $('rebuild').onclick = () => {
-  track('rebuild', { site: current?.site });
+  track('rebuild', { site: current?.site, path: current?.path });
   return run({ skipLibrary: true }).catch(fail);
 };
 $('settings').onclick = (e) => { e.preventDefault(); chrome.runtime.openOptionsPage(); };

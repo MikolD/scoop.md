@@ -12,9 +12,9 @@ const events = [
   ['active_daily', 'Once a day while the browser runs: nothing beyond the common fields below.'],
   ['popup_open, popup_close', 'You opened the popup; when it closes, how long it was open.'],
   ['scoop_start, scoop_result', "A scoop began and how it ended: the site's hostname, the page's path (public pages only), the outcome, which kinds of sources were used and how many, the package size, whether it was cut for length, how long it took, whether the shared library had it (and its \"worked\" count), whether the page was public, and the number of related links."],
-  ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname and size.'],
+  ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname, the path (public pages only) and the size.'],
   ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, signed-in page, the library refused it).'],
-  ['vote, report', "You voted or reported: the hostname, the scoop's ID, your vote or reason."],
+  ['vote, report', "You voted or reported: the hostname and path (public pages only), the scoop's ID, your vote or reason."],
   ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
   ['telemetry_opt_out, telemetry_opt_in', 'You switched usage statistics off or on.'],
   ['error', 'Something failed: where, an error code and a short message with URLs and hostnames removed.'],
@@ -109,7 +109,7 @@ const events = [
     </p>
     <table>
       <thead><tr><th>Event</th><th>What it records</th></tr></thead>
-      <tbody>{events.map(([name, what]) => <tr><td><code>{name}</code></td><td>{what}</td></tr>)}</tbody>
+      <tbody>{events.map(([names, what]) => <tr><td>{names.split(', ').map((n) => <code class="event">{n}</code>)}</td><td>{what}</td></tr>)}</tbody>
     </table>
     <p>
       Every event also carries the time, a random ID for that popup session, your install ID, the extension version, the
@@ -241,8 +241,9 @@ const events = [
     border-bottom: 1px solid var(--rule);
   }
 
-  td:first-child code {
-    overflow-wrap: anywhere;
+  .event {
+    display: block;
+    white-space: nowrap;
   }
 
   .page {

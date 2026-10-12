@@ -408,6 +408,7 @@ test('admin telemetry: overview, sites, installs, retention, platforms, geograph
     assert.equal(o.body.funnel.events.copied, 1);
     assert.equal(o.body.funnel.events.voted, 1);
     assert.deepEqual(o.body.funnel.installs, { popupOpen: 2, scooped: 2, copied: 1, voted: 1 });
+    assert.deepEqual(o.body.funnel.sessions, { popupOpen: 2, scooped: 2, copied: 1, voted: 1 });
     assert.equal(o.body.library.hitRate, 0.5);
     assert.deepEqual(o.body.shares, [{ outcome: 'duplicate', n: 1 }]);
     assert.deepEqual(o.body.averages, { sizeBytes: 2000, durationMs: 2000 });

@@ -221,8 +221,8 @@ test('telemetry: a public scoop queues scoop_start, scoop_result with the path, 
   assert.equal(r.libraryHit, false);
   assert.equal(r.clipboard, true);
   assert.ok(r.sizeBytes > 500 && r.durationMs >= 0);
-  assert.deepEqual(byName.copy, { site: 'docs.example.com', sizeBytes: r.sizeBytes, trigger: 'auto' });
-  assert.deepEqual(byName.share_result, { site: 'docs.example.com', outcome: 'not_shared', reason: 'sharing_off' });
+  assert.deepEqual(byName.copy, { site: 'docs.example.com', path: '/docs/guide', sizeBytes: r.sizeBytes, trigger: 'auto' });
+  assert.deepEqual(byName.share_result, { site: 'docs.example.com', path: '/docs/guide', outcome: 'not_shared', reason: 'sharing_off' });
   assert.ok(events.every((e) => !JSON.stringify(e).includes('Widgets')), 'no page content');
 });
 
@@ -234,6 +234,7 @@ test('telemetry: a page that only renders signed in records the hostname, never 
   assert.equal(result.site, 'docs.example.com');
   assert.equal(result.isPublic, false);
   assert.equal(result.path, undefined);
+  assert.ok(local.telemetryQueue.every((e) => e.props.path === undefined), 'no event about it has a path');
   assert.ok(!JSON.stringify(local.telemetryQueue).includes('/docs/missing'));
 });
 

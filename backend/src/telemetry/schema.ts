@@ -51,12 +51,12 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
     sources: int, sizeBytes: int, truncated: bool, durationMs: int,
     libraryHit: bool, libraryWorked: int, isPublic: bool, relatedLinks: int, clipboard: bool,
   }],
-  copy: ['extension', { site, sizeBytes: int, trigger: oneOf('auto', 'button') }],
-  rebuild: ['extension', { site }],
+  copy: ['extension', { site, path, sizeBytes: int, trigger: oneOf('auto', 'button') }],
+  rebuild: ['extension', { site, path }],
   // Library
-  share_result: ['extension', { site, outcome: oneOf('shared', 'duplicate', 'not_shared'), reason: str(40) }],
-  vote: ['extension', { site, skillId: { t: 'skill' }, worked: bool, ok: bool }],
-  report: ['extension', { site, skillId: { t: 'skill' }, reason: oneOf('wrong', 'malicious', 'copyright', 'other'), ok: bool }],
+  share_result: ['extension', { site, path, outcome: oneOf('shared', 'duplicate', 'not_shared'), reason: str(40) }],
+  vote: ['extension', { site, path, skillId: { t: 'skill' }, worked: bool, ok: bool }],
+  report: ['extension', { site, path, skillId: { t: 'skill' }, reason: oneOf('wrong', 'malicious', 'copyright', 'other'), ok: bool }],
   // Settings
   settings_change: ['extension', { key: oneOf('share', 'theme', 'telemetry'), value: oneOf('true', 'false', 'light', 'dark', 'system') }],
   options_open: ['extension', {}],

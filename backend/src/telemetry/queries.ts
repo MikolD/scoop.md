@@ -35,7 +35,12 @@ export async function overview(db: D1Database, days: number, now = new Date()) {
     all(db, `SELECT name, outcome, SUM(count) AS n FROM events_daily
              WHERE day >= ? AND source = 'extension' AND name IN ('popup_open', 'scoop_result', 'copy', 'vote')
              GROUP BY name, outcome`, since),
+    // Each step counted once per popup session, and once per install.
     first(db, `SELECT
+        COUNT(DISTINCT CASE WHEN name = 'popup_open' THEN install_id || ':' || session_id END) AS s_popup_open,
+        COUNT(DISTINCT CASE WHEN ${SCOOP_OK} THEN install_id || ':' || session_id END) AS s_scooped,
+        COUNT(DISTINCT CASE WHEN name = 'copy' THEN install_id || ':' || session_id END) AS s_copied,
+        COUNT(DISTINCT CASE WHEN name = 'vote' THEN install_id || ':' || session_id END) AS s_voted,
         COUNT(DISTINCT CASE WHEN name = 'popup_open' THEN install_id END) AS popup_open,
         COUNT(DISTINCT CASE WHEN ${SCOOP_OK} THEN install_id END) AS scooped,
         COUNT(DISTINCT CASE WHEN name = 'copy' THEN install_id END) AS copied,
@@ -58,6 +63,7 @@ export async function overview(db: D1Database, days: number, now = new Date()) {
     active: { dau: num(active.dau), wau: num(active.wau), mau: num(active.mau) },
     funnel: {
       events: { popupOpen: count('popup_open'), scooped: count('scoop_result', 'copied_ready'), copied: count('copy'), voted: count('vote') },
+      sessions: { popupOpen: num(funnelInstalls.s_popup_open), scooped: num(funnelInstalls.s_scooped), copied: num(funnelInstalls.s_copied), voted: num(funnelInstalls.s_voted) },
       installs: { popupOpen: num(funnelInstalls.popup_open), scooped: num(funnelInstalls.scooped), copied: num(funnelInstalls.copied), voted: num(funnelInstalls.voted) },
       votes: { worked: count('vote', 'worked'), failed: count('vote', 'failed') },
     },

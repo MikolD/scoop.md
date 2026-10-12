@@ -185,3 +185,5 @@ td .meter { min-width: 80px; margin-top: 6px; }
 .heat-3 { background: color-mix(in srgb, var(--accent) 45%, var(--card)); }
 .heat-4 { background: color-mix(in srgb, var(--accent) 65%, var(--card)); color: var(--on-accent); }
 .heat-5 { background: var(--accent); color: var(--on-accent); }
+td.url .mono { overflow-wrap: normal; word-break: normal; }
+td.url { min-width: 140px; }
