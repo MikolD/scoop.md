@@ -433,6 +433,7 @@ test('admin telemetry: overview, sites, installs, retention, platforms, geograph
     assert.deepEqual(ret.body.cohorts.map((c: { cohort: string; size: number }) => [c.cohort, c.size]), [['2026-10-05', 1], ['2026-10-12', 1]]);
     assert.deepEqual(ret.body.cohorts[0].active.slice(0, 3), [1, 1, 0], 'active in its first week and the next');
     assert.deepEqual(ret.body.cohorts[1].active.slice(0, 2), [1, 0]);
+    assert.deepEqual(ret.body.cohorts.map((c: { elapsed: number }) => c.elapsed), [1, 0]);
 
     const p = await admin(s.env, '/api/telemetry/platforms');
     assert.deepEqual(p.body.versions.map((v: { value: string }) => v.value).sort(), ['0.2.9', '0.3.0']);

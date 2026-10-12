@@ -20,7 +20,7 @@ async function first<T = Row>(db: D1Database, sql: string, ...params: (string | 
 
 const SCOOP_OK = `name = 'scoop_result' AND outcome = 'copied_ready'`;
 
-export async function overview(db: D1Database, days: number, now = new Date()) {
+export async function overview(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const today = dayOf(now);
   const [installs, uninstalls, dau, totals, active, funnel, funnelInstalls, library, shares, sizes] = await Promise.all([
@@ -73,7 +73,7 @@ export async function overview(db: D1Database, days: number, now = new Date()) {
   };
 }
 
-export async function topSites(db: D1Database, days: number, now = new Date()) {
+export async function topSites(db: D1Database, days: number, now = new Date(Date.now())) {
   return all(db, `SELECT site,
       SUM(name = 'scoop_result') AS scoops,
       SUM(${SCOOP_OK}) AS copied_ready,
@@ -88,7 +88,7 @@ export async function topSites(db: D1Database, days: number, now = new Date()) {
     GROUP BY site ORDER BY scoops DESC, installs DESC LIMIT 200`, dayOf(now, days - 1));
 }
 
-export async function siteDetail(db: D1Database, site: string, days: number, now = new Date()) {
+export async function siteDetail(db: D1Database, site: string, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const [summary, perDay, paths, outcomes, shares, sources, queries, best, recent] = await Promise.all([
     first(db, `SELECT SUM(name = 'scoop_result') AS scoops, SUM(name = 'copy') AS copies, COUNT(DISTINCT install_id) AS installs,
@@ -152,7 +152,7 @@ export async function installDetail(db: D1Database, installId: string) {
 }
 
 // Weekly cohorts by first-seen week (Monday) × weeks since, counted from install_days.
-export async function retention(db: D1Database, weeks: number, now = new Date()) {
+export async function retention(db: D1Database, weeks: number, now = new Date(Date.now())) {
   const since = dayOf(now, weeks * 7);
   const cohort = `date(first_seen, '-6 days', 'weekday 1')`;
   const [sizes, cells] = await Promise.all([
@@ -166,12 +166,14 @@ export async function retention(db: D1Database, weeks: number, now = new Date())
     cohorts: sizes.map((s) => ({
       cohort: s.cohort,
       size: s.n,
+      // Weeks that have started since the cohort's Monday; later columns are the future.
+      elapsed: Math.floor((Date.parse(dayOf(now)) - Date.parse(s.cohort)) / (7 * DAY_MS)),
       active: Array.from({ length: weeks + 1 }, (_, w) => cells.find((c) => c.cohort === s.cohort && c.week === w)?.n ?? 0),
     })),
   };
 }
 
-export async function platforms(db: D1Database, days: number, now = new Date()) {
+export async function platforms(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const by = (col: string) =>
     all(db, `SELECT COALESCE(${col}, '') AS value, COUNT(*) AS installs FROM installs WHERE last_seen >= ? AND uninstalled_at IS NULL
@@ -186,7 +188,7 @@ export async function platforms(db: D1Database, days: number, now = new Date()) 
   return { days, since, versions, browsers, browserVersions, oses, arches, locales, timezones, adoption, websiteBrowsers: uaBrowsers };
 }
 
-export async function geography(db: D1Database, days: number, now = new Date()) {
+export async function geography(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const [installs, events, website, networks] = await Promise.all([
     all(db, `SELECT COALESCE(country, '') AS country, COUNT(*) AS installs, SUM(uninstalled_at IS NOT NULL) AS uninstalled
@@ -200,7 +202,7 @@ export async function geography(db: D1Database, days: number, now = new Date()) 
   return { days, since, installs, events, website, networks };
 }
 
-export async function errors(db: D1Database, days: number, now = new Date()) {
+export async function errors(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const [byCode, perDay, failures, recent] = await Promise.all([
     all(db, `SELECT json_extract(props, '$.where') AS where_, outcome AS code, COALESCE(ext_version, '') AS version, COUNT(*) AS n,
@@ -215,7 +217,7 @@ export async function errors(db: D1Database, days: number, now = new Date()) {
   return { days, since, byCode, perDay, scoopFailures: failures, recent };
 }
 
-export async function apiUsage(db: D1Database, days: number, now = new Date()) {
+export async function apiUsage(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const q = `json_extract(props, '$.q')`;
   const [routes, queries, zero, packages, best, clients] = await Promise.all([
@@ -237,7 +239,7 @@ export async function apiUsage(db: D1Database, days: number, now = new Date()) {
   return { days, since, routes, queries, zeroResults: zero, packages, best, clients };
 }
 
-export async function website(db: D1Database, days: number, now = new Date()) {
+export async function website(db: D1Database, days: number, now = new Date(Date.now())) {
   const since = dayOf(now, days - 1);
   const pv = `day >= ? AND source = 'site' AND name = 'page_view'`;
   const [perDay, paths, referrers, utm, uninstalls, reasons, ctas] = await Promise.all([
@@ -304,7 +306,7 @@ export function exportTable(db: D1Database, table: string, from: string, to: str
 // Everything for one install ID leaves D1; its ID is recorded so the consumer
 // refuses its events from now on, and an R2 tombstone makes every archive
 // export skip it. Rollups hold no install IDs and stay.
-export async function deleteInstall(db: D1Database, bucket: R2Bucket, installId: string, now = new Date()) {
+export async function deleteInstall(db: D1Database, bucket: R2Bucket, installId: string, now = new Date(Date.now())) {
   const at = now.toISOString();
   const eventsDeleted = num((await first(db, 'SELECT COUNT(*) AS n FROM events WHERE install_id = ?', installId)).n);
   await db.batch([

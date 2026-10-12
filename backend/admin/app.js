@@ -1189,7 +1189,7 @@ async function telemetryRetention(r) {
       { label: 'Installs', get: (c) => fmtInt(c.size), cls: 'num' },
       ...cols.map((w) => ({
         label: `W${w}`,
-        get: (c) => (w < c.active.length ? h('span', { class: heat(c.active[w], c.size), title: `${c.active[w]} of ${c.size}` }, pct(c.active[w], c.size)) : ''),
+        get: (c) => (w <= c.elapsed ? h('span', { class: heat(c.active[w], c.size), title: `${c.active[w]} of ${c.size}` }, pct(c.active[w], c.size)) : ''),
         cls: 'num',
       })),
     ], d.cohorts, 'No installs in this window.'),
