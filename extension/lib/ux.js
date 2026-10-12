@@ -15,6 +15,9 @@ export const timing = {
   packageRetryTimeoutMs: 4_000,
   // Indexing with no progress for this long: try the index for this page.
   stallMs: 60_000,
+  // While the popup is open, how often the background crawl is checked.
+  followMs: 5_000,
+  searchDebounceMs: 300,
 };
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

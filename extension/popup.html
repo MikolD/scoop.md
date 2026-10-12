@@ -54,18 +54,48 @@
       <p class="stage-text">Copied to your clipboard</p>
     </section>
 
-    <section id="waiting" class="card waiting" hidden>
-      <p class="wait-title">Figuring out the docs for <span id="wait-site"></span>…</p>
-      <p id="wait-phase" class="meta" aria-live="polite">Getting started</p>
-      <progress id="wait-progress" max="100" aria-labelledby="wait-phase"></progress>
-      <p id="wait-count" class="meta" hidden></p>
-      <p class="meta">You can close this. We'll keep going, and the scoop.md icon shows ✓ when the docs are ready.</p>
-      <button id="copy-now" class="small" type="button">Copy this page now</button>
-    </section>
-
     <p id="announce" class="sr" aria-live="polite"></p>
 
-    <div id="content" hidden>
+    <div id="tabs" class="tabs" role="tablist" aria-label="What to copy" hidden>
+      <button id="tab-page" class="tab" role="tab" type="button" aria-selected="true" aria-controls="content">This page</button>
+      <button id="tab-overview" class="tab" role="tab" type="button" aria-selected="false" aria-controls="overview" tabindex="-1">Overview</button>
+      <button id="tab-search" class="tab" role="tab" type="button" aria-selected="false" aria-controls="search" tabindex="-1">Search</button>
+    </div>
+
+    <section id="overview" class="card panel" role="tabpanel" aria-labelledby="tab-overview" hidden>
+      <div id="overview-off" class="off" hidden>
+        <p class="off-title" id="overview-off-title"></p>
+        <p id="overview-off-status" class="meta"></p>
+      </div>
+      <div id="overview-on" hidden>
+        <p class="panel-title">Topics in the <span class="site-name"></span> docs</p>
+        <p id="overview-meta" class="meta"></p>
+        <ul id="overview-topics" class="topics"></ul>
+        <p id="overview-llms-title" class="panel-sub" hidden>From the site's llms.txt</p>
+        <pre id="overview-llms" class="excerpt" hidden></pre>
+        <p id="overview-status" class="meta" role="status"></p>
+        <button id="copy-overview" class="copy" type="button" disabled>Copy overview</button>
+      </div>
+    </section>
+
+    <section id="search" class="card panel" role="tabpanel" aria-labelledby="tab-search" hidden>
+      <div id="search-off" class="off" hidden>
+        <p class="off-title" id="search-off-title"></p>
+        <p id="search-off-status" class="meta"></p>
+      </div>
+      <div id="search-on" hidden>
+        <label class="sr" for="search-q">Search the docs</label>
+        <input id="search-q" class="search-q" type="search" autocomplete="off" spellcheck="false" placeholder="Search the docs">
+        <p id="search-status" class="meta" role="status"></p>
+        <ul id="search-results" class="results"></ul>
+        <div class="search-actions">
+          <button id="copy-selected" class="copy" type="button" disabled>Copy selected</button>
+          <button id="copy-all" class="small" type="button" disabled>Copy all results</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="content" role="tabpanel" aria-labelledby="tab-page" hidden>
     <section class="card hero">
       <div class="head">
         <p id="status" class="busy" role="status">Scooping this page…</p>
@@ -94,6 +124,7 @@
 
     <section class="card foot">
       <p id="crawl-note" class="meta" hidden></p>
+      <button id="upgrade" class="small primary-outline" type="button" hidden>Upgrade to full docs</button>
       <p id="share" class="meta" hidden></p>
       <div id="feedback" hidden>
         <span class="label">Did it work?</span>

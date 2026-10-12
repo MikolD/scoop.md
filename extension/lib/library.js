@@ -9,6 +9,9 @@ export const VOTE_TIMEOUT_MS = 8_000;
 export const STATUS_TIMEOUT_MS = 3_000;
 export const CRAWL_TIMEOUT_MS = 8_000;
 export const PACKAGE_TIMEOUT_MS = 10_000;
+export const QUICK_TIMEOUT_MS = 2_500;
+export const SEARCH_TIMEOUT_MS = 5_000;
+export const INDEX_TIMEOUT_MS = 15_000;
 
 // telemetry: false sends X-Scoop-Telemetry: off, so the library doesn't record
 // these requests in its usage statistics either.
@@ -58,6 +61,31 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
     requestCrawl: (url) => call('POST', '/crawl-requests', { url }, CRAWL_TIMEOUT_MS),
     crawlRequest: (id) => call('GET', `/crawl-requests/${encodeURIComponent(id)}`, undefined, VOTE_TIMEOUT_MS),
     pagePackage: (site, url, { timeoutMs = PACKAGE_TIMEOUT_MS } = {}) => call('GET', `/packages?site=${encodeURIComponent(site)}&url=${encodeURIComponent(url)}`, undefined, timeoutMs, 'text'),
+    // Instant: what the server finds for a page right away (llms.txt files and
+    // the page's .md twin, also on docs.<domain>), without crawling.
+    quick: (url) => call('GET', `/quick?url=${encodeURIComponent(url)}`, undefined, QUICK_TIMEOUT_MS),
+    // Search tab and Overview tab, for indexed sites.
+    search: (site, q, limit = 20) => call('GET', `/search?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}&limit=${limit}`, undefined, SEARCH_TIMEOUT_MS),
+    queryPackage: (site, q) => call('GET', `/packages?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),
+    topics: (site) => call('GET', `/sites/${encodeURIComponent(site)}/topics`, undefined, SEARCH_TIMEOUT_MS),
+    // Every indexed site with its page count, for the toolbar badge. With the
+    // ETag of the copy we have, an unchanged list answers 304 and isn't sent again.
+    async sitesIndex(etag) {
+      if (!base) return { ok: false, status: 0 };
+      try {
+        const res = await fetchImpl(`${base}/sites/index`, {
+          headers: { 'x-scoop-client': client, ...(telemetry ? {} : { 'x-scoop-telemetry': 'off' }), ...(etag ? { 'if-none-match': etag } : {}) },
+          credentials: 'omit',
+          cache: 'no-cache',
+          signal: AbortSignal.timeout(INDEX_TIMEOUT_MS),
+        });
+        if (res.status === 304) return { ok: true, status: 304, notModified: true, etag };
+        if (!res.ok) return { ok: false, status: res.status };
+        return { ok: true, status: res.status, data: await res.json(), etag: res.headers.get('etag') };
+      } catch {
+        return { ok: false, status: 0 };
+      }
+    },
   };
 }
 

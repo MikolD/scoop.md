@@ -1,10 +1,12 @@
 // Crawl requests: when a public docs site isn't in the library's docs index
-// yet, the popup asks for a crawl (POST /crawl-requests) and follows it
-// (GET /crawl-requests/:id every 2 s). The request is kept in
-// chrome.storage.local from the moment it exists, so if the popup closes the
-// service worker keeps polling it every 30 s (chrome.alarms' minimum) and
-// shows progress on the toolbar badge: "…" while running, "✓" when ready.
-// Reopening the popup on that site resumes the wait or delivers the result.
+// yet, the popup asks for a crawl (POST /crawl-requests) in the background,
+// after copying the best package it has. The request is kept in
+// chrome.storage.local; the service worker polls it every 30 s
+// (chrome.alarms' minimum) and the toolbar badge shows it on that site's
+// tabs: "…" while running, "✓" when ready (lib/badge.js). Reopening the popup
+// on that site copies the full docs.
+
+import { loadSites, refreshTabs } from './badge.js';
 
 export const PENDING_KEY = 'crawlPending';
 export const CRAWL_ALARM = 'crawl-poll';
@@ -12,7 +14,6 @@ export const CRAWL_ALARM = 'crawl-poll';
 // this long to be picked up by the popup.
 export const PENDING_TTL_MS = 2 * 3_600_000;
 export const READY_TTL_MS = 24 * 3_600_000;
-export const BADGE_COLOR = '#c2410c';
 
 const TERMINAL = new Set(['complete', 'rejected', 'failed']);
 export const isTerminal = (state) => TERMINAL.has(state);
@@ -89,17 +90,15 @@ export function live(pending, now = Date.now()) {
     : isTerminal(e.state) || now - (e.startedAt ?? now) <= PENDING_TTL_MS)));
 }
 
-// "✓" when a finished crawl is waiting to be picked up, "…" while one runs.
-// One badge for the whole toolbar: knowing which tabs show a site would mean
-// watching every tab's navigation, which the extension doesn't do.
+// Re-draws the per-tab badges (lib/badge.js) after a crawl changed. Returns
+// what the crawls amount to: "✓" when a finished one is waiting to be picked
+// up, "…" while one runs (a crawl whose pages were already delivered never ✓).
 export async function updateBadge(chromeApi, pending, now = Date.now()) {
-  const entries = Object.values(live(pending ?? await loadPending(chromeApi), now));
-  // A crawl whose pages were already delivered never shows ✓.
+  const kept = live(pending ?? await loadPending(chromeApi), now);
+  const entries = Object.values(kept);
   const text = entries.some((e) => e.state === 'complete' && !e.delivered) ? '✓' : entries.some((e) => !isTerminal(e.state)) ? '…' : '';
-  try {
-    await chromeApi.action?.setBadgeBackgroundColor?.({ color: BADGE_COLOR });
-    await chromeApi.action?.setBadgeText?.({ text });
-  } catch {}
+  const { sites } = await loadSites(chromeApi);
+  await refreshTabs(chromeApi, { sites, pending: kept });
   return text;
 }
 

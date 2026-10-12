@@ -8,14 +8,19 @@ Behind it is a shared library: once a package for a site has helped someone's ag
 
 ## How a click works
 
-The popup shows a short loader (at least 600 ms) while it asks the library and builds the page locally in parallel, copies as soon as a package is ready, plays a brief "copied to your clipboard" moment (a still check with reduced motion), then shows the package.
+The popup shows a short loader (at least 600 ms), copies the best package it has right then, plays a brief "copied to your clipboard" moment (a still check with reduced motion), then shows it. It never makes you wait for a crawl.
 
-1. **Docs index.** If the site's docs are indexed, copy the library's package anchored on this page (`GET /v1/packages`). If the site has never been seen and the page is public (and sharing is on), ask for a crawl (`POST /v1/crawl-requests`) and show "Figuring out the docs for <site>…" with progress, polling every 2 s; "Copy this page now" copies the local build meanwhile. Close the popup and the service worker keeps polling every 30 s, with "…" then "✓" on the toolbar badge; reopen it on that site to get the result. Not developer docs, a failed crawl or a busy index: the local build, with a short note.
-2. **Shared library.** Else, if the library has a skill for this site that people confirmed worked, copy it (plus the current page if the skill doesn't already cover it). A never-seen site gets a crawl request in the background too, so the next scoop finds it indexed.
-3. **What the site already publishes.** Look for the page's Markdown twin (`<page>.md`), `llms.txt` and `llms-full.txt`, at the site root and under the docs prefix. Files over 2 MB are not downloaded; the agent gets the link instead.
-4. **Extraction.** Otherwise convert the page's main content to Markdown, and list related pages from the site's navigation so the agent can fetch more.
-5. **Copy.** The package opens with its sources and a note telling the agent to treat the material as reference, not instructions.
-6. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
+1. **Docs index.** If the site's docs are indexed, copy the library's package anchored on this page (`GET /v1/packages`).
+2. **Shared library.** Else, if the library has a skill for this site that people confirmed worked, copy it (plus the current page if the skill doesn't already cover it).
+3. **Instant.** Else the page built here, plus what the library finds for it right away (`GET /v1/quick`: llms.txt files and the page's `.md` twin, also on `docs.<domain>`), fetched without cookies.
+4. **What the site already publishes.** Look for the page's Markdown twin (`<page>.md`), `llms.txt` and `llms-full.txt`, at the site root and under the docs prefix. Files over 2 MB are not downloaded; the agent gets the link instead.
+5. **Extraction.** Otherwise convert the page's main content to Markdown, and list related pages from the site's navigation so the agent can fetch more.
+6. **Copy.** The package opens with its sources and a note telling the agent to treat the material as reference, not instructions.
+7. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
+
+A site that isn't indexed yet (public page, sharing on) is indexed in the background (`POST /v1/crawl-requests`): one quiet line says so, the service worker follows the request every 30 s, and the icon shows ✓ on that site's tabs when it's ready; "Upgrade to full docs" (or reopening) then copies the indexed package.
+
+The toolbar icon shows, per tab, how many docs pages are indexed for the tab's site, looked up in `GET /v1/sites/index` (downloaded every 6 hours with If-None-Match; no request per page). The popup's **Overview** and **Search** tabs work on indexed sites: the topic tree and llms.txt with "Copy overview", or search with checkboxes, "Copy selected" and "Copy all results".
 
 Only material fetched without your cookies is shared with the library. If a page only renders when you're signed in, you still get it on your clipboard, but it's never uploaded.
 
@@ -51,8 +56,9 @@ extension/            Chrome MV3 extension
   lib/scoop.js        builds a page's sections (shared by the popup and check-live)
   lib/library.js      api.scoop.md/v1 client; never throws, short timeouts
   lib/package.js      assembles the clipboard document within a size budget
-  lib/crawl.js        crawl requests: progress labels, pending requests, the badge
-  lib/ux.js           popup timing (loader minimum, copied moment, poll interval)
+  lib/crawl.js        background crawl requests: progress labels, pending requests
+  lib/badge.js        the per-tab toolbar badge and the downloaded sites index
+  lib/ux.js           popup timing (loader minimum, copied moment, follow-up and search debounce)
   popup.js            the click flow
   STORE.md            Chrome Web Store listing, permissions, data disclosures
 server/               shared library (Node, no dependencies, JSON file store)

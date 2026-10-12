@@ -56,6 +56,13 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   copy: ['extension', { site, path, sizeBytes: int, trigger: oneOf('auto', 'button') }],
   rebuild: ['extension', { site, path }],
   copied_animation_shown: ['extension', { reducedMotion: bool }],
+  // Tabs (0.5.0): Overview and Search on indexed sites. search never carries the query.
+  tab_switch: ['extension', { tab: oneOf('page', 'overview', 'search') }],
+  search: ['extension', { site, qLen: int, results: int }],
+  copy_overview: ['extension', { site }],
+  copy_search: ['extension', { site, count: int }],
+  // How many page-count badges the service worker showed in an hour: one number, no sites.
+  badge_count_shown: ['extension', { count: int }],
   // The docs index: asking for a crawl and waiting for it
   crawl_request: ['extension', { site, state: oneOf('queued', 'running', 'indexing', 'complete', 'rejected', 'failed', 'rate_limited', 'error') }],
   crawl_wait: ['extension', { durationMs: int, outcome: oneOf('complete', 'rejected', 'failed', 'copied_page', 'closed', 'timeout', 'stalled_index') }],

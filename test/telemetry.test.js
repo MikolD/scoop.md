@@ -41,6 +41,8 @@ function fakeChrome({ telemetry, installType = 'normal', local = {}, notice = tr
       get: async (name) => alarms.find((a) => a.name === name),
       onAlarm: on('alarms.onAlarm'),
     },
+    tabs: { onActivated: on('tabs.onActivated'), onUpdated: on('tabs.onUpdated'), get: async () => ({}), query: async () => [] },
+    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
   };
   return { chrome, sync, local, alarms, listeners };
 }

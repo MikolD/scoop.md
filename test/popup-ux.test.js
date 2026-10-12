@@ -1,8 +1,9 @@
-// The popup's stages and the docs index: loader → copied → content, the
-// three package sources (index, shared skill, local), and crawl requests
-// (waiting, "Copy this page now", fallbacks, resuming after a reopen, and the
-// service worker's badge). The real popup.js runs against a mock of the
-// library's contract (helpers/mock-library.js) with chrome.* stubbed.
+// The popup (0.5.0): loader → copied → content with the best package right
+// away (index, shared skill, or the instant build: the page plus /quick
+// sources), indexing in the background with "Upgrade to full docs", the
+// Overview and Search tabs, and the service worker: crawl follow-up and the
+// per-tab docs-count badge. The real popup.js and background.js run against a
+// mock of the library's contract (helpers/mock-library.js), chrome.* stubbed.
 
 import { test, before, after, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +12,8 @@ import { readFileSync } from 'node:fs';
 import { parseHTML, DOMParser } from 'linkedom';
 import { startMockLibrary, packageFor } from './helpers/mock-library.js';
 import { sleep, stageLog, timing } from '../extension/lib/ux.js';
-import { PENDING_KEY, CRAWL_ALARM, READY_TTL_MS, live, progressText, pollPending, rememberCrawl, forgetCrawl, updateBadge } from '../extension/lib/crawl.js';
+import { PENDING_KEY, CRAWL_ALARM, READY_TTL_MS, live, progressText, pollPending, rememberCrawl, forgetCrawl } from '../extension/lib/crawl.js';
+import { SITES_KEY, SITES_ALARM, badgeFor, compactCount, refreshSites } from '../extension/lib/badge.js';
 import { createLibrary } from '../extension/lib/library.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -19,6 +21,8 @@ const MANIFEST = JSON.parse(read('../extension/manifest.json'));
 const GUIDE = read('./fixtures/nav-leak.html');
 const SITE = 'docs.example.com';
 const PAGE = `https://${SITE}/docs/guide`;
+// A docs subdomain the server's /quick finds for SITE (served by the docs server under /sub).
+const SUB = 'docs.example.org';
 
 let docs; let docsUrl; let mock;
 let failPackages = false;
@@ -31,6 +35,14 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
       return res.end(GUIDE);
     }
+    if (req.url === '/sub/guide.md') {
+      res.writeHead(200, { 'content-type': 'text/markdown' });
+      return res.end('# Guide (Markdown twin)\n\nThe Markdown version of the guide, from the docs subdomain.\n');
+    }
+    if (req.url === '/sub/llms.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('# Example docs\n\n> The llms.txt index of the example docs.\n\n- [Guide](https://docs.example.org/guide.md)\n');
+    }
     res.writeHead(404); res.end('not found');
   });
   await new Promise((r) => docs.listen(0, '127.0.0.1', r));
@@ -39,6 +51,7 @@ before(async () => {
   globalThis.fetch = (url, init) => {
     const s = String(url);
     if (s.startsWith(`https://${SITE}`)) return realFetch(s.replace(`https://${SITE}`, docsUrl), init);
+    if (s.startsWith(`https://${SUB}`)) return realFetch(s.replace(`https://${SUB}`, `${docsUrl}/sub`), init);
     if (s.startsWith('https://api.scoop.md/v1')) return realFetch(s.replace('https://api.scoop.md/v1', mock.url), init);
     if (s.includes('/v1/packages')) packageAttempts++;
     if (failPackages && s.includes('/v1/packages')) return Promise.reject(new TypeError('Failed to fetch'));
@@ -51,7 +64,7 @@ after(() => { globalThis.fetch = realFetch; docs.close(); mock?.close(); });
 beforeEach(() => {
   failPackages = false;
   packageAttempts = 0;
-  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000, packageRetryMs: [10, 20, 40], stallMs: 60_000 });
+  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, packageRetryMs: [10, 20, 40], followMs: 15, searchDebounceMs: 10 });
   stageLog.length = 0;
 });
 
@@ -76,7 +89,7 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   document.execCommand ??= () => false;
   globalThis.getSelection ??= () => null;
   // Every text written to the live regions, in order.
-  const writes = { announce: [], 'wait-phase': [] };
+  const writes = { announce: [] };
   for (const id of Object.keys(writes)) {
     const el = document.getElementById(id);
     let proto = el;
@@ -86,8 +99,8 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   }
   // linkedom has no activeElement: record focus calls instead.
   const focused = [];
-  for (const id of ['copy', 'copy-now']) document.getElementById(id).focus = () => focused.push(id);
-  const badge = { text: null, history: [] };
+  for (const id of ['copy', 'copy-overview', 'copy-selected', 'tab-page', 'tab-overview', 'tab-search', 'search-q']) document.getElementById(id).focus = () => focused.push(id);
+  const badge = { text: null, history: [], titles: [] };
   const alarms = {};
   globalThis.document = document;
   globalThis.DOMParser = DOMParser;
@@ -112,12 +125,16 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
         remove: async (keys) => { for (const k of [keys].flat()) delete local[k]; },
       },
     },
-    tabs: { query: async () => [{ id: 1, url, title: 'Guide' }] },
+    tabs: { query: async () => [{ id: 1, url, title: 'Guide' }], get: async () => ({ id: 1, url }) },
     scripting: { executeScript: async () => [{ result: '<html><body><main><h1>Private</h1><p>Only for you.</p></main></body></html>' }] },
     runtime: { getManifest: () => MANIFEST, openOptionsPage() {}, setUninstallURL: async () => {} },
     management: { getSelf: async () => ({ installType }) },
     alarms: { create: (name, info) => { alarms[name] = info; }, clear: async (name) => { delete alarms[name]; return true; }, get: async (name) => alarms[name] },
-    action: { setBadgeText: async ({ text }) => { badge.text = text; badge.history.push(text); }, setBadgeBackgroundColor: async () => {} },
+    action: {
+      setBadgeText: async ({ text }) => { badge.text = text; badge.history.push(text); },
+      setBadgeBackgroundColor: async () => {},
+      setTitle: async ({ title }) => { badge.titles.push(title); },
+    },
   };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   const $ = (id) => document.getElementById(id);
@@ -134,6 +151,12 @@ async function withMock(opts, fn) {
   try { return await fn(); } finally { mock.close(); }
 }
 
+const SKILL = {
+  id: 'sk_shared', site: SITE, pageUrl: `https://${SITE}/docs/other`, worked: 4, failed: 0, relatedLinks: [],
+  sections: [{ kind: 'page-md', label: 'This page: Other', url: `https://${SITE}/docs/other.md`, content: '# Other\n\nShared skill text.' }],
+};
+
+
 test('the loader stays at least loaderMs, the copy lands before the copied moment, then the content is revealed', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
   timing.loaderMs = 300;
   const p = await openPopup(PAGE);
@@ -146,13 +169,11 @@ test('the loader stays at least loaderMs, the copy lands before the copied momen
   assert.ok(p.clipboard.writes[0].at <= copiedStage.at);
   assert.ok(content.at - copiedStage.at >= timing.celebrateMs - 10);
   await sleep(80);
-  assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent.', 'announced with the status text');
-  assert.deepEqual(p.writes.announce, ['', 'Copied. Paste it into your agent.'], 'cleared first, so a repeat is announced again');
-  assert.deepEqual(p.focused, ['copy'], 'focus moves to the Copy button');
+  assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent.');
+  assert.deepEqual(p.writes.announce, ['', 'Copied. Paste it into your agent.']);
+  assert.deepEqual(p.focused, ['copy']);
   assert.equal(p.$('content').hidden, false);
-  assert.ok(p.$('content').classList.contains('reveal'));
-  assert.equal(p.$('loader').hidden, true);
-  assert.equal(p.$('copied-stage').hidden, true);
+  assert.equal(p.$('tabs').hidden, false, 'the tabs show with the content');
   assert.deepEqual(queued(p.local, 'copied_animation_shown'), [{ reducedMotion: false }]);
 }));
 
@@ -165,471 +186,144 @@ test('reduced motion: a short, still moment instead of the animation', () => wit
   assert.equal(p.document.body.dataset.motion, 'reduced');
   assert.ok(contentAt - copiedAt < 200, `held ${contentAt - copiedAt} ms`);
   assert.deepEqual(queued(p.local, 'copied_animation_shown'), [{ reducedMotion: true }]);
-  // The stylesheet turns the motion off for these users.
   assert.match(read('../extension/popup.css'), /@media \(prefers-reduced-motion: reduce\)[\s\S]*#copied-stage:not\(\[hidden\]\) \.doc[^}]*animation: none/);
 }));
 
-test('indexed site: the page-anchored package from the index, nothing crawled', () => withMock({ sites: { [SITE]: { indexed: true, status: 'ready' } } }, async () => {
+test('a failed copy is announced with the status text, with no copied moment', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
+  const p = await openPopup(PAGE, { clipboardFails: true });
+  await p.ready;
+  await sleep(80);
+  assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard.');
+  assert.ok(!stages().includes('copied'));
+}));
+
+test('(a) indexed site: the page-anchored package from the index; nothing crawled', () => withMock({ sites: { [SITE]: { indexed: true, status: 'ready' } } }, async () => {
   const p = await openPopup(PAGE);
   await p.ready;
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
   assert.match(p.$('summary').textContent, /KB · from the docs\.example\.com docs index$/);
-  const pkg = gets('/v1/packages');
-  assert.equal(pkg.length, 1);
-  assert.deepEqual(pkg[0].query, { site: SITE, url: PAGE });
+  assert.deepEqual(gets('/v1/packages')[0].query, { site: SITE, url: PAGE });
   assert.equal(posts('/v1/crawl-requests').length, 0);
-  assert.equal(posts('/v1/skills').length, 0, 'an index package is not shared back');
+  assert.equal(gets('/v1/quick').length, 0, 'no instant lookup when the index answers');
   const result = queued(p.local, 'scoop_result')[0];
   assert.deepEqual(result.sourceKinds, ['index']);
   assert.equal(result.indexHit, true);
 }));
 
-const SKILL = {
-  id: 'sk_shared', site: SITE, pageUrl: `https://${SITE}/docs/other`, worked: 4, failed: 0, relatedLinks: [],
-  sections: [{ kind: 'page-md', label: 'This page: Other', url: `https://${SITE}/docs/other.md`, content: '# Other\n\nShared skill text.' }],
-};
-
-test('not indexed (empty) but shared: the library skill, no crawl', () => withMock({ skill: SKILL, sites: { [SITE]: { status: 'empty' } } }, async () => {
+test('(b) not indexed but shared: the library skill now, and indexing in the background', () => withMock({ skill: SKILL, sites: { [SITE]: { hold: true } } }, async () => {
   const p = await openPopup(PAGE);
   await p.ready;
   assert.match(p.clipboard.text, /Shared skill text\./);
   assert.match(p.$('summary').textContent, /shared, worked for 4 people$/);
-  assert.equal(p.$('feedback').hidden, false);
-  assert.equal(posts('/v1/crawl-requests').length, 0);
-  assert.equal(gets('/v1/packages').length, 0);
-}));
-
-test('never-seen site with a shared skill: the skill now, a crawl requested in the background', () => withMock({ skill: SKILL, sites: { [SITE]: {} } }, async () => {
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.match(p.clipboard.text, /Shared skill text\./);
   await waitFor(() => p.local[PENDING_KEY]?.[SITE]);
   assert.equal(posts('/v1/crawl-requests').length, 1);
-  assert.equal(p.local[PENDING_KEY][SITE].state, 'queued');
+  assert.equal(p.$('crawl-note').textContent, "Indexing all of docs.example.com's docs in the background. The icon shows ✓ when it's ready.");
   assert.equal(p.badge.text, '…');
-  assert.ok(p.alarms[CRAWL_ALARM], 'the service worker will follow it');
 }));
 
-test('not developer docs: built here as before, no crawl request', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.match(p.$('summary').textContent, /1 source on docs\.example\.com$/);
-  assert.equal(posts('/v1/crawl-requests').length, 0);
-  assert.equal(posts('/v1/skills').length, 1, 'shared as before');
-}));
-
-test('crawl lifecycle: queued → running → indexing → complete delivers the page-anchored package', () => withMock({ sites: { [SITE]: {} } }, async () => {
-  const labels = [];
-  mock.close();
-  mock = await startMockLibrary({
-    sites: { [SITE]: {} },
-    onRequest: (e) => { if (e.method === 'GET' && e.path.startsWith('/v1/crawl-requests/')) labels.push(globalThis.document.getElementById('wait-phase').textContent); },
-  });
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.equal(posts('/v1/crawl-requests').length, 1);
-  assert.deepEqual(posts('/v1/crawl-requests')[0].body, { url: PAGE });
-  assert.ok(posts('/v1/crawl-requests')[0].install, 'sent with the install ID');
-  assert.deepEqual(stages(), ['loading', 'waiting', 'loading', 'copied', 'content'], 'back to the loader while the package is fetched');
-  assert.equal(p.$('copy-now').disabled, true, 'no second copy once the crawl completed');
-  assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
-  for (const l of ['Waiting for a crawler', "Checking it's developer docs", 'Finding the docs', 'Reading the docs', 'Indexing']) {
-    assert.ok(labels.includes(l), `showed "${l}" (saw ${JSON.stringify(labels)})`);
-  }
-  const phases = p.writes['wait-phase'];
-  assert.ok(phases.every((t, i) => i === 0 || t !== phases[i - 1]), `written only when it changes: ${JSON.stringify(phases)}`);
-  assert.ok(phases.every((t) => !/\d/.test(t)), 'no counts in the live phase line');
-  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.equal(p.local[PENDING_KEY][SITE], undefined, 'delivered: nothing left pending');
-  assert.equal(p.badge.text, '');
-  assert.deepEqual(queued(p.local, 'crawl_request'), [{ site: SITE, state: 'queued' }]);
-  const [wait] = queued(p.local, 'crawl_wait');
-  assert.equal(wait.outcome, 'complete');
-  assert.ok(wait.durationMs >= 0);
-}));
-
-for (const [crawl, note, state] of [
-  ['rejected', "This doesn't look like developer docs, so we copied just this page.", 'rejected'],
-  ['failed', "We couldn't read the docs for docs.example.com, so we copied just this page.", 'failed'],
-  ['429', 'The docs index is busy right now, so we copied just this page.', 'rate_limited'],
-]) {
-  test(`crawl request ${crawl}: this page is copied, with a short note`, () => withMock({ sites: { [SITE]: { crawl } } }, async () => {
-    const p = await openPopup(PAGE);
-    await p.ready;
-    assert.match(p.clipboard.text, /# Get started with Widgets/);
-    assert.equal(p.$('crawl-note').textContent, note);
-    assert.equal(p.$('crawl-note').hidden, false);
-    assert.ok(!stages().includes('waiting'));
-    assert.deepEqual(queued(p.local, 'crawl_request'), [{ site: SITE, state }]);
-    assert.equal(p.local[PENDING_KEY], undefined);
-  }));
-}
-
-test('rejected while waiting: this page is copied with the gentle note', () => withMock({
-  sites: { [SITE]: { steps: [{ state: 'queued', phase: 'gate' }, { state: 'running', phase: 'gate' }, { state: 'rejected', phase: 'gate', reason: 'not_devtool' }] } },
+test('(c) instant: the page plus /quick sources (a .md twin on docs.<domain> replaces the converted HTML), and background indexing', () => withMock({
+  sites: { [SITE]: { hold: true, quick: [
+    { kind: 'page-md', url: `https://${SUB}/guide.md`, label: 'This page: Guide', bytes: 80 },
+    { kind: 'llms', url: `https://${SUB}/llms.txt`, label: 'Site documentation index (llms.txt)', bytes: 120 },
+  ] } },
 }, async () => {
   const p = await openPopup(PAGE);
   await p.ready;
+  assert.deepEqual(stages(), ['loading', 'copied', 'content'], 'no waiting view');
+  assert.match(p.clipboard.text, /The Markdown version of the guide, from the docs subdomain\./);
+  assert.match(p.clipboard.text, /The llms\.txt index of the example docs\./);
+  assert.ok(!p.clipboard.text.includes('Get started with Widgets'), 'the .md twin replaced the converted HTML');
+  assert.match(p.$('summary').textContent, /2 sources on docs\.example\.com$/);
+  assert.deepEqual(gets('/v1/quick')[0].query, { url: PAGE });
+  await waitFor(() => posts('/v1/crawl-requests').length === 1);
+  assert.equal(p.$('crawl-note').textContent, "Indexing all of docs.example.com's docs in the background. The icon shows ✓ when it's ready.");
+  // Only the local build is shared (sources on another host would not match the site).
+  const shared = posts('/v1/skills')[0]?.body;
+  assert.ok(shared && shared.sections.every((s) => new URL(s.url).hostname === SITE));
+}));
+
+test('(c) the library is down: the local build alone, quietly', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const p = await openPopup(PAGE, { local: { devLibraryUrl: 'http://localhost:9/v1' } });
+  await p.ready;
   assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.equal(p.$('crawl-note').textContent, "This doesn't look like developer docs, so we copied just this page.");
-  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'rejected');
+  assert.equal(p.$('crawl-note').textContent, '');
+}));
+
+test('not developer docs (status not_devtool): instant copy, no crawl request', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+  await sleep(30);
+  assert.equal(posts('/v1/crawl-requests').length, 0);
+  assert.equal(p.$('crawl-note').textContent, '');
+}));
+
+test('the background crawl completes while the popup is open: "Upgrade to full docs" copies the index', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+  await waitFor(() => !p.$('upgrade').hidden);
+  assert.equal(p.$('crawl-note').textContent, 'The full docs for docs.example.com are ready.');
+  stageLog.length = 0;
+  await p.$('upgrade').onclick();
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  assert.deepEqual(stages(), ['loading', 'copied', 'content']);
+  assert.equal(p.$('crawl-note').textContent, 'Upgraded to the full docs for docs.example.com.');
   assert.equal(p.local[PENDING_KEY][SITE], undefined);
 }));
 
-test('"Copy this page now" copies at once; the crawl carries on in the background', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
-  const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting' && gets('/v1/crawl-requests/').length >= 2);
-  assert.equal(p.clipboard.text, null, 'nothing copied while waiting');
-  p.$('copy-now').onclick();
-  await p.ready;
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.match(p.$('crawl-note').textContent, /still figuring out the docs for docs\.example\.com/);
-  assert.equal(p.document.body.dataset.stage, 'content', JSON.stringify(stageLog));
-  assert.notEqual(p.local[PENDING_KEY][SITE].state, 'complete');
-  assert.equal(p.badge.text, '…');
-  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'copied_page');
-  const polls = gets('/v1/crawl-requests/').length;
-  await new Promise((r) => setTimeout(r, 80));
-  assert.equal(gets('/v1/crawl-requests/').length, polls, 'the popup stopped polling');
-}));
-
-test('reopening after the crawl finished in the background delivers the result', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
-  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now() - 60_000 } } };
+test('reopening after the crawl finished in the background: the full docs, and the ✓ clears', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now() - 60_000, updatedAt: Date.now() } } };
   const p = await openPopup(PAGE, { local });
   await p.ready;
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.equal(posts('/v1/crawl-requests').length, 0);
+  assert.equal(p.$('crawl-note').textContent, 'Upgraded to the full docs for docs.example.com.');
   assert.equal(p.local[PENDING_KEY][SITE], undefined);
-  assert.equal(p.badge.text, '');
+  assert.notEqual(p.badge.text, '✓');
 }));
 
-test('reopening while the crawl still runs resumes the waiting view (no new request)', () => withMock({ sites: { [SITE]: {} } }, async () => {
+test('reopening while the crawl still runs: instant copy, no new request, the quiet line', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
   const r = mock.newRequest(SITE, PAGE);
-  r.advance(); r.advance(); // running, discover
+  r.advance();
   const local = { [PENDING_KEY]: { [SITE]: { requestId: r.view().id, site: SITE, url: PAGE, state: 'running', startedAt: Date.now() } } };
   const p = await openPopup(PAGE, { local });
   await p.ready;
-  assert.equal(posts('/v1/crawl-requests').length, 0);
-  assert.ok(stages().includes('waiting'));
-  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-}));
-
-test('service worker: follows a crawl after the popup closed, with the badge, and stops the alarm when done', () => withMock({ sites: { [SITE]: {} } }, async () => {
-  const r = mock.newRequest(SITE, PAGE);
-  const local = { devLibraryUrl: mock.url };
-  const badge = [];
-  const alarms = {};
-  const listeners = {};
-  const on = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
-  globalThis.chrome = {
-    storage: {
-      local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: local[k] } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async (ks) => { for (const k of [ks].flat()) delete local[k]; } },
-      sync: { get: async (d) => ({ ...d, telemetry: false }) },
-      onChanged: on('storage'),
-    },
-    runtime: { getManifest: () => MANIFEST, onInstalled: on('installed'), onStartup: on('startup'), setUninstallURL: async () => {} },
-    management: { getSelf: async () => ({ installType: 'development' }) },
-    alarms: { create: (n, i) => { alarms[n] = i; }, clear: async (n) => { delete alarms[n]; return true; }, get: async (n) => alarms[n], onAlarm: on('alarm') },
-    action: { setBadgeText: async ({ text }) => { badge.push(text); }, setBadgeBackgroundColor: async () => {} },
-  };
-  await import(`../extension/background.js?${Math.random()}`);
-  await rememberCrawl(globalThis.chrome, { requestId: r.view().id, site: SITE, url: PAGE, state: 'queued' });
-  assert.ok(alarms[CRAWL_ALARM], 'polled every 30 s');
-  assert.equal(alarms[CRAWL_ALARM].periodInMinutes, 0.5);
-  assert.equal(badge.at(-1), '…');
-  for (let i = 0; i < 8 && local[PENDING_KEY][SITE].state !== 'complete'; i++) {
-    listeners.alarm({ name: CRAWL_ALARM });
-    const before = mock.log.length;
-    await waitFor(() => mock.log.length > before);
-    await new Promise((res) => setTimeout(res, 20));
-  }
-  assert.equal(local[PENDING_KEY][SITE].state, 'complete');
-  assert.equal(badge.at(-1), '✓');
-  assert.equal(alarms[CRAWL_ALARM], undefined, 'nothing running: the alarm stops');
-  await forgetCrawl(globalThis.chrome, SITE);
-  assert.equal(badge.at(-1), '');
-}));
-
-test('pollPending drops failed and expired requests and clears the badge', async () => {
-  const local = {};
-  const badge = [];
-  const chromeApi = {
-    storage: { local: { get: async (k) => (k in local ? { [k]: local[k] } : {}), set: async (o) => Object.assign(local, structuredClone(o)) } },
-    alarms: { create() {}, clear: async () => true },
-    action: { setBadgeText: async ({ text }) => badge.push(text), setBadgeBackgroundColor: async () => {} },
-  };
-  const now = Date.now();
-  local[PENDING_KEY] = {
-    'a.example.com': { requestId: 'cr_a', site: 'a.example.com', state: 'running', startedAt: now },
-    'b.example.com': { requestId: 'cr_b', site: 'b.example.com', state: 'running', startedAt: now - 3 * 3_600_000 },
-  };
-  const library = { crawlRequest: async () => ({ ok: true, status: 200, data: { state: 'failed', phase: 'fetch' } }) };
-  assert.equal(await pollPending(chromeApi, library, now), '');
-  assert.deepEqual(local[PENDING_KEY], {});
-});
-
-test('no crawl request, status or package lookup for pages on private hosts (store install)', () => withMock({ sites: {} }, async () => {
-  const p = await openPopup(`${docsUrl}/docs/guide`, { installType: 'normal' });
-  await p.ready;
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.equal(mock.log.length, 0, `nothing reached the library: ${JSON.stringify(mock.log.map((e) => e.path))}`);
-}));
-
-test('no crawl request or package lookup for a page that only renders signed in', () => withMock({ sites: { [SITE]: {} } }, async () => {
-  const p = await openPopup(`https://${SITE}/docs/missing`);
-  await p.ready;
-  assert.match(p.clipboard.text, /# Private/);
-  assert.equal(posts('/v1/crawl-requests').length, 0);
-  assert.equal(gets('/v1/packages').length, 0);
-}));
-
-test('sharing off: no crawl request (asking for one contributes, like sharing)', () => withMock({ sites: { [SITE]: {} } }, async () => {
-  const p = await openPopup(PAGE, { share: false });
-  await p.ready;
   assert.match(p.clipboard.text, /# Get started with Widgets/);
   assert.equal(posts('/v1/crawl-requests').length, 0);
+  assert.ok(!stages().includes('waiting'));
+  assert.match(p.$('crawl-note').textContent, /in the background/);
 }));
 
-test('progressText: friendly labels, counts and how far along', () => {
-  assert.deepEqual(progressText({ state: 'queued', etaSeconds: 150 }), { label: 'Waiting for a crawler', count: 'About 3 minutes', fraction: null });
-  assert.equal(progressText({ state: 'running', phase: 'gate' }).label, "Checking it's developer docs");
-  assert.deepEqual(progressText({ state: 'running', phase: 'browser', pagesFound: 1 }), { label: 'Reading the docs', count: '1 page found', fraction: null });
-  assert.deepEqual(progressText({ state: 'running', phase: 'discover', pagesFound: 30 }), { label: 'Finding the docs', count: '30 pages found', fraction: null });
-  assert.deepEqual(progressText({ state: 'indexing', phase: 'index', pagesFound: 40, pagesIndexed: 10 }), { label: 'Indexing', count: '10 of 40 pages indexed', fraction: 0.25 });
-  assert.equal(progressText({ state: 'indexing', phase: 'index', pagesFound: 3, pagesIndexed: 0 }).fraction, null, 'an empty bar looks stuck');
-});
-
-test('library client: the index calls follow the contract', async () => {
-  const calls = [];
-  const fetchImpl = async (url, init) => {
-    calls.push({ url, init });
-    if (url.includes('/packages')) return new Response('# pkg', { status: 200, headers: { 'content-type': 'text/markdown' } });
-    if (url.endsWith('/crawl-requests')) return new Response(JSON.stringify({ error: { code: 'rate_limited', message: 'slow' } }), { status: 429, headers: { 'retry-after': '30' } });
-    return new Response(JSON.stringify({ ok: true }), { status: 200 });
-  };
-  const lib = createLibrary({ baseUrl: 'https://api.scoop.md/v1', installId: 'i', client: 'extension/0.4.0', fetchImpl });
-  assert.deepEqual(await lib.pagePackage(SITE, `${PAGE}?a=b`), { ok: true, status: 200, data: '# pkg' });
-  assert.equal(calls[0].url, `https://api.scoop.md/v1/packages?site=${SITE}&url=${encodeURIComponent(`${PAGE}?a=b`)}`);
-  const refused = await lib.requestCrawl(PAGE);
-  assert.equal(refused.status, 429);
-  assert.equal(refused.retryAfter, 30);
-  assert.equal(calls[1].init.method, 'POST');
-  assert.equal(calls[1].init.headers['x-scoop-install'], 'i');
-  assert.deepEqual(JSON.parse(calls[1].init.body), { url: PAGE });
-  await lib.siteStatus(SITE);
-  await lib.crawlRequest('cr_1');
-  assert.equal(calls[2].url, `https://api.scoop.md/v1/sites/${SITE}/status`);
-  assert.equal(calls[3].url, 'https://api.scoop.md/v1/crawl-requests/cr_1');
-});
-
-test('a failed copy is announced with the status text too, with no copied moment', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
-  const p = await openPopup(PAGE, { clipboardFails: true });
-  await p.ready;
-  assert.equal(p.$('status').textContent, 'Ready. Click Copy to put it on your clipboard.');
-  await sleep(80);
-  assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard.');
-  assert.ok(!stages().includes('copied'));
-  assert.deepEqual(p.focused, ['copy']);
-}));
-
-test('waiting is announced once; phases are announced by the live phase line', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
-  const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting' && p.$('announce').textContent);
-  assert.equal(p.$('announce').textContent, 'Figuring out the docs for docs.example.com…');
-  assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
-  p.$('copy-now').onclick();
-  await p.ready;
-}));
-
-test('a pending crawl that completed but whose package is missing: /packages with its retries, not again for the indexed status, then built here', () => withMock({ sites: { [SITE]: { indexed: true, packages404: true } } }, async () => {
-  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
-  const p = await openPopup(PAGE, { local });
-  await p.ready;
-  assert.equal(gets('/v1/packages').length, 1 + timing.packageRetryMs.length);
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-}));
-
-test('two popups on one site: one crawl request, one tracked entry', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
-  const first = await openPopup(PAGE);
-  await waitFor(() => first.document.body.dataset.stage === 'waiting');
-  first.$('copy-now').onclick();
-  await first.ready;
-  const second = await openPopup(PAGE, { local: first.local });
-  await waitFor(() => second.document.body.dataset.stage === 'waiting');
-  second.$('copy-now').onclick();
-  await second.ready;
-  assert.equal(posts('/v1/crawl-requests').length, 1, 'the second popup resumed the first one');
-  assert.deepEqual(Object.keys(second.local[PENDING_KEY]), [SITE]);
-  // And if both had asked, the server answers with the same request: still one entry.
-  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
-  const [a, b] = await Promise.all([lib.requestCrawl(PAGE), lib.requestCrawl(PAGE)]);
-  assert.equal(a.data.id, b.data.id);
-  const chromeApi = { storage: { local: { get: async (k) => ({ [k]: second.local[k] }), set: async (o) => Object.assign(second.local, structuredClone(o)) } }, alarms: { create() {} }, action: {} };
-  await rememberCrawl(chromeApi, { requestId: a.data.id, site: SITE, url: PAGE, state: a.data.state });
-  await rememberCrawl(chromeApi, { requestId: b.data.id, site: SITE, url: PAGE, state: b.data.state });
-  assert.equal(Object.keys(second.local[PENDING_KEY]).length, 1);
-}));
-
-test('a ✓ nobody picked up expires; a running request past its time is dropped', async () => {
-  const now = Date.now();
-  const pending = {
-    'a.example.com': { state: 'complete', updatedAt: now - READY_TTL_MS - 1 },
-    'b.example.com': { state: 'running', startedAt: now - 3 * 3_600_000 },
-    'c.example.com': { state: 'complete', updatedAt: now },
-  };
-  assert.deepEqual(Object.keys(live(pending, now)), ['c.example.com']);
-  const badge = [];
-  const chromeApi = { action: { setBadgeText: async ({ text }) => badge.push(text), setBadgeBackgroundColor: async () => {} } };
-  assert.equal(await updateBadge(chromeApi, { 'a.example.com': pending['a.example.com'] }, now), '');
-  assert.equal(await updateBadge(chromeApi, { 'c.example.com': pending['c.example.com'] }, now), '✓');
-});
-
-test('pollPending merges into what is stored now: an entry the popup delivered meanwhile stays gone', async () => {
-  const local = { [PENDING_KEY]: { 'a.example.com': { requestId: 'cr_a', site: 'a.example.com', state: 'running', startedAt: Date.now() } } };
-  const chromeApi = {
-    storage: { local: { get: async (k) => ({ [k]: structuredClone(local[k]) }), set: async (o) => Object.assign(local, structuredClone(o)) } },
-    alarms: { create() {}, clear: async () => true },
-    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
-  };
-  const library = {
-    crawlRequest: async () => {
-      // The popup delivers the result while the service worker is still asking.
-      delete local[PENDING_KEY]['a.example.com'];
-      local[PENDING_KEY]['b.example.com'] = { requestId: 'cr_b', site: 'b.example.com', state: 'queued', startedAt: Date.now() };
-      return { ok: true, status: 200, data: { state: 'complete', phase: 'done' } };
-    },
-  };
-  await pollPending(chromeApi, library);
-  assert.deepEqual(Object.keys(local[PENDING_KEY]), ['b.example.com'], 'not resurrected, and the new entry kept');
-});
-
-test('settings explain that the index lookup still sends the page address with sharing off', () => {
-  assert.match(read('../extension/options.html'), /Turning this off stops uploads; looking up this page in the docs index still sends its address\./);
-  const privacy = read('../site/src/pages/privacy.astro');
-  assert.ok((privacy.match(/whatever the sharing setting/g) ?? []).length >= 2, 'the short version and the index section');
-  assert.match(privacy, /Turn sharing off[^<]*still sent to look it up in the index/);
-});
-
-test('service worker: the hourly alarm clears a ✓ nobody picked up', () => withMock({ sites: {} }, async () => {
-  const local = { devLibraryUrl: mock.url, [PENDING_KEY]: { [SITE]: { requestId: 'cr_old', site: SITE, url: PAGE, state: 'complete', startedAt: 0, updatedAt: Date.now() - READY_TTL_MS - 60_000 } } };
-  const badge = [];
-  const listeners = {};
-  const on = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
-  globalThis.chrome = {
-    storage: {
-      local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: local[k] } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async () => {} },
-      sync: { get: async (d) => ({ ...d, telemetry: false }) },
-      onChanged: on('storage'),
-    },
-    runtime: { getManifest: () => MANIFEST, onInstalled: on('installed'), onStartup: on('startup'), setUninstallURL: async () => {} },
-    management: { getSelf: async () => ({ installType: 'development' }) },
-    alarms: { create() {}, clear: async () => true, get: async () => ({}), onAlarm: on('alarm') },
-    action: { setBadgeText: async ({ text }) => { badge.push(text); }, setBadgeBackgroundColor: async () => {} },
-  };
-  await import(`../extension/background.js?${Math.random()}`);
-  listeners.alarm({ name: 'telemetry-hourly' });
-  await waitFor(() => badge.length);
-  assert.equal(badge.at(-1), '');
-  assert.deepEqual(local[PENDING_KEY], {});
-}));
-
-test('a crawl that never finishes: after maxWaitMs the page is copied, and the request stays for the service worker', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
-  timing.maxWaitMs = 120;
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.match(p.$('crawl-note').textContent, /taking longer than usual/);
-  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'timeout');
-  assert.ok(p.local[PENDING_KEY][SITE], 'still tracked');
-  assert.equal(p.badge.text, '…');
-  const polls = gets('/v1/crawl-requests/').length;
-  await sleep(60);
-  assert.equal(gets('/v1/crawl-requests/').length, polls, 'the popup stopped polling');
-}));
-
-test('the popup hidden mid-wait (window in the background) keeps waiting and still delivers', () => withMock({ sites: { [SITE]: {} } }, async () => {
-  // Live on staging: a visibilitychange to hidden reported the wait as closed and
-  // zeroed its clock, so the next poll "timed out" after 3 minutes, not 10.
-  Object.assign(timing, { pollMs: 25, maxWaitMs: 5_000 });
-  const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting');
-  Object.defineProperty(p.document, 'visibilityState', { value: 'hidden', configurable: true });
-  p.document.dispatchEvent(new p.document.defaultView.Event('visibilitychange'));
-  await p.ready;
-  assert.equal(p.clipboard.text, packageFor(SITE, PAGE), 'the indexed package, not a timeout fallback');
-  assert.equal(p.$('crawl-note').textContent, '');
-  assert.deepEqual(queued(p.local, 'crawl_wait').map((w) => w.outcome), ['complete']);
-}));
-
-test('right after a crawl completes, a package the index cannot answer yet is retried', () => withMock({ sites: { [SITE]: { packages404Times: 2 } } }, async () => {
-  // Live on staging: reopening hono.dev right after ✓ got 404 from /packages and
-  // fell back to the local build; a minute later the same call answered 200.
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.equal(gets('/v1/packages').length, 3, 'two 404s, then the package');
-}));
-
-test('an indexed site opened normally is asked once (no retries)', () => withMock({ sites: { [SITE]: { indexed: true, packages404Times: 1 } } }, async () => {
-  const p = await openPopup(PAGE);
-  await p.ready;
-  assert.equal(gets('/v1/packages').length, 1);
-}));
-
-test('indexing stuck on its last page: after stallMs the pages already indexed are delivered', () => withMock({
-  // Live on staging: docs.astral.sh sat at "indexing 100/101" for minutes while
-  // the site was already indexed (99 pages), and the popup kept waiting.
-  sites: { [SITE]: { hold: true, steps: [{ state: 'queued', phase: 'gate' }, { state: 'indexing', phase: 'index', pagesFound: 101, pagesIndexed: 100 }, { state: 'complete', phase: 'done' }] } },
-}, async () => {
-  timing.stallMs = 60;
-  mock.sites[SITE].indexed = false;
-  const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting');
-  mock.sites[SITE].indexed = true; // the index answers for its pages already
-  await p.ready;
-  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'stalled_index');
-  assert.ok(p.local[PENDING_KEY][SITE], 'the crawl stays for the service worker');
-  assert.equal(p.badge.text, '…');
-}));
-
-test('reopening while a crawl still runs on an already-indexed site delivers the index at once', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
+test('reopening while the crawl runs on an already-indexed site: the index, marked delivered (no ✓ later)', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
   const r = mock.newRequest(SITE, PAGE);
   r.advance();
   const local = { [PENDING_KEY]: { [SITE]: { requestId: r.view().id, site: SITE, url: PAGE, state: 'indexing', startedAt: Date.now() } } };
   const p = await openPopup(PAGE, { local });
   await p.ready;
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.ok(!stages().includes('waiting'));
-  assert.equal(gets('/v1/packages').length, 1);
-  assert.ok(p.local[PENDING_KEY][SITE], 'still followed in the background');
+  assert.equal(p.local[PENDING_KEY][SITE].delivered, true);
+  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
+  for (let i = 0; i < 6 && p.local[PENDING_KEY][SITE]; i++) await pollPending(globalThis.chrome, lib);
+  assert.equal(p.local[PENDING_KEY][SITE], undefined);
+  assert.ok(!p.badge.history.includes('✓'), 'never ✓ for a crawl already delivered');
 }));
 
-test('pagehide after hidden still sends the crawl_wait "closed" it just recorded', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
-  const p = await openPopup(PAGE);
-  await waitFor(() => p.document.body.dataset.stage === 'waiting');
-  Object.defineProperty(p.document, 'visibilityState', { value: 'hidden', configurable: true });
-  p.document.dispatchEvent(new p.document.defaultView.Event('visibilitychange'));
-  await sleep(20);
-  const before = p.beacons.length;
-  p.windowListeners.pagehide();
-  await waitFor(async () => p.beacons.length > before);
-  const sent = (await Promise.all(p.beacons.slice(before).map((b) => b.text()))).map((t) => JSON.parse(t));
-  const names = sent.flatMap((body) => body.events.map((e) => [e.name, e.props.outcome]));
-  assert.deepEqual(names.filter(([n]) => n === 'crawl_wait'), [['crawl_wait', 'closed']]);
-  p.$('copy-now').onclick();
+test('a completed crawl whose package the index cannot answer yet is retried, then built here', () => withMock({ sites: { [SITE]: { indexed: true, packages404Times: 2 } } }, async () => {
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
+  const p = await openPopup(PAGE, { local });
   await p.ready;
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  assert.equal(gets('/v1/packages').length, 3, 'two 404s, then the package');
 }));
 
 test('an unreachable library is retried once, with a short timeout, after a crawl completes', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
   failPackages = true;
   const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
   const started = Date.now();
-  const p = await openPopup(PAGE, { local });
+  const p = await openPopup(PAGE, { local, }); 
   await p.ready;
-  assert.match(p.clipboard.text, /# Get started with Widgets/);
-  assert.ok(Date.now() - started < 2_000, 'no long retry chain');
+  assert.match(p.clipboard.text, /Get started with Widgets|Markdown twin/);
+  assert.ok(Date.now() - started < 2_000);
   assert.equal(packageAttempts, 2, 'the first try and one retry');
 }));
 
@@ -647,18 +341,331 @@ test('package retries use a 4 s timeout; the first try keeps the normal one', as
   assert.deepEqual(timeouts, [10_000, 4_000]);
 });
 
-test('index delivered on reopen while the crawl runs: no ✓ later, and no re-delivery', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
-  const r = mock.newRequest(SITE, PAGE);
-  r.advance();
-  const local = { [PENDING_KEY]: { [SITE]: { requestId: r.view().id, site: SITE, url: PAGE, state: 'indexing', startedAt: Date.now() } } };
-  const p = await openPopup(PAGE, { local });
+test('background crawl request rejected or rate-limited: nothing to say, the page is already copied', () => withMock({ sites: { [SITE]: { crawl: 'rejected' } } }, async () => {
+  const p = await openPopup(PAGE);
   await p.ready;
-  assert.equal(p.local[PENDING_KEY][SITE].delivered, true);
-  assert.equal(p.badge.text, '…', 'still followed while it runs');
-  // The crawl completes in the background: no ✓, and the entry goes.
-  const chromeApi = globalThis.chrome;
-  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
-  for (let i = 0; i < 6 && p.local[PENDING_KEY][SITE]; i++) await pollPending(chromeApi, lib);
-  assert.equal(p.local[PENDING_KEY][SITE], undefined);
-  assert.equal(p.badge.text, '');
+  await waitFor(() => queued(p.local, 'crawl_request').length);
+  assert.deepEqual(queued(p.local, 'crawl_request'), [{ site: SITE, state: 'rejected' }]);
+  assert.equal(p.local[PENDING_KEY], undefined);
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
 }));
+
+test('no library request at all for pages on private hosts (store install)', () => withMock({ sites: {} }, async () => {
+  const p = await openPopup(`${docsUrl}/docs/guide`, { installType: 'normal' });
+  await p.ready;
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+  await sleep(30);
+  assert.equal(mock.log.length, 0, `nothing reached the library: ${JSON.stringify(mock.log.map((e) => e.path))}`);
+}));
+
+test('a page that only renders signed in: no crawl, package or instant lookup', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const p = await openPopup(`https://${SITE}/docs/missing`);
+  await p.ready;
+  assert.match(p.clipboard.text, /# Private/);
+  await sleep(30);
+  assert.equal(posts('/v1/crawl-requests').length, 0);
+  assert.equal(gets('/v1/packages').length, 0);
+  assert.equal(gets('/v1/quick').length, 0);
+}));
+
+test('sharing off: no crawl request; the instant lookup still runs', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const p = await openPopup(PAGE, { share: false });
+  await p.ready;
+  await sleep(30);
+  assert.equal(posts('/v1/crawl-requests').length, 0);
+  assert.equal(gets('/v1/quick').length, 1);
+}));
+
+test('two popups on one site: one crawl request, one tracked entry', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  const first = await openPopup(PAGE);
+  await first.ready;
+  await waitFor(() => first.local[PENDING_KEY]?.[SITE]);
+  const second = await openPopup(PAGE, { local: first.local });
+  await second.ready;
+  assert.equal(posts('/v1/crawl-requests').length, 1);
+  assert.deepEqual(Object.keys(second.local[PENDING_KEY]), [SITE]);
+}));
+
+// Tabs
+
+const TOPICS = [
+  { name: 'guides', path: 'guides', count: 40, children: [{ name: 'webhooks', path: 'guides/webhooks', count: 12, children: [] }] },
+  { name: 'api', path: 'api', count: 20, children: [] },
+];
+const HITS = [
+  { url: `https://${SITE}/docs/webhooks`, title: 'Webhooks', heading_path: 'Webhooks > Verify signatures', snippet: 'Verify the signature header…', text: 'Full chunk text about verifying signatures.' },
+  { url: `https://${SITE}/docs/events`, title: 'Events', heading_path: 'Events > Retries', snippet: 'Retries happen with backoff…' },
+];
+
+test('tabs: arrow keys move between This page, Overview and Search; tab_switch is recorded', () => withMock({ sites: { [SITE]: { indexed: true, topics: TOPICS } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.equal(p.$('tab-page').getAttribute('aria-selected'), 'true');
+  p.$('tab-page').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+  assert.equal(p.$('tab-overview').getAttribute('aria-selected'), 'true');
+  assert.equal(p.$('tab-overview').getAttribute('tabindex'), '0');
+  assert.equal(p.$('tab-page').getAttribute('tabindex'), '-1');
+  assert.equal(p.$('overview').hidden, false);
+  assert.equal(p.$('content').hidden, true);
+  p.$('tab-overview').onkeydown({ key: 'End', preventDefault() {} });
+  assert.equal(p.$('tab-search').getAttribute('aria-selected'), 'true');
+  p.$('tab-search').onkeydown({ key: 'ArrowRight', preventDefault() {} });
+  assert.equal(p.$('tab-page').getAttribute('aria-selected'), 'true');
+  await sleep(30);
+  assert.deepEqual(queued(p.local, 'tab_switch').map((e) => e.tab), ['overview', 'search', 'page']);
+}));
+
+test('Overview: topics and the llms.txt overview; Copy overview copies both and plays the moment', () => withMock({
+  sites: { [SITE]: { indexed: true, topics: TOPICS, quick: [], overview: `https://${SUB}/llms.txt` } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-overview').onclick();
+  await waitFor(() => !p.$('copy-overview').disabled);
+  assert.match(p.$('overview-topics').textContent, /guides\s*40/);
+  assert.match(p.$('overview-topics').textContent, /webhooks\s*12/);
+  assert.match(p.$('overview-llms').textContent, /The llms\.txt index of the example docs/);
+  stageLog.length = 0;
+  await p.$('copy-overview').onclick();
+  assert.match(p.clipboard.text, /- guides \(40 pages\)\n {2}- guides\/webhooks \(12 pages\)/);
+  assert.match(p.clipboard.text, /The llms\.txt index of the example docs/);
+  assert.deepEqual(stages(), ['copied', 'content']);
+  assert.equal(p.$('overview').hidden, false, 'back on the Overview tab');
+  assert.deepEqual(queued(p.local, 'copy_overview'), [{ site: SITE }]);
+}));
+
+test('Overview and Search on a site that is not indexed: why not, and the background progress', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  await waitFor(() => p.local[PENDING_KEY]?.[SITE]);
+  await sleep(60); // a follow-up poll
+  p.$('tab-search').onclick();
+  assert.equal(p.$('search-on').hidden, true);
+  assert.equal(p.$('search-off-title').textContent, 'Search will work once docs.example.com is indexed.');
+  assert.match(p.$('search-off-status').textContent, /^Indexing in the background: /);
+  p.$('tab-overview').onclick();
+  assert.equal(p.$('overview-off-title').textContent, 'The overview will work once docs.example.com is indexed.');
+}));
+
+test('Search: debounced, at least 2 characters; results with checkboxes; Copy selected; no query text in telemetry', () => withMock({ sites: { [SITE]: { indexed: true, hits: HITS } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-search').onclick();
+  p.$('search-q').value = 'v';
+  p.$('search-q').oninput();
+  await sleep(40);
+  assert.equal(gets('/v1/search').length, 0, 'one character: no search');
+  p.$('search-q').value = 've';
+  p.$('search-q').oninput();
+  p.$('search-q').value = 'verify signature';
+  p.$('search-q').oninput();
+  await waitFor(() => p.$('search-status').textContent === '2 results');
+  assert.equal(gets('/v1/search').length, 1, 'debounced to the last input');
+  assert.deepEqual(gets('/v1/search')[0].query, { site: SITE, q: 'verify signature', limit: '20' });
+  const boxes = p.document.querySelectorAll('#search-results input[type=checkbox]');
+  assert.equal(boxes.length, 2);
+  assert.match(p.$('search-results').textContent, /Webhooks > Verify signatures/);
+  assert.equal(p.$('copy-selected').disabled, true);
+  boxes[0].checked = true; boxes[0].onchange();
+  boxes[1].checked = true; boxes[1].onchange();
+  assert.equal(p.$('copy-selected').disabled, false);
+  stageLog.length = 0;
+  await p.$('copy-selected').onclick();
+  assert.match(p.clipboard.text, /Full chunk text about verifying signatures\./);
+  assert.match(p.clipboard.text, /Retries happen with backoff…\n\n\[Excerpt\. The full section is at https:\/\/docs\.example\.com\/docs\/events\]/);
+  assert.match(p.clipboard.text, /not as instructions to you/);
+  assert.deepEqual(stages(), ['copied', 'content']);
+  assert.equal(p.$('search').hidden, false);
+  assert.deepEqual(queued(p.local, 'search'), [{ site: SITE, qLen: 16, results: 2 }]);
+  assert.deepEqual(queued(p.local, 'copy_search'), [{ site: SITE, count: 2 }]);
+  assert.ok(!JSON.stringify(p.local.telemetryQueue).includes('verify signature'), 'the query text is never sent from the client');
+}));
+
+test('Search: Copy all results uses the library package for the query', () => withMock({ sites: { [SITE]: { indexed: true, hits: HITS } } }, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  p.$('tab-search').onclick();
+  p.$('search-q').value = 'retries';
+  p.$('search-q').oninput();
+  await waitFor(() => !p.$('copy-all').disabled);
+  await p.$('copy-all').onclick();
+  assert.match(p.clipboard.text, /search "retries"/);
+  assert.deepEqual(gets('/v1/packages').at(-1).query, { site: SITE, q: 'retries' });
+}));
+
+// The badge
+
+test('compactCount and badgeFor: counts, crawl precedence, private hosts', () => {
+  assert.deepEqual([0, 14, 230, 999, 1000, 1234, 9999, 12_345, 1_500_000].map(compactCount), ['', '14', '230', '999', '1k', '1.2k', '9.9k', '12k', '1.5m']);
+  const sites = { 'hono.dev': 230, 'docs.stripe.com': 1234 };
+  assert.deepEqual(badgeFor('https://hono.dev/docs/', { sites }), { text: '230', title: 'scoop.md: 230 docs indexed for hono.dev', count: true });
+  assert.equal(badgeFor('https://www.hono.dev/x', { sites }).text, '230', 'www. is the same site');
+  assert.equal(badgeFor('https://docs.stripe.com/webhooks', { sites }).text, '1.2k');
+  assert.equal(badgeFor('https://example.com/', { sites }).text, '');
+  assert.equal(badgeFor('http://localhost:3000/', { sites: { localhost: 5 } }).text, '', 'private hosts are never looked up');
+  assert.equal(badgeFor('chrome://extensions', { sites }).text, '');
+  assert.equal(badgeFor('https://hono.dev/docs/', { sites, pending: { 'hono.dev': { state: 'running' } } }).text, '…', 'the crawl wins');
+  assert.equal(badgeFor('https://hono.dev/docs/', { sites, pending: { 'hono.dev': { state: 'complete' } } }).text, '✓');
+  assert.equal(badgeFor('https://hono.dev/docs/', { sites, pending: { 'hono.dev': { state: 'complete', delivered: true } } }).text, '230');
+});
+
+test('service worker: downloads the sites index (then 304 with If-None-Match), sets per-tab badges on activation and load, no request per visit', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 230 }, [SITE]: { indexed: true, pages: 14 } } }, async () => {
+  const local = { devLibraryUrl: mock.url };
+  const badges = {};
+  const titles = {};
+  const alarms = {};
+  const listeners = {};
+  const on = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
+  const tabs = { 7: { id: 7, url: 'https://hono.dev/docs/' }, 8: { id: 8, url: 'http://localhost:5173/' }, 9: { id: 9, url: PAGE } };
+  globalThis.chrome = {
+    storage: {
+      local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: structuredClone(local[k]) } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async (ks) => { for (const k of [ks].flat()) delete local[k]; } },
+      sync: { get: async (d) => ({ ...d, telemetry: false }) },
+      onChanged: on('storage'),
+    },
+    runtime: { getManifest: () => MANIFEST, onInstalled: on('installed'), onStartup: on('startup'), setUninstallURL: async () => {}, getPlatformInfo: async () => ({}) },
+    management: { getSelf: async () => ({ installType: 'development' }) },
+    alarms: { create: (n, i) => { alarms[n] = i; }, clear: async (n) => { delete alarms[n]; return true; }, get: async (n) => alarms[n], onAlarm: on('alarm') },
+    tabs: { onActivated: on('activated'), onUpdated: on('updated'), get: async (id) => tabs[id], query: async () => Object.values(tabs) },
+    action: {
+      setBadgeText: async ({ tabId, text }) => { badges[tabId] = text; },
+      setBadgeBackgroundColor: async () => {},
+      setTitle: async ({ tabId, title }) => { titles[tabId] = title; },
+    },
+  };
+  await import(`../extension/background.js?${Math.random()}`);
+  listeners.installed({ reason: 'install' });
+  await waitFor(() => local[SITES_KEY]?.etag);
+  assert.deepEqual(local[SITES_KEY].sites, { 'hono.dev': 230, [SITE]: 14 });
+  assert.equal(alarms[SITES_ALARM].periodInMinutes, 360, 'every 6 hours');
+  const before = mock.log.length;
+  listeners.activated({ tabId: 7 });
+  listeners.updated(8, { status: 'complete' }, tabs[8]);
+  listeners.updated(9, { status: 'complete' }, tabs[9]);
+  await waitFor(() => badges[7] && badges[9] !== undefined && badges[8] !== undefined);
+  assert.equal(badges[7], '230');
+  assert.equal(titles[7], 'scoop.md: 230 docs indexed for hono.dev');
+  assert.equal(badges[8], '', 'localhost: nothing');
+  assert.equal(badges[9], '14');
+  assert.equal(mock.log.length, before, 'no network request per visit');
+  // Six hours later: unchanged list, 304.
+  listeners.alarm({ name: SITES_ALARM });
+  await waitFor(() => mock.log.filter((e) => e.path === '/v1/sites/index').length === 2);
+  await sleep(20);
+  assert.deepEqual(local[SITES_KEY].sites, { 'hono.dev': 230, [SITE]: 14 });
+  // The page-count badges shown are counted, and sent hourly as one number.
+  await waitFor(() => local.badgeShownCount >= 2);
+}));
+
+test('refreshSites: an unchanged list (304) keeps the copy; a new one replaces it', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 4 } } }, async () => {
+  const local = {};
+  const chromeApi = { storage: { local: { get: async (k) => (k in local ? { [k]: structuredClone(local[k]) } : {}), set: async (o) => Object.assign(local, structuredClone(o)) } } };
+  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
+  assert.equal(await refreshSites(chromeApi, lib), true);
+  assert.equal(await refreshSites(chromeApi, lib), false, '304');
+  mock.sites['hono.dev'].pages = 9;
+  assert.equal(await refreshSites(chromeApi, lib), true);
+  assert.deepEqual(local[SITES_KEY].sites, { 'hono.dev': 9 });
+}));
+
+test('service worker: follows a background crawl with the badge on that site’s tabs, and stops the alarm when done', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const r = mock.newRequest(SITE, PAGE);
+  const local = { devLibraryUrl: mock.url };
+  const badges = {};
+  const alarms = {};
+  const chromeApi = {
+    storage: { local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: structuredClone(local[k]) } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); } } },
+    alarms: { create: (n, i) => { alarms[n] = i; }, clear: async (n) => { delete alarms[n]; return true; } },
+    tabs: { query: async () => [{ id: 3, url: PAGE }, { id: 4, url: 'https://other.example.net/' }] },
+    action: { setBadgeText: async ({ tabId, text }) => { badges[tabId] = text; }, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
+  };
+  await rememberCrawl(chromeApi, { requestId: r.view().id, site: SITE, url: PAGE, state: 'queued' });
+  assert.equal(alarms[CRAWL_ALARM].periodInMinutes, 0.5);
+  assert.equal(badges[3], '…');
+  assert.equal(badges[4], '', 'other sites are not affected');
+  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
+  for (let i = 0; i < 8 && local[PENDING_KEY][SITE].state !== 'complete'; i++) await pollPending(chromeApi, lib);
+  assert.equal(badges[3], '✓');
+  assert.equal(alarms[CRAWL_ALARM], undefined);
+  await forgetCrawl(chromeApi, SITE);
+  assert.equal(badges[3], '');
+}));
+
+test('pollPending drops failed and expired requests', async () => {
+  const local = {};
+  const chromeApi = {
+    storage: { local: { get: async (k) => (k in local ? { [k]: local[k] } : {}), set: async (o) => Object.assign(local, structuredClone(o)) } },
+    alarms: { create() {}, clear: async () => true },
+    tabs: { query: async () => [] },
+    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
+  };
+  const now = Date.now();
+  local[PENDING_KEY] = {
+    'a.example.com': { requestId: 'cr_a', site: 'a.example.com', state: 'running', startedAt: now },
+    'b.example.com': { requestId: 'cr_b', site: 'b.example.com', state: 'running', startedAt: now - 3 * 3_600_000 },
+  };
+  const library = { crawlRequest: async () => ({ ok: true, status: 200, data: { state: 'failed', phase: 'fetch' } }) };
+  assert.equal(await pollPending(chromeApi, library, now), '');
+  assert.deepEqual(local[PENDING_KEY], {});
+});
+
+test('a ✓ nobody picked up expires', async () => {
+  const now = Date.now();
+  const pending = {
+    'a.example.com': { state: 'complete', updatedAt: now - READY_TTL_MS - 1 },
+    'b.example.com': { state: 'running', startedAt: now - 3 * 3_600_000 },
+    'c.example.com': { state: 'complete', updatedAt: now },
+  };
+  assert.deepEqual(Object.keys(live(pending, now)), ['c.example.com']);
+});
+
+test('pollPending merges into what is stored now: an entry the popup delivered meanwhile stays gone', async () => {
+  const local = { [PENDING_KEY]: { 'a.example.com': { requestId: 'cr_a', site: 'a.example.com', state: 'running', startedAt: Date.now() } } };
+  const chromeApi = {
+    storage: { local: { get: async (k) => ({ [k]: structuredClone(local[k]) }), set: async (o) => Object.assign(local, structuredClone(o)) } },
+    alarms: { create() {}, clear: async () => true },
+    tabs: { query: async () => [] },
+    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
+  };
+  const library = {
+    crawlRequest: async () => {
+      delete local[PENDING_KEY]['a.example.com'];
+      local[PENDING_KEY]['b.example.com'] = { requestId: 'cr_b', site: 'b.example.com', state: 'queued', startedAt: Date.now() };
+      return { ok: true, status: 200, data: { state: 'complete', phase: 'done' } };
+    },
+  };
+  await pollPending(chromeApi, library);
+  assert.deepEqual(Object.keys(local[PENDING_KEY]), ['b.example.com']);
+});
+
+test('progressText: friendly labels, counts and how far along', () => {
+  assert.deepEqual(progressText({ state: 'queued', etaSeconds: 150 }), { label: 'Waiting for a crawler', count: 'About 3 minutes', fraction: null });
+  assert.deepEqual(progressText({ state: 'indexing', phase: 'index', pagesFound: 40, pagesIndexed: 10 }), { label: 'Indexing', count: '10 of 40 pages indexed', fraction: 0.25 });
+});
+
+test('library client: the index calls follow the contract', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (url.endsWith('/sites/index')) return init.headers['if-none-match'] === '"v1"' ? new Response(null, { status: 304 }) : new Response('[{"site":"a.dev","pages":3}]', { status: 200, headers: { etag: '"v1"' } });
+    if (url.includes('/packages')) return new Response('# pkg', { status: 200 });
+    return new Response(JSON.stringify({ ok: true }), { status: 200 });
+  };
+  const lib = createLibrary({ baseUrl: 'https://api.scoop.md/v1', installId: 'i', client: 'extension/0.5.0', fetchImpl });
+  await lib.quick(`${PAGE}?a=b`);
+  assert.equal(calls[0].url, `https://api.scoop.md/v1/quick?url=${encodeURIComponent(`${PAGE}?a=b`)}`);
+  await lib.search(SITE, 'a b');
+  assert.equal(calls[1].url, `https://api.scoop.md/v1/search?site=${SITE}&q=a%20b&limit=20`);
+  await lib.topics(SITE);
+  assert.equal(calls[2].url, `https://api.scoop.md/v1/sites/${SITE}/topics`);
+  assert.deepEqual(await lib.queryPackage(SITE, 'x y'), { ok: true, status: 200, data: '# pkg' });
+  assert.equal(calls[3].url, `https://api.scoop.md/v1/packages?site=${SITE}&q=x%20y`);
+  const first = await lib.sitesIndex(null);
+  assert.deepEqual([first.ok, first.etag, first.data], [true, '"v1"', [{ site: 'a.dev', pages: 3 }]]);
+  const again = await lib.sitesIndex('"v1"');
+  assert.deepEqual([again.ok, again.notModified], [true, true]);
+});
+
+test('settings explain that the index lookup still sends the page address with sharing off', () => {
+  assert.match(read('../extension/options.html'), /Turning this off stops uploads; looking up this page in the docs index still sends its address\./);
+});

@@ -4,7 +4,9 @@
 // real-Chrome check, by scripts run against it by hand.
 //
 // sites: { [site]: { indexed, status, crawling, request, pages,
-//   crawl: 'ok' | 'complete' | 'rejected' | 'failed' | '429', steps: [...], hold, packageText } }
+//   crawl: 'ok' | 'complete' | 'rejected' | 'failed' | '429', steps: [...], hold, packageText,
+//   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...] } }
+// GET /sites/index lists indexed sites with an ETag (304 for If-None-Match).
 // A crawl request moves one step per GET /crawl-requests/:id; at "complete"
 // the site becomes indexed. hold: true stays at the last step before it.
 
@@ -93,6 +95,11 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       if (!r) return json(404, { error: { code: 'not_found', message: 'No such crawl request' } });
       return json(200, r.advance());
     }
+    if (req.method === 'GET' && u.pathname === '/v1/packages' && u.searchParams.has('q')) {
+      const name = u.searchParams.get('site');
+      res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
+      return res.end(`# ${name} documentation: search "${u.searchParams.get('q')}" (via scoop.md)\n\nAll results.\n`);
+    }
     if (req.method === 'GET' && u.pathname === '/v1/packages') {
       const name = u.searchParams.get('site');
       if (site(name).packages404Times > 0) {
@@ -102,6 +109,27 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       if (!site(name).indexed || site(name).packages404) return json(404, { error: { code: 'not_indexed', message: `${name} is not indexed` } });
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(site(name).packageText ?? packageFor(name, u.searchParams.get('url')));
+    }
+    if (req.method === 'GET' && u.pathname === '/v1/quick') {
+      const pageUrl = u.searchParams.get('url');
+      const name = new URL(pageUrl).hostname;
+      const s = site(name);
+      return json(200, { site: name, sources: s.quick ?? [], overview: s.overview ?? null, indexed: Boolean(s.indexed), pages: s.indexed ? s.pages ?? 12 : 0 });
+    }
+    if (req.method === 'GET' && u.pathname === '/v1/sites/index') {
+      const list = Object.entries(sites).filter(([, s]) => s.indexed).map(([name, s]) => ({ site: name, pages: s.pages ?? 12 }));
+      const etag = `"${list.map((x) => `${x.site}:${x.pages}`).join(',')}"`;
+      if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
+      return json(200, list, { etag });
+    }
+    if (req.method === 'GET' && (m = u.pathname.match(/^\/v1\/sites\/([^/]+)\/topics$/))) {
+      const s = site(decodeURIComponent(m[1]));
+      return json(200, { site: decodeURIComponent(m[1]), pages: s.pages ?? 12, topics: s.topics ?? [] });
+    }
+    if (req.method === 'GET' && u.pathname === '/v1/search') {
+      const s = site(u.searchParams.get('site'));
+      const q = u.searchParams.get('q');
+      return json(200, { query: q, site: u.searchParams.get('site'), slot: null, hits: (s.hits ?? []).slice(0, Number(u.searchParams.get('limit') ?? 10)) });
     }
     if (req.method === 'POST' && u.pathname === '/v1/skills') return json(201, { id: 'sk_mock', status: 'verified', duplicate: false });
     if (req.method === 'POST' && /^\/v1\/skills\/[^/]+\/feedback$/.test(u.pathname)) return json(200, { worked: 1, failed: 0 });
