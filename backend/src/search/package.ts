@@ -29,6 +29,9 @@ export interface PackageInput {
   chunks: PackageChunk[];
   budget?: number;
   now?: Date;
+  // Exactly in the given order (chunks picked by the client): consecutive
+  // chunks of a page share its section, and a page can come back later.
+  inOrder?: boolean;
 }
 
 // One line of plain text: no newlines or Markdown that could restructure the document.
@@ -52,13 +55,19 @@ export function fenced(text: string): string {
   return `${fence}markdown\n${text}\n${fence}`;
 }
 
-export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAGE_BUDGET, now = new Date() }: PackageInput): string {
-  const pages = new Map<string, { title: string; chunks: PackageChunk[] }>();
+export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAGE_BUDGET, now = new Date(), inOrder = false }: PackageInput): string {
+  const groups: { url: string; title: string; chunks: PackageChunk[] }[] = [];
+  const byUrl = new Map<string, (typeof groups)[number]>();
   for (const c of chunks) {
     if (!safeUrl(c.url)) continue;
-    const page = pages.get(c.url) ?? { title: inline(c.title) || c.url, chunks: [] };
+    const last = groups[groups.length - 1];
+    let page = inOrder ? (last?.url === c.url ? last : undefined) : byUrl.get(c.url);
+    if (!page) {
+      page = { url: c.url, title: inline(c.title) || c.url, chunks: [] };
+      groups.push(page);
+      byUrl.set(c.url, page);
+    }
     page.chunks.push(c);
-    pages.set(c.url, page);
   }
 
   const head = [
@@ -77,14 +86,15 @@ export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAG
   let remaining = budget - head.length;
 
   const included: string[] = [];
+  const listed = new Set<string>();
   const body: string[] = [];
-  for (const [url, page] of pages) {
+  for (const { url, ...page } of groups) {
     const pageHead = `\n---\n\n## ${page.title}\n\nSource: <${url}>\n`;
-    const line = source(url, page.title);
+    const line = listed.has(url) ? '' : source(url, page.title);
     const parts: string[] = [];
     let size = pageHead.length + line.length;
-    // Within a page, chunks read in document order.
-    for (const c of [...page.chunks].sort((a, b) => a.ord - b.ord)) {
+    // Within a page, chunks read in document order (or as given).
+    for (const c of inOrder ? page.chunks : [...page.chunks].sort((a, b) => a.ord - b.ord)) {
       const part = `\n### ${inline(c.heading_path, 300) || page.title}\n\n${fenced(c.text.trim())}\n`;
       if (size + part.length > remaining) continue;
       parts.push(part);
@@ -93,7 +103,8 @@ export function buildIndexPackage({ site, label, chunks, budget = DEFAULT_PACKAG
     if (!parts.length) continue;
     body.push(pageHead + parts.join(''));
     remaining -= size;
-    included.push(line);
+    if (line) included.push(line);
+    listed.add(url);
   }
   if (!included.length) return head + '- (no indexed pages matched)\n';
   return head + included.join('') + body.join('');

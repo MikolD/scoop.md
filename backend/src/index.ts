@@ -103,8 +103,8 @@ export default {
       console.log(JSON.stringify({ cron: 'crawl-requests-waiting', sites: await startAllWaiting({ db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE }) }));
       return;
     }
-    if (!env.OPENROUTER_API_KEY) return;
-    const { totalCapUsd, dailyCapUsd } = indexDeps(env);
+    const { totalCapUsd, dailyCapUsd, classify } = indexDeps(env);
+    if (!classify) return;
     const queued = await reclassify(env.DB, env.INDEX_QUEUE, { totalCapUsd, dailyCapUsd });
     console.log(JSON.stringify({ cron: 'reclassify', queued }));
   },

@@ -44,6 +44,8 @@ export interface Env {
   R2_SECRET_ACCESS_KEY?: string;
   R2_ACCOUNT_ID?: string;
   OPENROUTER_API_KEY?: string;
+  // Jev (TypeSafe System One): the devtool gate, page classification, /v1/quick.
+  JEV_API_KEY?: string;
   // Vars (docs/BACKEND.md §11).
   ENVIRONMENT?: 'dev' | 'staging' | 'production';
   EXTENSION_IDS?: string;
@@ -67,4 +69,8 @@ export interface Env {
   // that requested crawls may use; the rest is headroom for admin crawls.
   ONDEMAND_E2B_SHARE?: string;
   ONDEMAND_INDEX_SHARE?: string;
+  // Page classifier: jev (default) or openrouter.
+  CLASSIFIER?: string;
+  // Jev's price in USD per million tokens (default 0: tokens are recorded either way).
+  JEV_USD_PER_MTOK?: string;
 }

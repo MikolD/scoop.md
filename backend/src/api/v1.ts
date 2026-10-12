@@ -9,7 +9,8 @@ import { SLOTS } from '../index/classify.ts';
 import type { Slot } from '../index/classify.ts';
 import { indexDeps } from '../index/deps.ts';
 import { workersAiEmbed } from '../index/embed.ts';
-import { indexPage, pageKey } from '../index/indexer.ts';
+import { addCost, indexPage, pageKey } from '../index/indexer.ts';
+import { usdPerMTok, jevCostUsd } from '../lib/jev.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
@@ -26,6 +27,8 @@ import type { ApiUsage } from '../telemetry/ingest.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed } from '../search/embedcache.ts';
+import { quickDiscover } from '../search/quick.ts';
+import type { QuickSource } from '../search/quick.ts';
 import { search } from '../search/search.ts';
 import type { SearchDeps } from '../search/search.ts';
 import { topicTree } from '../search/topics.ts';
@@ -118,6 +121,16 @@ async function retryD1<T>(fn: () => Promise<T>): Promise<T> {
 
 // GET /v1/sites/:site/status: the popup asks on every open, so a short cache.
 const CACHE_STATUS = 'public, max-age=15, s-maxage=15';
+// GET /v1/sites/index: the extension downloads it now and then and checks hosts locally.
+const SITES_INDEX_SECONDS = 3600;
+// GET /v1/quick: what a site publishes for agents (llms.txt) is probed once an hour per site and scope.
+const QUICK_CACHE_SECONDS = 3600;
+// GET /v1/packages?chunks=: chunk IDs (src/index/indexer.ts: 32 hex of the URL's hash, then the ordinal).
+const CHUNK_ID = /^[0-9a-f]{32}-\d{1,5}$/;
+const MAX_PACKAGE_CHUNKS = 30;
+
+// The Cache API (absent outside Workers, e.g. in the node tests).
+const edgeCache = () => (typeof caches === 'undefined' ? null : caches.default);
 
 // A site the API may talk about: a public hostname (400 for IP literals,
 // localhost, .local, .internal and the like, as for any fetch).
@@ -247,7 +260,7 @@ const routes: Route[] = [
       json(200, {
         ok: true,
         version: env.VERSION || VERSION,
-        secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY) },
+        secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY), jev: Boolean(env.JEV_API_KEY) },
         telemetry: env.TELEMETRY_INGEST || 'on',
       }),
   },
@@ -320,6 +333,83 @@ const routes: Route[] = [
         200,
         { sites: rows.map((r) => ({ site: r.site, best: summary(r) })), next: more ? String(offset + limit) : null },
         { 'cache-control': CACHE_LIST },
+      );
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/sites\/index$/,
+    name: '/v1/sites/index',
+    // Every approved site with indexed pages, for the extension's toolbar badge:
+    // downloaded now and then and checked locally, so visits stay in the browser.
+    handler: async ({ req, env }) => {
+      const cache = edgeCache();
+      const key = new Request('https://sites-index.scoop.md/v1');
+      const cached = await cache?.match(key).catch(() => undefined);
+      let body: string;
+      let etag: string;
+      if (cached) {
+        body = await cached.text();
+        etag = cached.headers.get('etag') ?? `"${(await sha256Hex(body)).slice(0, 32)}"`;
+      } else {
+        // Requested sites stay out until an admin approves them; rejected ones always.
+        const { results } = await retryD1(() =>
+          env.DB.prepare(
+            `SELECT p.site AS site, COUNT(*) AS pages FROM page_index p LEFT JOIN site_profiles s ON s.site = p.site
+             WHERE COALESCE(s.approved, 1) = 1 AND COALESCE(s.status, '') != 'not_devtool'
+             GROUP BY p.site ORDER BY p.site`,
+          ).all<{ site: string; pages: number }>());
+        body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })) });
+        etag = `"${(await sha256Hex(body)).slice(0, 32)}"`;
+        await cache?.put(key, new Response(body, { headers: { etag, 'cache-control': `public, max-age=${SITES_INDEX_SECONDS}` } })).catch(() => {});
+      }
+      const headers = { 'content-type': 'application/json; charset=utf-8', etag, 'cache-control': `public, max-age=${SITES_INDEX_SECONDS}` };
+      const sent = (req.headers.get('if-none-match') ?? '').split(',').map((t) => t.trim().replace(/^W\//, ''));
+      if (sent.includes(etag)) return new Response(null, { status: 304, headers });
+      return new Response(body, { headers });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/quick$/,
+    name: '/v1/quick',
+    // Instant first answer for a page (src/search/quick.ts): the Markdown its
+    // site publishes for agents, and whether the scoop.md index has the site.
+    handler: async ({ env, url, usage }) => {
+      const raw = url.searchParams.get('url');
+      if (!raw || raw.length > 1024) throw bad('url must be a string of 1–1024 characters');
+      const pageUrl = normalizePageUrl(assertFetchable(raw, { allowLocalhost: allowLocalhost(env) }));
+      const site = siteOf(pageUrl);
+      usage.site = site;
+      const cache = edgeCache();
+      const key = new Request(`https://quick-cache.scoop.md/v1?url=${encodeURIComponent(pageUrl)}`);
+      const [cached, status] = await Promise.all([cache?.match(key).catch(() => undefined), retryD1(() => siteStatus(env.DB, site))]);
+      let found: { sources: QuickSource[]; overview: string | null };
+      if (cached) {
+        found = await cached.json();
+      } else {
+        const d = await quickDiscover(pageUrl, {
+          allowLocalhost: allowLocalhost(env),
+          jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY } : null,
+          siteCache: cache && {
+            get: async (k) => (await cache.match(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`)).catch(() => undefined))?.json() ?? null,
+            put: (k, v) =>
+              cache.put(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`), new Response(JSON.stringify(v), {
+                headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` },
+              })).catch(() => {}),
+          },
+        });
+        found = { sources: d.sources, overview: d.overview };
+        if (d.jevTokens) await addCost(env.DB, site, new Date(), jevCostUsd(d.jevTokens, usdPerMTok(env.JEV_USD_PER_MTOK)), d.jevTokens).catch(() => {});
+        await cache?.put(key, new Response(JSON.stringify(found), {
+          headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` },
+        })).catch(() => {});
+      }
+      Object.assign(usage, { results: found.sources.length, hit: found.overview !== null });
+      return json(
+        200,
+        { site, sources: found.sources, overview: found.overview, indexed: status.indexed, pages: status.pages },
+        { 'cache-control': CACHE_LIST, 'x-scoop-cache': cached ? 'hit' : 'miss' },
       );
     },
   },
@@ -505,7 +595,7 @@ const routes: Route[] = [
           site: site ?? null,
           slot: slot ?? null,
           hits: hits.map((h) => ({
-            url: h.url, title: h.title, heading_path: h.heading_path, snippet: h.snippet, slot: h.slot, topic_path: h.topic_path, score: h.score,
+            id: h.id, url: h.url, title: h.title, heading_path: h.heading_path, snippet: h.snippet, slot: h.slot, topic_path: h.topic_path, score: h.score,
           })),
         },
         { 'cache-control': CACHE_LIST },
@@ -536,6 +626,28 @@ const routes: Route[] = [
       const budget = intParam(url, 'budget', DEFAULT_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET);
       let label: string;
       let chunks;
+      const chunkParam = url.searchParams.get('chunks');
+      if (chunkParam !== null) {
+        // Chunks the client picked (search hits' ids), in its order: the
+        // server assembles the Markdown, with the same fencing, budget and note.
+        if (pageParam !== null || topic !== null || url.searchParams.has('q')) throw bad('Pass chunks, url, q or topic, not more than one');
+        const ids = [...new Set(chunkParam.split(',').map((id) => id.trim()).filter(Boolean))];
+        if (!ids.length || ids.length > MAX_PACKAGE_CHUNKS || !ids.every((id) => CHUNK_ID.test(id))) {
+          throw bad(`chunks must be 1 to ${MAX_PACKAGE_CHUNKS} chunk ids, comma-separated`);
+        }
+        const { results } = await retryD1(() =>
+          env.DB.prepare(`SELECT id, url, site, title, ord, heading_path, text FROM chunks WHERE id IN (${ids.map(() => '?').join(', ')})`)
+            .bind(...ids)
+            .all<{ id: string; url: string; site: string; title: string; ord: number; heading_path: string; text: string }>());
+        if (results.some((r) => r.site !== site)) throw new ApiError('site_mismatch', `chunks must all be from ${site}`, 400);
+        const rows = new Map(results.map((r) => [r.id, r]));
+        const picked = ids.flatMap((id) => rows.get(id) ?? []);
+        Object.assign(usage, { results: picked.length, hit: picked.length > 0 });
+        if (!picked.length) throw notFound('No such chunks');
+        return new Response(buildIndexPackage({ site, label: 'selected sections', chunks: picked, budget, inOrder: true }), {
+          headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
+        });
+      }
       if (pageParam !== null) {
         // Anchored on the page the user is on: that page first, then related chunks.
         if (topic !== null || url.searchParams.has('q')) throw bad('Pass url, q or topic, not more than one');
@@ -551,7 +663,7 @@ const routes: Route[] = [
         }
         const headers = { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' };
         // Cached per site, page, budget and index version (any page indexed changes it).
-        const cache = typeof caches === 'undefined' ? null : caches.default;
+        const cache = edgeCache();
         const key = new Request(
           `https://package-cache.scoop.md/v1?site=${encodeURIComponent(site)}&url=${encodeURIComponent(pageUrl)}&budget=${budget}&v=${encodeURIComponent(look.version)}`,
         );

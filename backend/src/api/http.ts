@@ -7,7 +7,7 @@ import type { Env } from '../env.ts';
 export const CACHE_BEST = 'public, max-age=30, s-maxage=60';
 export const CACHE_LIST = 'public, max-age=60, s-maxage=60';
 
-const ALLOW_HEADERS = 'content-type, x-scoop-install, x-scoop-client, x-scoop-telemetry, authorization';
+const ALLOW_HEADERS = 'content-type, x-scoop-install, x-scoop-client, x-scoop-telemetry, authorization, if-none-match';
 const ALLOW_METHODS = 'GET, POST, DELETE, OPTIONS';
 
 export function json(status: number, body: unknown, headers: Record<string, string> = {}): Response {
@@ -42,6 +42,7 @@ export function withCors(res: Response, req: Request, env: Env): Response {
   const method = req.method === 'OPTIONS' ? (req.headers.get('access-control-request-method') ?? 'GET').toUpperCase() : req.method;
   if (method === 'GET' || method === 'HEAD') {
     h.set('access-control-allow-origin', '*');
+    h.set('access-control-expose-headers', 'etag, x-scoop-cache');
   } else if (origin && writeOriginAllowed(origin, env)) {
     h.set('access-control-allow-origin', origin);
     h.append('vary', 'origin');

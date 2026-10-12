@@ -73,6 +73,9 @@ export interface CrawlRunRow {
   // failed for good, and when any page last reached an outcome.
   pages_index_failed: number;
   index_progress_at: string | null;
+  // Jev tokens (migrations/0011_jev_tokens.sql): page classification and the gate.
+  jev_tokens: number;
+  gate_jev_tokens: number;
   // Where the Workflow is (migrations/0008_crawl_requests.sql): gate | discover | fetch | browser | done.
   phase: string | null;
 }
@@ -87,6 +90,8 @@ export function runCosts(r: CrawlRunRow) {
     gateUsd: r.gate_cost_usd,
     classifyUsd: r.classify_cost_usd,
     embedUsd: r.embed_cost_usd,
+    // Jev's tokens (gate and classification); their USD, at JEV_USD_PER_MTOK, is in gateUsd and classifyUsd.
+    jevTokens: (r.jev_tokens ?? 0) + (r.gate_jev_tokens ?? 0),
     totalUsd,
     pagesStored,
     pagesIndexed: r.pages_indexed,
@@ -269,14 +274,14 @@ export class CrawlStore {
     await this.db.batch([
       this.db
         .prepare(
-          `UPDATE crawl_runs SET gate_decision = ?2, gate_category = ?3, gate_method = ?4, gate_reason = ?5, gate_cost_usd = ?6,
+          `UPDATE crawl_runs SET gate_decision = ?2, gate_category = ?3, gate_method = ?4, gate_reason = ?5, gate_cost_usd = ?6, gate_jev_tokens = ?9,
              status = CASE WHEN ?7 THEN 'rejected' ELSE status END,
              phase = CASE WHEN ?7 THEN 'done' ELSE 'discover' END,
              finished_at = CASE WHEN ?7 THEN ?8 ELSE finished_at END,
              error = CASE WHEN ?7 THEN ?5 ELSE error END
            WHERE id = ?1`,
         )
-        .bind(runId, v.decision, v.category, v.method, v.reason, v.costUsd, reject ? 1 : 0, at),
+        .bind(runId, v.decision, v.category, v.method, v.reason, v.costUsd, reject ? 1 : 0, at, v.jevTokens ?? 0),
       this.db
         .prepare(
           `UPDATE site_profiles SET gate_category = ?2, gate_confidence = ?3, gate_reason = ?4, gate_method = ?5, gate_checked_at = ?6,

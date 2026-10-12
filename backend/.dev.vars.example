@@ -14,6 +14,8 @@ ALLOW_ANY_EXTENSION=1
 # R2_ACCOUNT_ID=
 # Indexing (POST /v1/admin/index, the index-pages consumer). Never commit a real key.
 # OPENROUTER_API_KEY=<your OpenRouter key>
+# Jev (TypeSafe System One): the devtool gate, page classification (CLASSIFIER=jev, the default), /v1/quick.
+# JEV_API_KEY=<your TypeSafe key>
 # Admin console (admin.localhost:8787 locally): Basic auth user and passcode.
 # Unset, or a passcode under 32 characters, and no one gets in. Generate one:
 #   openssl rand -base64 32

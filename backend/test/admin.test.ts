@@ -622,7 +622,7 @@ test('costs: 14 days of AI, gate and E2B spend by day and site', async () => {
   assert.deepEqual(d.crawls.runs.map((r: any) => r.id).sort(), ['cr_01AAAAAAAAAAAAAAAAAAAAAAAA', 'cr_01BBBBBBBBBBBBBBBBBBBBBBBB']);
   assert.equal(d.crawls.averages.overall.runs, 2);
   const run = (await call(env, req('/api/runs/cr_01AAAAAAAAAAAAAAAAAAAAAAAA'))).body.run;
-  assert.deepEqual(Object.keys(run.costs).sort(), ['browserUsd', 'classifyUsd', 'embedUsd', 'gateUsd', 'indexingDone', 'pagesIndexed', 'pagesStored', 'perPageUsd', 'totalUsd', 'tracked']);
+  assert.deepEqual(Object.keys(run.costs).sort(), ['browserUsd', 'classifyUsd', 'embedUsd', 'gateUsd', 'indexingDone', 'jevTokens', 'pagesIndexed', 'pagesStored', 'perPageUsd', 'totalUsd', 'tracked']);
   assert.ok(Math.abs(run.costs.totalUsd - 0.0015) < 1e-9);
 });
 

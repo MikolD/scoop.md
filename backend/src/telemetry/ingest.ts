@@ -60,6 +60,7 @@ export const API_ROUTES: Record<string, string> = {
   '/v1/sites/:site/profile': 'api_profile',
   '/v1/sites/:site/topics': 'api_topics',
   '/v1/crawl-requests': 'api_crawl_request',
+  '/v1/quick': 'api_quick',
 };
 
 // What an API handler learned about the request, for usage telemetry.

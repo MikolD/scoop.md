@@ -127,7 +127,7 @@ test('CrawlSite: force skips the gate and marks the verdict forced; an undecided
   const landing = readFileSync(new URL('./fixtures/gate/marketing.html', import.meta.url), 'utf8');
   await assert.rejects(
     run(e, { runId: 'cr_landing', site: 'flowly.example', startUrl: 'https://flowly.example/', maxPages: 5, maxMinutes: 5 }, { 'https://flowly.example/': landing }),
-    /devtool gate: signals inconclusive and no OpenRouter key/,
+    /devtool gate: signals inconclusive and no Jev or OpenRouter key/,
   );
   const failed = (await store.getRun('cr_landing'))!;
   assert.equal(failed.status, 'failed');

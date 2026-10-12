@@ -21,7 +21,8 @@ import { addCost, capsReached } from '../index/indexer.ts';
 import { indexDeps } from '../index/deps.ts';
 import { gateSite, GateUndecided, listVerdict } from './gate.ts';
 import { ondemandShare, startWaiting } from './requests.ts';
-import type { GateVerdict } from './gate.ts';
+import type { GateAi, GateVerdict } from './gate.ts';
+import { usdPerMTok } from '../lib/jev.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
@@ -303,15 +304,16 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
   }
 }
 
-// The gate's AI check, on the classifier's key and daily caps; null without a key.
-function gateAi(env: Env, site: string) {
-  const apiKey = env.OPENROUTER_API_KEY;
-  if (!apiKey) return null;
+// The gate's AI check: Jev, with OpenRouter as its fallback, on the
+// classifier's daily caps; null without either key.
+function gateAi(env: Env, site: string): GateAi | null {
+  if (!env.JEV_API_KEY && !env.OPENROUTER_API_KEY) return null;
   const { db, dailyCapUsd, totalCapUsd } = indexDeps(env);
   return {
-    apiKey,
+    jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, usdPerMTok: usdPerMTok(env.JEV_USD_PER_MTOK) } : null,
+    apiKey: env.OPENROUTER_API_KEY,
     capReached: () => capsReached({ db, dailyCapUsd, totalCapUsd }, site, new Date()),
-    addCost: (usd: number) => addCost(db, site, new Date(), usd),
+    addCost: (usd: number, jevTokens?: number) => addCost(db, site, new Date(), usd, jevTokens),
     timeoutMs: 60_000,
   };
 }

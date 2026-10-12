@@ -67,7 +67,8 @@ Workers AI and Vectorize have no local simulation, so the top-level config
 binds `AI` and `VECTORS` with `remote: true` to the dev index
 `scoop-chunks-dev` (needs `npx wrangler login`; embeddings are billed to the
 account, fractions of a cent). D1, R2 and the queue stay local. Put
-`OPENROUTER_API_KEY` in `.dev.vars`. Then:
+`JEV_API_KEY` (the gate and page classification) and, for the gate's
+fallback, `OPENROUTER_API_KEY` in `.dev.vars`. Then:
 
 ```sh
 npm run db:migrate:local
@@ -315,6 +316,7 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    done
    npx wrangler queues create index-pages-staging
    npx wrangler queues create index-pages-dlq-staging
+   npx wrangler secret put JEV_API_KEY --env staging
    npx wrangler secret put OPENROUTER_API_KEY --env staging
    ```
    Production is the same with `scoop-chunks-production`, `index-pages-production`

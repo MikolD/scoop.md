@@ -5,6 +5,7 @@
 
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
+import { coalesceEmbed } from './embed.ts';
 import { indexPage, PermanentError, RECLASSIFY_RUN, recordIndexOutcome } from './indexer.ts';
 import type { IndexDeps, IndexMessage } from './indexer.ts';
 
@@ -38,8 +39,10 @@ export const backoffSeconds = (attempts: number) => Math.min(3600, 30 * 2 ** Mat
 
 // A batch's messages run concurrently, each acked or retried on its own, so
 // one slow or failing page can't hold up or fail the others.
+// Their embeddings are requested together (coalesceEmbed).
 export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: IndexDeps): Promise<void> {
-  await Promise.allSettled(batch.messages.map((msg) => handleMessage(batch.queue, msg, deps)));
+  const shared = { ...deps, embed: coalesceEmbed(deps.embed) };
+  await Promise.allSettled(batch.messages.map((msg) => handleMessage(batch.queue, msg, shared)));
 }
 
 async function handleMessage(queue: string, msg: Message<unknown>, deps: IndexDeps): Promise<void> {

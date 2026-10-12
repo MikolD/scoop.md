@@ -31,8 +31,11 @@ export interface Classification {
 export interface Classified {
   classification: Classification | null;
   model: string;
-  // OpenRouter's usage.cost summed over every attempt, failed ones included.
+  // OpenRouter's usage.cost summed over every attempt, failed ones included
+  // (for Jev: its tokens at JEV_USD_PER_MTOK).
   costUsd: number;
+  // Jev tokens (src/index/jevclassify.ts).
+  jevTokens?: number;
   errors?: string[];
 }
 
@@ -96,6 +99,8 @@ export interface PageInput {
   url: string;
   title: string;
   markdown: string;
+  // The site's existing top-level topics, most pages first (the Jev classifier picks among them).
+  topics?: string[];
 }
 
 // The message the model sees. A literal </page> in the content can't close the block early.
@@ -110,8 +115,8 @@ export function stripFences(s: string): string {
 }
 
 // Control and format characters (zero-width, bidi overrides) are dropped before anything is stored.
-const clean = (s: string, max: number) => s.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
-const topicName = (s: string) => clean(s, 60).toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}._-]/gu, '').replace(/^-+|-+$/g, '');
+export const clean = (s: string, max: number) => s.replace(/[\p{Cc}\p{Cf}]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
+export const topicName = (s: string) => clean(s, 60).toLowerCase().replace(/\s+/g, '-').replace(/[^\p{L}\p{N}._-]/gu, '').replace(/^-+|-+$/g, '');
 
 // Validates and normalises model output. Throws on anything that doesn't fit the
 // schema's required shape; over-long lists are cut, and malformed entities and

@@ -35,11 +35,15 @@
     "CRAWL_REQUESTS_DAILY_MAX": "300",
     // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
     "ONDEMAND_E2B_SHARE": "0.5",
-    "ONDEMAND_INDEX_SHARE": "0.5"
+    "ONDEMAND_INDEX_SHARE": "0.5",
+    // Page classifier: jev (default; JEV_API_KEY) or openrouter (OPENROUTER_API_KEY).
+    "CLASSIFIER": "jev",
+    // Jev's price, USD per million tokens; tokens are recorded either way (0 until it is published).
+    "JEV_USD_PER_MTOK": "0"
     // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
-    // OPENROUTER_API_KEY (indexing) also comes from .dev.vars locally.
+    // OPENROUTER_API_KEY (the gate's fallback, CLASSIFIER=openrouter) and JEV_API_KEY also come from .dev.vars locally.
   },
   // The admin console's static UI (admin/), served only on admin hosts, after
   // Basic auth: the Worker runs first for every request (src/admin/app.ts).
@@ -81,7 +85,7 @@
   // The crawler sends one message per changed page; the consumer indexes it (src/index/).
   "queues": {
     "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-dev" }],
-    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" },
+    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 6, "max_concurrency": 10, "dead_letter_queue": "index-pages-dlq-dev" },
       { "queue": "telemetry-events-dev", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-dev" }]
   },
   // Daily (17 4): re-enqueue pages still waiting for a classification (src/index/reclassify.ts).
@@ -120,7 +124,9 @@
         "CRAWL_REQUESTS_DAILY_MAX": "300",
         // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
         "ONDEMAND_E2B_SHARE": "0.5",
-        "ONDEMAND_INDEX_SHARE": "0.5"
+        "ONDEMAND_INDEX_SHARE": "0.5",
+        "CLASSIFIER": "jev",
+        "JEV_USD_PER_MTOK": "0"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -150,7 +156,7 @@
       ],
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-staging" }],
-        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" },
+        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 6, "max_concurrency": 10, "dead_letter_queue": "index-pages-dlq-staging" },
           { "queue": "telemetry-events-staging", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-staging" }]
       },
       "triggers": { "crons": ["17 4 * * *", "23 * * * *"] }
@@ -186,7 +192,9 @@
         "CRAWL_REQUESTS_DAILY_MAX": "300",
         // Share (0-1) of the E2B and AI daily caps that requested crawls may use; the rest is admin headroom.
         "ONDEMAND_E2B_SHARE": "0.5",
-        "ONDEMAND_INDEX_SHARE": "0.5"
+        "ONDEMAND_INDEX_SHARE": "0.5",
+        "CLASSIFIER": "jev",
+        "JEV_USD_PER_MTOK": "0"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -216,7 +224,7 @@
       ],
       "queues": {
         "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-production" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-production" }],
-        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" },
+        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 10, "max_batch_timeout": 2, "max_retries": 6, "max_concurrency": 10, "dead_letter_queue": "index-pages-dlq-production" },
           { "queue": "telemetry-events-production", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 1, "dead_letter_queue": "telemetry-events-dlq-production" }]
       },
       "triggers": { "crons": ["17 4 * * *", "23 * * * *"] }

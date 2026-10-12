@@ -195,7 +195,7 @@ Public, `cache-control: public, max-age=15, s-maxage=15`. Never 404: an unknown 
 
 #### `POST /v1/crawl-requests`
 Request: `{ "url": "<the page the user is on>" }` (≤ 1024 chars). Requires `X-Scoop-Install`; same CORS as other writes; the URL passes the same SSRF and site normalisation as any fetch (private host → 400). The site is the URL's host.
-- The crawl's **scope** is its start URL: the URL's first path segment when the URL has a deeper path (e.g. `/d1/`), else the site root. Joins and the cooldown are per scope.
+- The crawl's **scope** is its start URL: the URL's first path segment when the URL has a deeper path (e.g. `/d1/`), else the site root. Joins and the cooldown are per scope. A scope whose own page is gone and under which discovery finds nothing (the requested page redirected out of it, as biomejs.dev/guides/… does to /installation/…) is crawled as the whole site, from the requested page.
 - **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started, at most 100 pages and 10 minutes. The requested page itself is always crawled, first (its `.md` twin if it has one, else its HTML; on a client-rendered site the browser crawl starts there). When another scope of the same site is crawling, the request waits instead (still 202, `queued`) and its crawl starts after that one, when the request is next polled.
 - **200** with the full request view (below), without starting anything, when:
   - the site is on the gate's denylist, or `not_devtool`: `state: "rejected"` with `reason` (nothing is counted);
@@ -216,13 +216,49 @@ Public, no auth. The ID is `rq_` + a ULID (48-bit timestamp + 80 random bits), s
 { "id": "rq_…", "site": "developers.cloudflare.com", "state": "indexing", "phase": "index",
   "pagesFound": 55, "pagesIndexed": 39, "path": "markdown", "reason": null, "etaSeconds": 128 }
 ```
-- `state`: `queued | running | indexing | complete | rejected | failed`. `indexing` lasts until every page the crawl stored reached an outcome: indexed, or skipped (its site rejected, its page gone) or failed for good (a permanent error, or the last delivery before the dead-letter queue), both recorded. Pages with no recorded outcome at all stop holding the request 5 minutes after the crawl's last index progress. `reason` for `failed` is one of `crawl failed`, `this site needs a browser and that's unavailable right now`, `busy, try again later`; for `rejected` it is the gate's reason. `indexing`: the crawl finished but some of its new or changed pages are still in the index queue (the run's `pages_indexed` < pages stored); `complete` once they are all indexed (or 30 minutes after the crawl finished, so a page lost to the dead-letter queue can't hold it forever).
+- `state`: `queued | running | indexing | complete | rejected | failed`. `indexing` lasts until every page the crawl stored reached an outcome: indexed, or skipped (its site rejected, its page gone) or failed for good (a permanent error, or the last delivery before the dead-letter queue), both recorded. Pages with no recorded outcome at all stop holding the request 5 minutes after the crawl's last index progress. `reason` for `failed` is one of `crawl failed`, `this site needs a browser and that's unavailable right now`, `busy, try again later`; for `rejected` it is the gate's reason. `indexing`: the crawl finished but some of its new or changed pages are still in the index queue; `complete` once each has an outcome (or after the 5 minutes without progress above).
 - `phase`: `gate | discover | fetch | browser | index | done`, written by the Workflow at step boundaries (`crawl_runs.phase`); `index` is derived.
 - `pagesFound`: pages stored or confirmed unchanged so far; `pagesIndexed` counts unchanged pages (indexed by an earlier crawl).
 - `etaSeconds`: a rough guide for a progress message (0 when final).
 
 #### `GET /v1/packages?site=<site>&url=<page url>`
 Cached in the Cache API for 10 minutes per site, page, budget and index version (indexed page count and last index time), so a newly indexed page gives a fresh package (`x-scoop-cache: hit | miss`). `not_indexed` is never cached. Built from D1 alone when it has to: the anchor page's chunks, and related chunks from full-text search, which also skips the query embedding when it finds enough on its own. A package anchored on the page the user is on: that page's indexed chunks first (matched by normalised URL, without a trailing slash, or as its `.md` / `/index.md` twin, or the HTML page of a `.md` URL), then the most related chunks from the same site by hybrid search on the page's title and headings; within `budget` (default 60,000 characters), same Markdown format and fencing as the `q`/`topic` packages. A page that isn't indexed gets related chunks from its URL's path words. 404 `not_indexed` when the site has no index; 400 `site_mismatch` when `url` isn't on `site`; `url`, `q` and `topic` are exclusive.
+
+#### `GET /v1/packages?site=<site>&chunks=<id1,id2,…>`
+For the extension's Search tab: a package built from exactly the chunks the user picked (the `id`s of `GET /v1/search` hits), in the given order, so the client never stitches raw text. 1 to 30 IDs, comma-separated (a repeated ID is used once); every one must belong to `site` (else 400 `site_mismatch`). Consecutive chunks of one page share its section, a page listed again later gets another section, and Sources lists each page once. Same header, untrusted-reference note, fencing and `budget` as the other packages. IDs that no longer exist (the page was re-indexed) are left out; 404 when none is left. `chunks`, `url`, `q` and `topic` are exclusive. `cache-control: public, max-age=60`.
+
+#### `GET /v1/search?q=&site=&slot=&limit=`
+Hybrid search over indexed chunks. Each hit: `{ id, url, title, heading_path, snippet, slot, topic_path, score }`, no full text: `id` is the chunk's stable ID (the page URL's hash and the chunk's position; it changes only when the page is re-chunked), for `GET /v1/packages?chunks=`.
+
+### Instant answers and the sites index
+
+#### `GET /v1/quick?url=<page url>`
+Public, read rate limit. Something to give the user at once while a crawl runs, or instead of one: what the page's site already publishes for agents. Found server-side in parallel within about 1.5 s:
+- `llms.txt` and `llms-full.txt` under the page's first path segment, at `docs.<registrable domain>` and at the page's host;
+- the page's `.md` twins (`/page.md`, `/page/index.md`; a `.md` URL is its own);
+- with more than one, Jev chooses the best overview among them (`llms-full.txt` only when nothing lighter exists); without Jev, or when it fails or runs out of time, the most specific `llms.txt` wins.
+
+Every fetch goes through `crawlFetch` (the SSRF guard, a size cap, same-site redirects only); a private or malformed `url` → 400. The server returns URLs only, never content: the client fetches what it wants.
+
+```json
+{ "site": "hono.dev",
+  "sources": [ { "kind": "llms-txt", "url": "https://hono.dev/llms.txt", "label": "Hono (llms.txt)", "bytes": 5927 },
+               { "kind": "page-md", "url": "https://hono.dev/docs/api/routing.md", "label": "This page: Routing", "bytes": 8120 },
+               { "kind": "llms-full", "url": "https://hono.dev/llms-full.txt", "label": "llms-full.txt at hono.dev", "bytes": null } ],
+  "overview": "https://hono.dev/llms.txt", "indexed": true, "pages": 41 }
+```
+- `kind`: `llms-txt | llms-full | page-md`; `bytes` is null over the read cap (512 KB, 64 KB for `llms-full.txt`). `sources` can be empty and `overview` null.
+- `indexed` and `pages` are read fresh each time (as `GET /v1/sites/:site/status`).
+- Cached for an hour in the Cache API: the whole answer per page URL (`x-scoop-cache: hit | miss`), and the llms files per site and scope, so another page of the site only probes its own twins. `cache-control: public, max-age=60`.
+
+#### `GET /v1/sites/index`
+The extension's toolbar badge: a compact list of every approved site with indexed pages, downloaded now and then (say hourly, and at startup) and checked locally, so no per-visit request ever leaves the browser.
+
+```json
+{ "sites": [ { "site": "developers.cloudflare.com", "pages": 312 }, { "site": "hono.dev", "pages": 41 } ] }
+```
+- Sorted by site. A requested site (`source: requested`) is left out until an admin approves it; a rejected (`not_devtool`) one always.
+- `ETag` (a hash of the body; `If-None-Match` → 304), `cache-control: public, max-age=3600`, and built once an hour in the Cache API. `etag` is exposed to CORS readers.
 
 #### `DELETE /v1/admin/skills/:id`
 Takedown. Requires `Authorization: Bearer <ADMIN_TOKEN>` (Workers secret; compare in constant time). Marks the skill removed (keep the row for audit, delete the R2 object). `200 { "ok": true }`. Wrong or missing token → `404` (don't reveal the endpoint).
@@ -299,6 +335,7 @@ Ties break by `createdAt` descending. If none qualify, return `null`; the extens
 | `POST /v1/skills` | 20 per hour per install ID, and 60 per hour per IP | 429 |
 | Feedback and reports | 120 per hour per install ID | 429 |
 | Reads | 600 per minute per IP | 429 |
+| `GET /v1/search`, `GET /v1/packages?q=` / `?url=` (they embed the query) | 60 per minute per IP | 429 |
 | `POST /v1/crawl-requests` that would start a crawl | 5 per install ID, 15 per IP subject, `CRAWL_REQUESTS_DAILY_MAX` (300) overall, per UTC day | 429 |
 | `POST /v1/crawl-requests`, any outcome | 60 per hour per install ID, 300 per hour per IP | 429 |
 
@@ -367,7 +404,8 @@ Migrations live in `backend/migrations/` and run with `wrangler d1 migrations ap
 
 - `wrangler.toml` (or `wrangler.jsonc`) with `production` and `staging` environments, each with its own D1 database and R2 bucket.
 - Custom domains: `api.scoop.md` → production, `api-staging.scoop.md` → staging. DNS for scoop.md is on Cloudflare.
-- Secrets: `ADMIN_TOKEN`. Vars: `EXTENSION_IDS`, `ALLOW_ANY_EXTENSION` (staging only), `ALLOW_LOCALHOST` (local dev only; never set in staging or production).
+- Secrets: `ADMIN_TOKEN`, `RATE_KEY`, `JEV_API_KEY` (TypeSafe's Jev: the devtool gate, page classification, `/v1/quick`), `OPENROUTER_API_KEY` (the gate's fallback when Jev fails; page classification only with `CLASSIFIER=openrouter`), `E2B_API_KEY`. Vars: `EXTENSION_IDS`, `ALLOW_ANY_EXTENSION` (staging only), `ALLOW_LOCALHOST` (local dev only; never set in staging or production), `CLASSIFIER` (`jev`, the default, or `openrouter`), `JEV_USD_PER_MTOK` (Jev's price per million tokens, default 0 until published; tokens are recorded either way). `GET /v1/health` reports which secrets are set (`secrets.jev`, …), never their values.
+- The index-pages queue consumer takes batches of 10 messages, up to 10 at once (`max_batch_size`, `max_concurrency`; `max_batch_timeout` 2 s); a batch's pages share their embedding calls.
 - Enable Workers Logs. Log one line per request: method, route, status, duration, `X-Scoop-Client`. Nothing else.
 - Back up D1 with Time Travel (on by default); document how to restore in `backend/README.md`.
 - CI (GitHub Actions): typecheck, unit tests, then contract tests against `wrangler dev`. Deploy to staging on push to `main`, to production on a tag `backend-v*`.

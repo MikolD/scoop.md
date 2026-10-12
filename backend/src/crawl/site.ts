@@ -181,7 +181,8 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     fetchedMaps++;
     const r = await get(url, SITEMAP_CAP);
     if (!r.ok || r.notModified || r.over) {
-      if (fallback && fetchedMaps === 1) queue.push(`${origin}/sitemap_index.xml`);
+      // Without a Sitemap line: /sitemap.xml, then the index names generators use (Astro: sitemap-index.xml).
+      if (fallback && fetchedMaps === 1) queue.push(`${origin}/sitemap_index.xml`, `${origin}/sitemap-index.xml`);
       continue;
     }
     // Stop parsing once we hold as many URLs as we keep.
@@ -203,7 +204,20 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     }
   }
 
-  out.docsRoot = pickDocsRoot(givenRoot, [...pageUrls]);
+  // A scope whose own page doesn't exist and that nothing found falls under:
+  // a requested page that redirected out of it (biomejs.dev/guides/… →
+  // /installation/…, with /guides/ a 404). The whole site instead, from the
+  // requested page.
+  let root = givenRoot.replace(/\/+$/, '');
+  let startHref = start.href;
+  if (root && ![...pageUrls, ...links].some((u) => underRoot(u, root))) {
+    const r = await get(start.href, 64_000);
+    if (!r.ok || !underRoot(r.url, root)) {
+      root = '';
+      startHref = o.priorityUrl && sameSite(o.priorityUrl) ? o.priorityUrl : `${origin}/`;
+    }
+  }
+  out.docsRoot = pickDocsRoot(root, [...pageUrls]);
   const inRoot = (u: string) => underRoot(u, out.docsRoot) && allowed(u);
   const sitemapPages = [...pageUrls].filter(inRoot);
   out.openapi = openApiLinks([...links, ...pageUrls]);
@@ -300,7 +314,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   // little text, goes to the browser crawler instead.
   const markdownPages = plan.filter((p) => p.kind === 'page-md').length;
   if (!out.llmsUrl && !out.llmsFullUrl && markdownPages === 0) {
-    const r = await get(start.href);
+    const r = await get(startHref);
     const body = r.ok && !r.notModified && !r.over ? r.text : null;
     // Some servers (Read the Docs) answer our Accept header with Markdown: the
     // page is readable as it is, and its links are Markdown links.
@@ -320,11 +334,11 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
       out.plan = plan;
     } else if (html !== null) {
       out.needsBrowser = true;
-      out.browserStartUrls = [
+      out.browserStartUrls = [...new Set([
         ...(priority ? [priority.url] : []),
-        start.href,
-        ...sample(sitemapPages.filter((u) => u !== start.href && u !== priority?.url), 20),
-      ];
+        startHref,
+        ...sample(sitemapPages.filter((u) => u !== startHref && u !== priority?.url), 20),
+      ])];
     }
   }
   out.requests = requests;

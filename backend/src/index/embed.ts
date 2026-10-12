@@ -74,3 +74,41 @@ export function workersAiEmbed(ai: Ai): Embed {
     return out;
   };
 }
+
+// Shares Workers AI calls between concurrent callers: texts asked for within
+// `waitMs` of each other are embedded together (packed by packBatches), so a
+// queue batch of small pages costs a few calls instead of one or more per
+// page. When a shared call fails, each caller's texts are embedded on their
+// own, so one bad page can't fail the others.
+export function coalesceEmbed(embed: Embed, waitMs = 25): Embed {
+  type Job = { texts: string[]; mode: 'query' | 'document'; resolve: (v: number[][]) => void; reject: (e: unknown) => void };
+  let pending: Job[] = [];
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const alone = (j: Job) => embed(j.texts, j.mode).then(j.resolve, j.reject);
+  const flush = async () => {
+    const jobs = pending;
+    pending = [];
+    timer = null;
+    for (const mode of ['document', 'query'] as const) {
+      const group = jobs.filter((j) => j.mode === mode);
+      if (group.length === 1) void alone(group[0]);
+      if (group.length < 2) continue;
+      try {
+        const all = await embed(group.flatMap((j) => j.texts), mode);
+        let i = 0;
+        for (const j of group) {
+          j.resolve(all.slice(i, i + j.texts.length));
+          i += j.texts.length;
+        }
+      } catch {
+        for (const j of group) void alone(j);
+      }
+    }
+  };
+  return (texts, mode) =>
+    new Promise((resolve, reject) => {
+      if (!texts.length) return resolve([]);
+      pending.push({ texts, mode, resolve, reject });
+      timer ??= setTimeout(() => void flush(), waitMs);
+    });
+}

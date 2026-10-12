@@ -54,6 +54,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `uninstall_reason` | website (`/bye`) | `installId`, `reason` (`too_noisy` / `didnt_work` / `privacy` / `other`) |
 | `api_search`, `api_packages`, `api_best`, `api_sites`, `api_site`, `api_profile`, `api_topics` | server | `route`, `status`, `latencyMs`, `q` (≤200), `topic`, `results`, `hit`, `client` (`X-Scoop-Client`) |
 | `api_crawl_request` | server (`POST /v1/crawl-requests`) | `route`, `status`, `latencyMs`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` for any 429 including "busy"; also the row's `outcome`), `client`; `site` on the row. Not recorded with `X-Scoop-Telemetry: off`. |
+| `api_quick` | server (`GET /v1/quick`) | `route`, `status`, `latencyMs`, `results` (sources found), `hit` (an overview was found), `client`; `site` on the row. |
 
 The catalog lives in `backend/src/telemetry/schema.ts`; the reference server (`server/app.js`) keeps the same names, checked by a test.
 
@@ -95,6 +96,10 @@ R2 bucket `scoop-telemetry-<env>` (binding `TELEMETRY`; its own bucket so the ar
 
 - `telemetry/raw/dt=YYYY-MM-DD/hour=HH/<uuid>.ndjson.gz`: one JSON row per line, the D1 columns except `ip_hash`. A redelivered message can archive an event twice: dedupe on `id`. **Lifecycle rule (create it): delete objects under `telemetry/raw/` 13 months (395 days) after creation.**
 - `telemetry/tombstones/<install_id>.json`: deletion tombstones. Objects are never rewritten; every read of the archive (`readArchive`, the admin export) skips install IDs with a tombstone or a `telemetry_deletions` row.
+
+## AI spend (costs, not usage telemetry)
+
+What crawling and indexing cost is kept in the library database (`DB`), not here: `index_costs` (per site and UTC day, what the daily caps count), `index_run_costs` (per page and run) and `crawl_runs` (per run, shown in the admin console's Costs view and in each run's `costs`). Jev, TypeSafe's model for the devtool gate, page classification and `/v1/quick`'s overview pick, is billed in tokens at a price not yet published: its tokens are recorded in `jev_tokens` columns on all three tables (`gate_jev_tokens` on `crawl_runs` for the gate; migration 0011) and priced at `JEV_USD_PER_MTOK` (default 0) into the existing USD columns. A run's `costs.jevTokens` adds the gate's and the classification's. `/v1/quick` charges its Jev tokens to the page's site in `index_costs`. OpenRouter spend (the gate's fallback; classification with `CLASSIFIER=openrouter`) stays in USD as before.
 
 ## Deletion requests
 

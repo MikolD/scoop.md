@@ -72,7 +72,7 @@ function run(over: Partial<CrawlRunRow> = {}): CrawlRunRow {
     id: 'cr_X', site: 'ex.com', start_url: 'https://ex.com/', started_at: T0.toISOString(), finished_at: null, status: 'running', path: null,
     pages_new: 0, pages_changed: 0, pages_unchanged: 0, pages_failed: 0, pages_skipped: 0, browser_seconds: 0, cost_usd: 0, error: null,
     forced: 0, gate_decision: null, gate_category: null, gate_method: null, gate_reason: null, gate_cost_usd: 0,
-    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, requested: 1, pages_index_failed: 0, index_progress_at: null, ...over,
+    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, requested: 1, pages_index_failed: 0, index_progress_at: null, jev_tokens: 0, gate_jev_tokens: 0, ...over,
   };
 }
 const REQ = { id: 'rq_X', site: 'ex.com', state: 'started' as const, reason: null, created_at: T0.toISOString() };

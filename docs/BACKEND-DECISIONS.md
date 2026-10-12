@@ -1195,3 +1195,87 @@ Found by the extension's real run against staging (2026-10-12).
 - **Status semantics**: `indexed: true` / `ready` while the request is still
   `indexing` is intended (the extension uses the pages already indexed);
   `crawling: true` until the request is complete says more are coming.
+- **Verified on staging after the deploy (aa0e75b)**: the astral request reads
+  `complete` (101/101); fresh requests for valibot.dev (39 pages, 4 m 13 s
+  end to end) and biomejs.dev complete; `/packages?url=` is 0.33-0.70 s on a
+  miss and 0.25-0.33 s on a hit for docs.astral.sh and hono.dev, no errors.
+
+## Jev: fast gating, classification and instant answers
+
+Crawling was too slow for a user waiting in the popup: the gate's AI check
+took 15-20 s and classification about 8 s a page with qwen through
+OpenRouter (staging: docs.astral.sh indexed 100 pages in 10.2 minutes, 9.8
+pages a minute; valibot.dev 10-12). Jev, TypeSafe's System One model
+(`api.typesafe.ai/v1/systemone`, model `jev-latest`), answers typed questions
+(noul: a yes/no probability; choice: one of a set, with probabilities) in
+0.15-0.3 s. Generation is replaced by narrow decisions, and code does the rest.
+
+- **Client** (`src/lib/jev.ts`): plain fetch, every question in one request
+  (one call is far cheaper and faster than several), 5 s timeout per attempt,
+  one retry on a timeout, a dropped connection, 429 or 5xx (529 is "overloaded"),
+  none on 401/422. Answers are checked: each asked question has an answer of
+  its type, and a choice is one of its options. Usage comes back in tokens.
+- **Cost**: Jev's price isn't published, so tokens are stored
+  (`index_run_costs.jev_tokens`, `crawl_runs.jev_tokens` and
+  `gate_jev_tokens`, `index_costs.jev_tokens`, migration 0011) and priced
+  with `JEV_USD_PER_MTOK` (default 0) into the existing USD columns, which
+  the daily caps count. Live: about 800-1,200 tokens per gate check and
+  about 1,700 per page classified.
+- **Gate** (`jevVerdict` in `src/crawl/gate.ts`): `is_devtool_docs` (noul)
+  and `category` (choice over the gate's categories) in one request over the
+  same text summary the OpenRouter check used. Accepted on noul ≥ 0.7 and
+  category `devtool-docs`; recorded as method `ai` with a reason like
+  `Jev: developer docs 0.97, category devtool-docs (1.00)`. OpenRouter is
+  asked only when Jev fails (after its retry); with neither key the gate is
+  undecided, as before. Live: 140-215 ms (valibot.dev and biomejs.dev crawl,
+  amazon.com rejected as ecommerce, figma.com as marketing-only).
+- **Classification** (`src/index/jevclassify.ts`, `CLASSIFIER=jev`, the
+  default; `openrouter` keeps the old classifier, off by default):
+  - slot: a Jev choice over the 14 slots;
+  - topic path from the URL: path segments (and a `#/` route), lowercased,
+    without docs prefixes, versions, locales, extensions and `index`, at most
+    four levels; a page with one segment gets its title below it. When the
+    URL doesn't place the page (no segment, or one that isn't a top-level
+    topic yet) and the site has topics, Jev chooses among the site's
+    existing top-level topics (up to 40, plus "none of these") in the same
+    request: one level of the hierarchical-classification recipe, since the
+    levels below come from the URL. A pick under 0.5 is ignored;
+  - summary: the first paragraph of at least a sentence's length outside
+    front matter, code, headings, lists and tables, cut at a sentence end
+    within 400 characters (an llms.txt blockquote when there is nothing else);
+  - entities by pattern, each checked to appear in the page as written:
+    inline code that is an HTTP request line, an `ERR_…`/`…_ERROR` code, an
+    `ENV_VAR`, a `pkg-manager subcommand`, a call `a.b()` or a dotted name
+    (a camelCase last part reads as a method, otherwise a config key; files
+    and hosts are left out), and request lines and commands inside code
+    fences; at most 15;
+  - tasks are no longer produced (the search never used them).
+  - A Jev failure is "classifier unavailable": the queue retries, and from
+    the 4th delivery the page is indexed unclassified for the daily job, as
+    with OpenRouter. Live on 20 docs.astral.sh pages: median 244 ms, max
+    295 ms per page.
+- **Throughput**: the index-pages consumer takes batches of 10, up to 10
+  at once (was 3 and 3), with a 2 s batch timeout; the embeddings of a
+  batch's pages are requested together (`coalesceEmbed`, packed by
+  `packBatches`; a failed shared call falls back to one call per page, so
+  one bad page can't fail the others).
+- **`GET /v1/quick`** (`src/search/quick.ts`): an answer while a crawl runs.
+  Eight candidate fetches at once through `crawlFetch` (llms files at the
+  first path segment, docs.<registrable> and the host, and the page's two
+  twins), 1 s each, then Jev picks the overview within what is left of
+  1.5 s, without a retry. URLs only, so the API never proxies a site's
+  content. Live (cold, from a laptop): 0.5-1.0 s for hono.dev, docs.astral.sh,
+  developers.cloudflare.com, valibot.dev, docs.stripe.com and biomejs.dev.
+- **`GET /v1/sites/index`**: approved sites with indexed pages and their
+  counts, an ETag and an hour of caching, so the extension's badge is a
+  local lookup and visited hosts never reach the server. Sites without a
+  profile (indexed by an admin through `/v1/admin/index`) count as approved.
+- **Search tab**: `GET /v1/search` hits carry the chunk `id`, and
+  `GET /v1/packages?chunks=` builds a package from up to 30 picked chunks in
+  the given order, with the same fencing, budget and note.
+- **Discovery fix found on the way**: a requested page that redirects out
+  of its scope (biomejs.dev/guides/getting-started/ → /installation/…, with
+  /guides/ itself a 404) crawled 1 page. A scope whose page is gone and
+  under which nothing was found now becomes the whole site, from the
+  requested page; and without a Sitemap line, `/sitemap-index.xml` (Astro)
+  is tried after `/sitemap.xml` and `/sitemap_index.xml`.
