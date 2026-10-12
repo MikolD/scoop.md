@@ -338,8 +338,9 @@ function setLlmsItem(id, name, url) {
 // ({ found, root, via: page|subdomain|path|llms|none }): the page is docs
 // ("yes"), the site's docs are elsewhere ("elsewhere", e.g. stripe.com →
 // docs.stripe.com), or none ("no"). Without it: the library's isDevDocs (site
-// status or /quick); unknown or unreachable: a local guess (indexed, llms.txt
-// or a .md twin found, a docs path, code in the page). "Checking…" only
+// status or /quick); unknown or unreachable: a local guess (indexed, a .md
+// twin found, a docs path, code in the page; an llms.txt alone doesn't count:
+// marketing sites publish them too). "Checking…" only
 // shows during the loader: the content always gets an answer.
 function devDocs(index, quick, scoop) {
   const d = quick?.docs;
@@ -354,7 +355,7 @@ function devDocs(index, quick, scoop) {
   if (said) return { state: said, guess: false };
   const kinds = new Set([...(scoop?.sections ?? siteInfo?.scoopSections ?? []), ...(quick?.sources ?? [])].map((s) => s?.kind));
   const code = (scoop?.sections ?? siteInfo?.scoopSections ?? []).some((s) => /^```/m.test(s.content ?? ''));
-  const yes = Boolean(index?.indexed) || kinds.has('llms') || kinds.has('page-md') || docsLike(tab.url) || code;
+  const yes = Boolean(index?.indexed) || kinds.has('page-md') || docsLike(tab.url) || code;
   return { state: yes ? 'yes' : 'no', guess: true };
 }
 // The docs root holds the page: same host, and the page's path under the root's.

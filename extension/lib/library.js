@@ -9,7 +9,7 @@ export const VOTE_TIMEOUT_MS = 8_000;
 export const STATUS_TIMEOUT_MS = 3_000;
 export const CRAWL_TIMEOUT_MS = 8_000;
 export const PACKAGE_TIMEOUT_MS = 10_000;
-export const QUICK_TIMEOUT_MS = 2_500;
+export const QUICK_TIMEOUT_MS = 5_000; // finding a site's docs root can take 2–3 s cold (live on staging)
 export const SEARCH_TIMEOUT_MS = 5_000;
 export const INDEX_TIMEOUT_MS = 15_000;
 

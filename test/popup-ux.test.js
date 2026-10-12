@@ -47,6 +47,14 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/markdown' });
       return res.end('# Guide (Markdown twin)\n\nThe Markdown version of the guide, from the docs subdomain.\n');
     }
+    if (req.url === '/shop/' || req.url === '/shop/pricing') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      return res.end(`<html><head><title>Pricing | Shop</title></head><body><main><h1>Pricing</h1><p>${'Plans for every team, billed monthly or yearly. '.repeat(10)}</p></main></body></html>`);
+    }
+    if (req.url === '/shop/llms.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('# Shop\n\n- [Pricing](https://shop.example.net/pricing)\n');
+    }
     if (req.url === '/sub/llms-big.txt') {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end(`# Big docs\n\n${'- [A page](https://docs.example.org/guide.md): what it covers, in a few words\n'.repeat(800)}`);
@@ -68,6 +76,7 @@ before(async () => {
     const s = String(url);
     if (s.startsWith(`https://${SITE}`)) return realFetch(s.replace(`https://${SITE}`, docsUrl), init);
     if (s.startsWith(`https://${SUB}`)) return realFetch(s.replace(`https://${SUB}`, `${docsUrl}/sub`), init);
+    if (s.startsWith('https://shop.example.net')) return realFetch(s.replace('https://shop.example.net', `${docsUrl}/shop`), init);
     if (s.startsWith('https://api.scoop.md/v1')) return realFetch(s.replace('https://api.scoop.md/v1', mock.url), init);
     if (s.includes('/v1/packages')) packageAttempts++;
     if (init?.method === 'HEAD') headRequests.push(s);
@@ -1291,3 +1300,10 @@ test('service worker: badge_verdict_shown per verdict, hourly, no sites', async 
   assert.equal(local.badgeVerdictsShown, undefined);
   assert.match(read('../extension/background.js'), /t\.track\('badge_verdict_shown', \{ verdict, count \}\)/);
 });
+
+test('the local guess: a marketing page with an llms.txt at the root is not developer docs (the library unreachable or slow)', () => withMock({ sites: {} }, async () => {
+  const p = await openPopup('https://shop.example.net/pricing', { local: { devLibraryUrl: 'http://localhost:9/v1' } });
+  await p.ready;
+  assert.equal(p.$('devdocs').dataset.state, 'no');
+  assert.equal(p.$('devdocs').title, 'No developer docs (guess)');
+}));
