@@ -118,7 +118,7 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    ```
 4. Rate limiting namespaces need no creation, but `namespace_id` must be unique
    on the account: `4100` (dev), `4101` (staging), `4102` (production) for
-   reads, and `4103`-`4105` for the stricter search limiter. Change
+   reads, and `4110`-`4112` for the stricter search limiter. Change
    them if another Worker already uses those numbers.
 5. Custom domains (`api-staging.scoop.md`, `api.scoop.md`) are created by
    `wrangler deploy` from `routes`. The `scoop.md` zone must be on the same

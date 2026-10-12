@@ -572,6 +572,16 @@ test('topic prefixes with non-BMP characters match (SQLite counts characters, no
   assert.deepEqual((await topicChunks(d1, 'ex.com', '𝒜pi')).map((c) => c.url).sort(), ['https://ex.com/1', 'https://ex.com/2']);
 });
 
+test('topic prefixes treat %, _ and \\ literally', async () => {
+  const { deps, put, d1 } = await setup([cls('guide', ['a_c', 'x']), cls('guide', ['abc', 'x']), cls('guide', ['a%', 'y'])]);
+  await indexPage(deps, await put('https://ex.com/1', '# One'));
+  await indexPage(deps, await put('https://ex.com/2', '# Two'));
+  await indexPage(deps, await put('https://ex.com/3', '# Three'));
+  assert.deepEqual((await topicChunks(d1, 'ex.com', 'a_c')).map((c) => c.url), ['https://ex.com/1']);
+  assert.deepEqual((await topicChunks(d1, 'ex.com', 'a%')).map((c) => c.url), ['https://ex.com/3']);
+  assert.deepEqual((await siteTopics(d1, 'ex.com')).rows.filter((r) => r.path === 'a_c' || r.path === 'abc').map((r) => r.count), [1, 1]);
+});
+
 test('query embeddings are cached by normalised text; documents are never cached', async () => {
   const store = new Map<string, string>();
   const cache = {
@@ -587,6 +597,11 @@ test('query embeddings are cached by normalised text; documents are never cached
   await embed(['a', 'b'], 'document');
   assert.equal(calls.length, 3);
   assert.equal(normalizeQuery(' A\tB '), 'a b');
+  // site and slot are part of the key.
+  const scoped = cachedQueryEmbed(async (texts) => { calls.push(texts); return texts.map(() => [0]); }, cache, { site: 'ex.com', slot: 'guide' });
+  await scoped(['verify webhook signature'], 'query');
+  await scoped(['Verify webhook signature'], 'query');
+  assert.equal(calls.length, 4);
   // A broken cache only costs a call.
   const broken = cachedQueryEmbed(async (t) => t.map(() => [1]), { match: async () => { throw new Error('x'); }, put: async () => { throw new Error('y'); } } as unknown as Cache);
   assert.deepEqual(await broken(['q'], 'query'), [[1]]);

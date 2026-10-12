@@ -69,10 +69,10 @@ async function loadLive(store: Store, row: SkillRow) {
   throw new Error(`R2 object missing for ${row.id}`);
 }
 
-const searchDeps = (env: Env): SearchDeps => ({
+const searchDeps = (env: Env, scope: { site?: string; slot?: string }): SearchDeps => ({
   db: env.DB,
   vectors: env.VECTORS,
-  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default),
+  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default, scope),
 });
 
 // Queries that embed text get a stricter per-IP limit than other reads.
@@ -257,7 +257,7 @@ const routes: Route[] = [
       const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
       const slot = slotParam(url);
       const limit = intParam(url, 'limit', 10, 1, 50);
-      const hits = await search(searchDeps(env), { q, site, slot, limit });
+      const hits = await search(searchDeps(env, { site, slot }), { q, site, slot, limit });
       return json(
         200,
         {
@@ -301,7 +301,7 @@ const routes: Route[] = [
       } else {
         label = queryParam(url);
         await limitSearch(env, ip);
-        chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
+        chunks = await search(searchDeps(env, { site }), { q: label, site, limit: 40 });
       }
       if (!chunks.length) throw notFound('Nothing indexed matches');
       return new Response(buildIndexPackage({ site, label, chunks, budget }), {

@@ -2,6 +2,8 @@
 
 import type { PackageChunk } from './package.ts';
 
+export const likeEscape = (s: string) => s.replace(/[\\%_]/g, (c) => `\\${c}`);
+
 // Chunks read for one topic package, before the size budget trims them.
 const TOPIC_CHUNKS = 400;
 
@@ -15,16 +17,17 @@ export async function siteTopics(db: D1Database, site: string): Promise<{ pages:
 
 // Chunks of the pages filed under a topic or anything below it, page by page in document order.
 export async function topicChunks(db: D1Database, site: string, topic: string): Promise<PackageChunk[]> {
-  const prefix = `${topic}/`;
+  // LIKE with %, _ and \ escaped. (substr would compare SQLite's character count with JS's
+  // UTF-16 length.) Topics are lowercase, so LIKE ignoring ASCII case changes nothing.
+  const prefix = `${likeEscape(topic)}/%`;
   const { results } = await db
     .prepare(
       `SELECT c.url, c.title, c.ord, c.heading_path, c.text
        FROM page_index pi JOIN chunks c ON c.url = pi.url
-       WHERE pi.site = ? AND (pi.topic = ? OR substr(pi.topic, 1, ?) = ?)
+       WHERE pi.site = ? AND (pi.topic = ? OR pi.topic LIKE ? ESCAPE '\\')
        ORDER BY pi.topic, pi.url, c.ord LIMIT ${TOPIC_CHUNKS}`,
     )
-    // substr counts characters; [...s] counts code points, as SQLite does (JS length counts UTF-16 units).
-    .bind(site, topic, [...prefix].length, prefix)
+    .bind(site, topic, prefix)
     .all<PackageChunk>();
   return results;
 }

@@ -5,6 +5,7 @@
 // tested against node:sqlite and in-memory fakes.
 
 import { sha256Hex } from '../lib/ids.ts';
+import { likeEscape } from '../search/queries.ts';
 import { chunkMarkdown, pageTitle } from './chunk.ts';
 import { FAILED } from './classify.ts';
 import type { Classification, Classified, PageInput } from './classify.ts';
@@ -155,10 +156,9 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
   for (const p of affected) {
     stmts.push(db.prepare(
       `INSERT INTO topics (site, path, count)
-       SELECT ?, ?, COUNT(*) FROM page_index WHERE site = ? AND (topic = ? OR substr(topic, 1, ?) = ?)
+       SELECT ?, ?, COUNT(*) FROM page_index WHERE site = ? AND (topic = ? OR topic LIKE ? ESCAPE '\\')
        ON CONFLICT (site, path) DO UPDATE SET count = excluded.count`,
-    // SQLite's substr counts characters, not UTF-16 units: count code points.
-    ).bind(site, p, site, p, [...p].length + 1, `${p}/`));
+    ).bind(site, p, site, p, `${likeEscape(p)}/%`));
   }
   stmts.push(db.prepare('DELETE FROM topics WHERE site = ? AND count = 0').bind(site));
   await db.batch(stmts);
