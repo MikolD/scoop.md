@@ -5,3 +5,5 @@ RATE_KEY=local-rate-key
 # Local dev only: lets the Worker verify sources on http://localhost (the contract tests' fixture server).
 ALLOW_LOCALHOST=1
 ALLOW_ANY_EXTENSION=1
+# Indexing (POST /v1/admin/index, the index-pages consumer). Never commit a real key.
+# OPENROUTER_API_KEY=<your OpenRouter key>

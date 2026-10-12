@@ -37,7 +37,9 @@ jobs:
           cd backend
           cp .dev.vars.example .dev.vars
           npx wrangler d1 migrations apply DB --local
-          npx wrangler dev --port 8787 > ../wrangler-dev.log 2>&1 &
+          # --local: no Cloudflare login in CI, so the remote AI/Vectorize bindings
+          # stay off (search falls back to full-text; indexing isn't exercised here).
+          npx wrangler dev --local --port 8787 > ../wrangler-dev.log 2>&1 &
           for i in $(seq 1 60); do curl -sf http://127.0.0.1:8787/v1/health && break; sleep 1; done
           cd ..
           SCOOP_API=http://127.0.0.1:8787 SCOOP_ADMIN_TOKEN=local-admin-token npm run test:contract

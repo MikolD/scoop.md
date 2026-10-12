@@ -8,6 +8,10 @@ repo root is the dependency-free reference implementation of the same contract.
 - Metadata, votes, reports, write rate-limit counters: **D1** (`DB`)
 - Skill content (`skills/<id>.json`): **R2** (`SKILLS`)
 - Read rate limit (600/min/IP): **rate limiting binding** (`READ_LIMITER`)
+- Indexing and search (M4): page Markdown in **R2** (`SKILLS`, `pages/<sha256>.md`),
+  index tables + FTS5 in **D1**, chunk vectors in **Vectorize** (`VECTORS`),
+  embeddings from **Workers AI** (`AI`), page classification via **OpenRouter**,
+  work arriving on the **Queue** `index-pages` (`INDEX_QUEUE`)
 
 ## Layout
 
@@ -18,8 +22,8 @@ src/api/          v1 routes (v1.ts) and HTTP helpers (http.ts)
 src/lib/          portable logic, no Workers APIs: verify, ssrf, validate, ids, ranking
 src/db/           D1/R2 store and hourly rate-limit counters
 src/crawl/        (later) Workflow "CrawlSite"
-src/index/        (later) Queue consumer: classify → chunks → embeddings
-src/search/       (later) Vectorize + D1 FTS5 hybrid search
+src/index/        Queue consumer and pipeline: classify → chunk → embed → Vectorize + D1
+src/search/       hybrid search (FTS5 + Vectorize, RRF), topic trees, Markdown packages
 migrations/       D1 migrations (wrangler d1 migrations apply)
 test/             unit tests (node:test; node:sqlite stands in for D1)
 ```
@@ -47,6 +51,34 @@ npx tsc --noEmit                      # typecheck
 npm test                              # unit tests
 # contract tests, from the repo root, with `npm run dev` running:
 SCOOP_API=http://127.0.0.1:8787 SCOOP_ADMIN_TOKEN=local-admin-token npm run test:contract
+```
+
+### Indexing and search locally
+
+Workers AI and Vectorize have no local simulation, so the top-level config
+binds `AI` and `VECTORS` with `remote: true` to the dev index
+`scoop-chunks-dev` (needs `npx wrangler login`; embeddings are billed to the
+account, fractions of a cent). D1, R2 and the queue stay local. Put
+`OPENROUTER_API_KEY` in `.dev.vars`. Then:
+
+```sh
+npm run db:migrate:local
+npx wrangler dev --port 8791
+curl -X POST http://127.0.0.1:8791/v1/admin/index -H "Authorization: Bearer local-admin-token" \
+  -d '{"url":"https://docs.stripe.com/webhooks.md"}'            # add "queue": true to go through index-pages
+curl 'http://127.0.0.1:8791/v1/search?q=verify+webhook+signature&site=docs.stripe.com'
+curl  http://127.0.0.1:8791/v1/sites/docs.stripe.com/topics
+curl 'http://127.0.0.1:8791/v1/packages?site=docs.stripe.com&q=verify+webhook+signature'
+```
+
+`npx wrangler dev --local` (what CI runs) needs no login: the remote bindings
+are off, search answers from FTS5 alone and indexing fails at the embedding step.
+
+The dev index was created with:
+
+```sh
+npx wrangler vectorize create scoop-chunks-dev --dimensions=1024 --metric=cosine
+for p in site slot url; do npx wrangler vectorize create-metadata-index scoop-chunks-dev --property-name=$p --type=string; done
 ```
 
 Local state persists in `.wrangler/state`. Each contract run makes about a dozen
@@ -89,8 +121,23 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    account and those hostnames must not already have DNS records.
 6. When the extension's Chrome Web Store ID is known, set `EXTENSION_IDS` in
    the `production` (and `staging`) vars.
-7. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
-   D1, Workers Routes edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
+7. Indexing and search (M4), per environment. Metadata indexes must exist
+   before the first vector is inserted (vectors inserted earlier aren't
+   filterable):
+   ```sh
+   npx wrangler vectorize create scoop-chunks-staging --dimensions=1024 --metric=cosine
+   for p in site slot url; do
+     npx wrangler vectorize create-metadata-index scoop-chunks-staging --property-name=$p --type=string
+   done
+   npx wrangler queues create index-pages-staging
+   npx wrangler secret put OPENROUTER_API_KEY --env staging
+   ```
+   Production is the same with `scoop-chunks-production` and the queue
+   `index-pages`. The `AI` binding needs nothing created. `INDEX_DAILY_CAP_USD`
+   (default 2) caps classifier spend per site per UTC day. A deploy fails while
+   the index or queue named in `wrangler.jsonc` doesn't exist.
+8. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
+   D1, Workers Routes, Queues and Vectorize edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
    variable `BACKEND_DEPLOY=1` to switch the deploy jobs on.
 
 ## Deploy

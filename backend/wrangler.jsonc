@@ -18,9 +18,11 @@
 
   "vars": {
     "ENVIRONMENT": "dev",
-    "EXTENSION_IDS": ""
+    "EXTENSION_IDS": "",
+    "INDEX_DAILY_CAP_USD": "2"
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
+    // OPENROUTER_API_KEY (indexing) also comes from .dev.vars locally.
   },
   "d1_databases": [
     { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
@@ -32,6 +34,18 @@
     // Reads: 600 per minute per IP (docs/BACKEND.md §8). Hourly write limits live in D1.
     { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } }
   ],
+  // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
+  // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
+  // (CI) turns remote bindings off: search then falls back to full-text only.
+  "ai": { "binding": "AI", "remote": true },
+  "vectorize": [
+    { "binding": "VECTORS", "index_name": "scoop-chunks-dev", "remote": true }
+  ],
+  // The crawler sends one message per changed page; the consumer indexes it (src/index/).
+  "queues": {
+    "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages" }],
+    "consumers": [{ "queue": "index-pages", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6 }]
+  },
 
   "env": {
     "staging": {
@@ -47,7 +61,8 @@
       "vars": {
         "ENVIRONMENT": "staging",
         "EXTENSION_IDS": "",
-        "ALLOW_ANY_EXTENSION": "1"
+        "ALLOW_ANY_EXTENSION": "1",
+        "INDEX_DAILY_CAP_USD": "2"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" }
@@ -57,7 +72,15 @@
       ],
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } }
-      ]
+      ],
+      "ai": { "binding": "AI" },
+      "vectorize": [
+        { "binding": "VECTORS", "index_name": "scoop-chunks-staging" }
+      ],
+      "queues": {
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }],
+        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6 }]
+      }
     },
     "production": {
       "name": "scoop-api",
@@ -71,7 +94,8 @@
       },
       "vars": {
         "ENVIRONMENT": "production",
-        "EXTENSION_IDS": ""
+        "EXTENSION_IDS": "",
+        "INDEX_DAILY_CAP_USD": "2"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-production", "database_id": "REPLACE_ME_PRODUCTION_D1_ID", "migrations_dir": "migrations" }
@@ -81,7 +105,15 @@
       ],
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } }
-      ]
+      ],
+      "ai": { "binding": "AI" },
+      "vectorize": [
+        { "binding": "VECTORS", "index_name": "scoop-chunks-production" }
+      ],
+      "queues": {
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages" }],
+        "consumers": [{ "queue": "index-pages", "max_batch_size": 5, "max_batch_timeout": 10, "max_retries": 6 }]
+      }
     }
   }
 }

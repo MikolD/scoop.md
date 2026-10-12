@@ -1,9 +1,12 @@
 // api.scoop.md Worker entry: CORS, read rate limiting, error mapping and the
-// one-line request log (docs/BACKEND.md §5, §8, §11).
+// one-line request log (docs/BACKEND.md §5, §8, §11), plus the index-pages
+// queue consumer.
 
 import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
+import { handleIndexBatch } from './index/consumer.ts';
+import { indexDeps } from './index/deps.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import type { Env } from './env.ts';
 
@@ -53,5 +56,10 @@ export default {
       client: req.headers.get('x-scoop-client'),
     }));
     return withCors(res, req, env);
+  },
+
+  // index-pages: one message per changed page from the crawler (src/index/consumer.ts).
+  async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
+    await handleIndexBatch(batch, indexDeps(env));
   },
 } satisfies ExportedHandler<Env>;
