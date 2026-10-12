@@ -96,7 +96,61 @@ per-IP share limit (429). Reset with:
 npx wrangler d1 execute DB --local --command "DELETE FROM rate_counters"
 ```
 
-## Crawling
+## Crawling sites
+
+Every crawl starts with the **devtool gate** (`src/crawl/gate.ts`): known docs
+hosts pass, known shops, search engines, social and news sites are rejected
+(`src/crawl/gate-lists.ts`, easy to extend), and everything else is judged on
+its start page, with one cheap OpenRouter call only when that is
+inconclusive. A rejected run ends as `rejected` before any page is fetched,
+and the site's profile says why:
+
+```sh
+curl http://127.0.0.1:8787/v1/sites/amazon.com/profile
+# {"profile":{"site":"amazon.com","status":"not_devtool","category":"ecommerce","reason":"amazon.com is a known ecommerce site (amazon.*)",…}}
+```
+
+Add `"force": true` to the crawl request to skip the gate (recorded on the run).
+
+### The seed list and the crawl runner
+
+`seeds/devtools.json` lists about 100 developer docs people use daily
+(`{name, site, startUrl, maxPages}`, default 200 pages). `scripts/crawl-seeds.mjs`
+starts the crawls a few at a time, never two of the same site, retries a site
+that is busy (409) later, polls every run and prints a live table, then a
+summary (status, path, pages new/changed/unchanged/failed/skipped, gate
+verdict, cost). The admin token comes from `STAGING_ADMIN_TOKEN` or
+`PRODUCTION_ADMIN_TOKEN` (`LOCAL_ADMIN_TOKEN` for `--env local`) and is never
+printed.
+
+```sh
+cd backend
+set -a; . ~/.config/scoop.md.env; set +a          # STAGING_ADMIN_TOKEN, PRODUCTION_ADMIN_TOKEN
+
+npm run crawl:seeds -- --env staging --dry-run     # what would run, with each seed's gate list verdict; no requests
+npm run crawl:seeds -- --env staging --only react.dev,docs.stripe.com --max-pages 20
+npm run crawl:seeds -- --env staging --concurrency 4 --out seeds-staging.json
+npm run crawl:seeds -- --env production --out seeds-production.json
+
+npm run crawl:site -- --env staging https://docs.example.com/        # one site (several URLs work too)
+npm run crawl:site -- --env staging --force https://example.com/docs # skip the gate
+
+# against wrangler dev
+LOCAL_ADMIN_TOKEN=local-admin-token npm run crawl:site -- --env local --api http://127.0.0.1:8787 https://hono.dev/docs
+```
+
+Options: `--only site1,site2`, `--max-pages N` (overrides the seeds'),
+`--concurrency N` (default 4), `--force`, `--dry-run`, `--out FILE` (JSON
+report), `--seeds FILE`, `--api URL`, `--poll-seconds N` (default 10),
+`--timeout-minutes N` (default 90; the crawl carries on server-side after the
+runner stops waiting). The exit code is 1 if a crawl could not be started or
+followed. A full seed run is about 100 × 200 pages at one request per second
+per site; at concurrency 4 expect a few hours, plus OpenRouter classification
+of every new page against the daily caps (`INDEX_DAILY_CAP_USD`, default $2
+per site, `INDEX_DAILY_TOTAL_CAP_USD`, default $10 overall). Raise the total
+cap for the first full run, or spread it over several days.
+
+### By hand
 
 ```sh
 # start a crawl (admin); startUrl scopes the docs root, maxPages defaults to 500
@@ -105,6 +159,8 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: applicati
 # -> 202 { "runId": "cr_…", … }
 curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8787/v1/admin/crawl/cr_…   # run stats, Workflow status, sample pages
 curl http://127.0.0.1:8787/v1/sites/developers.cloudflare.com/profile                       # public SiteProfile
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  http://127.0.0.1:8787/v1/admin/crawl -d '{"site":"example.com","force":true}'              # skip the devtool gate
 ```
 
 `wrangler dev` runs the Workflow and the Queue locally. Browser crawls need
