@@ -5,7 +5,8 @@
 //
 // sites: { [site]: { indexed, status, crawling, request, pages,
 //   crawl: 'ok' | 'complete' | 'rejected' | 'failed' | '429', steps: [...], hold, packageText,
-//   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...] } }
+//   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...],
+//   isDevDocs: { verdict, method, score }, quickDevDocs, agentInstructions: [{ text, url }] } }
 // GET /sites/index lists indexed sites with an ETag (304 for If-None-Match).
 // A crawl request moves one step per GET /crawl-requests/:id; at "complete"
 // the site becomes indexed. hold: true stays at the last step before it.
@@ -43,6 +44,7 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       status: s.status ?? (s.indexed ? 'ready' : 'new'),
       crawling: Boolean(s.crawling || req),
       pages: s.indexed ? s.pages ?? 12 : 0,
+      isDevDocs: s.isDevDocs ?? null,
       lastCrawledAt: s.indexed ? '2026-10-12T09:00:00.000Z' : null,
       request: s.request ?? (req ? (({ id, state, phase, pagesFound, pagesIndexed }) => ({ id, state, phase, pagesFound, pagesIndexed }))(req.view()) : null),
     };
@@ -121,7 +123,7 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       const pageUrl = u.searchParams.get('url');
       const name = new URL(pageUrl).hostname;
       const s = site(name);
-      return json(200, { site: name, sources: s.quick ?? [], overview: s.overview ?? null, indexed: Boolean(s.indexed), pages: s.indexed ? s.pages ?? 12 : 0 });
+      return json(200, { site: name, sources: s.quick ?? [], overview: s.overview ?? null, indexed: Boolean(s.indexed), pages: s.indexed ? s.pages ?? 12 : 0, isDevDocs: s.quickDevDocs ?? s.isDevDocs ?? null, agentInstructions: s.agentInstructions ?? [] });
     }
     if (req.method === 'GET' && u.pathname === '/v1/sites/index') {
       const list = Object.entries(sites).filter(([, s]) => s.indexed).map(([name, s]) => ({ site: name, pages: s.pages ?? 12 }));

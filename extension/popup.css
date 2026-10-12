@@ -155,3 +155,13 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 
 /* Pin hint */
 .pin-hint .pin { width: 15px; height: 15px; flex: none; color: var(--brand); }
+
+/* This page: what scoop.md knows about the page */
+.page-meta { display: grid; gap: 6px; min-width: 0; }
+.chip { justify-self: start; padding: 2px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--muted); font-size: var(--text-sm); font-weight: var(--weight-strong); }
+.chip[data-state="yes"] { color: var(--ok); }
+.chip[data-state="checking"] { font-weight: var(--weight-medium); }
+#llms-line { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#llms-line a, .instructions a { color: var(--link); }
+.instructions ul { display: grid; gap: 2px; margin: 0; padding-left: 18px; font-size: var(--text-sm); }
+.instructions .panel-sub { margin: 0; }

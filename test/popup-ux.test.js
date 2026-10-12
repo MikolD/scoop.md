@@ -209,7 +209,7 @@ test('(a) indexed site: the page-anchored package from the index; nothing crawle
   const p = await openPopup(PAGE);
   await p.ready;
   assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
-  assert.match(p.$('summary').textContent, /KB · from the docs\.example\.com docs index$/);
+  assert.match(p.$('summary').textContent, /KB · ~\d+ tokens · from the docs\.example\.com docs index$/);
   assert.deepEqual(gets('/v1/packages')[0].query, { site: SITE, url: PAGE });
   assert.equal(posts('/v1/crawl-requests').length, 0);
   assert.equal(gets('/v1/quick').length, 0, 'no instant lookup when the index answers');
@@ -239,7 +239,10 @@ test('(c) instant: the page plus /quick sources (a .md twin on docs.<domain> rep
   await p.ready;
   assert.deepEqual(stages(), ['loading', 'copied', 'content'], 'no waiting view');
   assert.match(p.clipboard.text, /The Markdown version of the guide, from the docs subdomain\./);
-  assert.match(p.clipboard.text, /The llms\.txt index of the example docs\./);
+  assert.match(p.clipboard.text, /^Docs index for agents: https:\/\/docs\.example\.org\/llms\.txt$/m, 'the verified llms.txt is linked, not included');
+  assert.ok(!p.clipboard.text.includes('The llms.txt index of the example docs'));
+  assert.equal(p.$('llms-line').hidden, false);
+  assert.match(p.$('llms-line').textContent, /llms\.txt verified · docs\.example\.org\/llms\.txt/);
   assert.ok(!p.clipboard.text.includes('Get started with Widgets'), 'the .md twin replaced the converted HTML');
   assert.match(p.$('summary').textContent, /2 sources on docs\.example\.com$/);
   assert.deepEqual(gets('/v1/quick')[0].query, { url: PAGE });
@@ -763,7 +766,7 @@ test('instant package: dead links unlinked and related links filtered, shares st
   const text = p.clipboard.text;
   assert.match(text, /\[other page\]\(https:\/\/docs\.example\.com\/docs\/other\)/, 'a working link stays');
   assert.match(text, /the gone page and the\s+migration guide before/, 'the 404 (checked directly) and the bad one (from the library) are unlinked, text kept');
-  const related = text.split('## Related pages on this site')[1] ?? '';
+  const related = text.split('## Related pages')[1] ?? '';
   assert.match(related, /docs\/other/);
   assert.ok(!/gone|migration-guide/.test(related), 'related links: confirmed only');
   const shared = posts('/v1/skills')[0]?.body;
@@ -800,3 +803,94 @@ test('no paywall words in the popup or settings: this is an open source project'
     for (const word of [/upgrad/i, /premium/i, /unlock/i, /\bpro\b/i, /full version/i]) assert.ok(!word.test(src), `${f}: ${word}`);
   }
 });
+
+const INSTRUCTIONS = [
+  { text: 'Use the v2 API; v1 is deprecated.', url: `https://${SITE}/docs/other` },
+  { text: 'Never log secret keys.', url: `https://${SITE}/docs/gone` },
+  'Prefer the official SDK.',
+  { text: 'Pin the SDK version.', source: `https://${SITE}/docs/other` },
+  { text: 'Retry on 429 with backoff.' },
+];
+
+test('"This page": the developer docs chip from the library verdict (status, then /quick)', async () => {
+  await withMock({ sites: { [SITE]: { indexed: true, isDevDocs: { verdict: 'yes', method: 'classifier', score: 0.93 } } } }, async () => {
+    const p = await openPopup(PAGE);
+    await p.ready;
+    assert.equal(p.$('devdocs').dataset.state, 'yes');
+    assert.equal(p.$('devdocs').textContent, 'Developer docs ✓');
+  });
+  await withMock({ sites: { [SITE]: { status: 'not_devtool', quickDevDocs: { verdict: 'no', method: 'gate', score: 0.1 } } } }, async () => {
+    const p = await openPopup(PAGE);
+    await p.ready;
+    assert.equal(p.$('devdocs').dataset.state, 'no', 'the /quick verdict wins over the docs-like path');
+    assert.equal(p.$('devdocs').textContent, 'Not developer docs');
+  });
+});
+
+test('"This page": "Checking…" while the background crawl is still at the gate; unknown then falls back to the local guess', async () => {
+  await withMock({ sites: { [SITE]: { hold: true, steps: [{ state: 'queued', phase: 'gate' }, { state: 'running', phase: 'gate' }] } } }, async () => {
+    const p = await openPopup(PAGE);
+    await p.ready;
+    await waitFor(() => gets('/v1/crawl-requests/').length >= 2);
+    assert.equal(p.$('devdocs').dataset.state, 'checking');
+    assert.equal(p.$('devdocs').textContent, 'Checking…');
+  });
+  await withMock({ sites: { [SITE]: { status: 'not_devtool', isDevDocs: { verdict: 'unknown', method: 'none', score: null } } } }, async () => {
+    const p = await openPopup(PAGE);
+    await p.ready;
+    assert.equal(p.$('devdocs').dataset.state, 'yes', 'a docs path');
+  });
+  await withMock({ sites: {} }, async () => {
+    const p = await openPopup(PAGE, { local: { devLibraryUrl: 'http://localhost:9/v1' } });
+    await p.ready;
+    assert.equal(p.$('devdocs').dataset.state, 'yes', 'library unreachable: the local guess');
+    assert.equal(p.$('llms-line').hidden, true);
+    assert.equal(p.$('instructions').hidden, true, 'no instructions, no section');
+  });
+});
+
+test('"This page": instructions for agents, 3 then "Show all", sources checked; the copy lists them before the page', () => withMock({
+  sites: { [SITE]: { status: 'not_devtool', agentInstructions: INSTRUCTIONS } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  const items = [...p.$('instructions-list').children];
+  assert.equal(p.$('instructions').hidden, false);
+  assert.deepEqual(items.map((li) => li.hidden), [false, false, false, true, true]);
+  assert.equal(p.$('instructions-more').hidden, false);
+  assert.equal(p.$('instructions-more').textContent, 'Show all 5');
+  p.$('instructions-more').onclick();
+  assert.ok(items.every((li) => !li.hidden));
+  assert.equal(p.$('instructions-more').hidden, true);
+  // A source link only where the source is confirmed to work.
+  assert.equal(items[0].querySelector('a')?.getAttribute('href'), `https://${SITE}/docs/other`);
+  assert.equal(items[1].querySelector('a'), null, 'the 404 source is dropped, the instruction kept');
+  assert.equal(items[3].querySelector('a')?.getAttribute('href'), `https://${SITE}/docs/other`);
+  const text = p.clipboard.text;
+  assert.match(text, /^## Instructions for agents from this site\n\n- Use the v2 API; v1 is deprecated\. \(\[source\]\(https:\/\/docs\.example\.com\/docs\/other\)\)\n- Never log secret keys\.\n- Prefer the official SDK\.$/m);
+  assert.ok(text.indexOf('## Instructions for agents') < text.indexOf('# Get started with Widgets'));
+  assert.match(p.$('summary').textContent, /KB · ~\d+ tokens · /);
+}));
+
+test('the shared skill is copied in the same order, with the instructions from /quick', () => withMock({
+  skill: SKILL, sites: { [SITE]: { hold: true, agentInstructions: INSTRUCTIONS.slice(2) } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  const text = p.clipboard.text;
+  assert.match(text, /^# docs\.example\.com docs for /);
+  assert.match(text, /^## Instructions for agents from this site\n\n- Prefer the official SDK\.\n- Pin the SDK version\. \(\[source\]/m);
+  assert.ok(text.indexOf('## Instructions') < text.indexOf('Shared skill text.'));
+  assert.equal(p.$('instructions-list').children.length, 3);
+}));
+
+test('the index package: the llms line and instructions shown from the package itself', () => withMock({
+  sites: { [SITE]: { indexed: true, packageText: '# docs.example.com docs for Guide (via scoop.md)\n\n> Safety.\n\nDocs index for agents: https://docs.example.com/llms.txt\n\n## Instructions for agents from this site\n\n- Use the v2 API. ([source](https://docs.example.com/agents))\n\n## This page\n\nBody\n' } },
+}, async () => {
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.equal(p.$('llms-line').hidden, false);
+  assert.equal(p.$('llms-link').getAttribute('href'), 'https://docs.example.com/llms.txt');
+  assert.equal(p.$('instructions-list').children.length, 1);
+  assert.equal(p.$('instructions-list').querySelector('a').getAttribute('href'), 'https://docs.example.com/agents');
+}));

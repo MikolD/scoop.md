@@ -113,13 +113,17 @@ export async function checkLinks(urls, { library = null, useBackend = false, fet
   return ok;
 }
 
-// The sections and related links of a local package, with only confirmed links.
-export async function withLiveLinks({ sections, relatedLinks = [] }, options) {
-  const urls = collectLinks(sections.map((s) => s.content), relatedLinks);
+// The sections, related links and the site's instructions for agents of a
+// package, with only confirmed links (an instruction keeps its text, not a
+// source that doesn't work).
+export async function withLiveLinks({ sections, relatedLinks = [], instructions = [] }, options) {
+  const sources = instructions.filter((i) => i?.url).map((i) => ({ url: i.url }));
+  const urls = collectLinks(sections.map((s) => s.content), [...relatedLinks, ...sources]);
   const ok = await checkLinks(urls, options);
   return {
     sections: sections.map((s) => (s.content ? { ...s, content: unlink(s.content, ok) } : s)),
     relatedLinks: relatedLinks.filter((l) => ok.has(l.url)),
+    instructions: instructions.map((i) => (i?.url && !ok.has(i.url) ? { ...i, url: null } : i)),
     checked: urls.length,
     unlinked: urls.filter((u) => !ok.has(u)).length,
   };

@@ -20,7 +20,7 @@ Scoop any doc. One click copies the docs page you're on as Markdown your coding 
 > scoop.md adds one button, "Scoop to agent". Click it on any documentation page and you get one Markdown document on your clipboard, ready to paste into Claude Code, Codex, Cursor or any other coding agent.
 >
 > How it builds the package:
-> • Uses the scoop.md docs index when the site is in it: the site's docs, read and arranged around the page you're on. Never waits: on a site that isn't indexed yet you get the page and the site's llms.txt at once, and scoop.md indexes the rest in the background (the icon shows ✓ when it's ready).
+> • Uses the scoop.md docs index when the site is in it: the site's docs, read and arranged around the page you're on. Never waits: on a site that isn't indexed yet you get the page, a link to the site's llms.txt and the site's instructions for agents at once, and scoop.md indexes the rest in the background (the icon shows ✓ when it's ready).
 > • The toolbar icon shows how many docs pages are indexed for the site you're on, looked up in a list kept on your device.
 > • Overview and Search tabs for indexed sites: the site's topics and llms.txt, or search its docs and copy just the results you pick.
 > • Uses what the site already publishes for agents: the page's Markdown version (page.md), llms.txt and llms-full.txt.

@@ -1,5 +1,5 @@
 import { fetchPublicText, siteKey } from './lib/discover.js';
-import { buildPackage, withCurrentPage } from './lib/package.js';
+import { buildPackage, buildPagePackage, packageMeta, tokenEstimate, verifyLlms, withCurrentPage } from './lib/package.js';
 import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason, withoutSectionQuery } from './lib/library.js';
 import { createTelemetry, docsLike, getInstallId, NOTICE_KEY, pagePath, errorText, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
@@ -222,10 +222,84 @@ const deliver = async (pkg) => revealAfterCopy(await copyAndRecord(pkg));
 async function deliverShared(shared, scoop) {
   const site = siteKey(tab.url);
   const sections = withCurrentPage(shared.sections, currentPageSection(scoop), tab.url);
-  const text = buildPackage({ site, pageUrl: tab.url, sections, relatedLinks: shared.relatedLinks ?? [] });
+  const text = await composePage({ site, scoop, sections, relatedLinks: shared.relatedLinks ?? [] });
   $('rebuild').hidden = false;
   showFeedback(shared.id);
-  return deliver({ text, scoop, sections, shared, summary: `${kb(text)} · shared, worked for ${plural(shared.worked, 'person', 'people')}` });
+  return deliver({ text, scoop, sections, shared, summary: `${kb(text)} · ${tokenEstimate(text)} · shared, worked for ${plural(shared.worked, 'person', 'people')}` });
+}
+
+// The page package (lib/package.js buildPagePackage): a verified llms.txt is
+// linked, not included; the site's instructions for agents (from /quick); the
+// page content; five confirmed related pages. Every link is checked first
+// (lib/links.js): bad or unconfirmed ones are unlinked, inside the loader's
+// time. The library is asked only when it is reachable and sharing is on.
+async function composePage({ site, scoop, sections, relatedLinks = [] }) {
+  const llmsSec = sections.find((s) => s.kind === 'llms');
+  const fullSec = sections.find((s) => s.kind === 'llms-full');
+  const llms = llmsSec && verifyLlms(llmsSec.content) ? { url: llmsSec.url } : null;
+  const llmsFull = llms && fullSec && (fullSec.content == null || /^\s*#/.test(fullSec.content)) ? { url: fullSec.url } : null;
+  const pages = sections.filter((s) => s.kind !== 'llms' && s.kind !== 'llms-full');
+  const live = await withLiveLinks({ sections: pages, relatedLinks, instructions: siteInstructions() }, {
+    library,
+    useBackend: Boolean(settings.share && siteInfo?.libraryUp && !current.private),
+  });
+  const title = scoop?.title || tab.title || '';
+  const text = buildPagePackage({ site, title, pageUrl: scoop?.pageUrl ?? tab.url, llms, llmsFull, instructions: live.instructions, sections: live.sections, relatedLinks: live.relatedLinks });
+  showPageMeta({ llms: llms?.url, instructions: live.instructions });
+  return text;
+}
+
+// "This page": the llms.txt line and the instructions list (3, then "Show all").
+function showPageMeta({ llms = null, instructions = [] } = {}) {
+  $('llms-line').hidden = !llms;
+  if (llms) {
+    $('llms-link').textContent = llms.replace(/^https?:\/\//, '');
+    $('llms-link').href = llms;
+  }
+  const list = $('instructions-list');
+  list.textContent = '';
+  instructions.forEach((i, n) => {
+    const li = document.createElement('li');
+    li.hidden = n >= 3;
+    li.append(document.createTextNode(`${i.text} `));
+    if (i.url) {
+      const a = Object.assign(document.createElement('a'), { href: i.url, target: '_blank', rel: 'noopener', textContent: 'source' });
+      li.append(a);
+    }
+    list.append(li);
+  });
+  $('instructions').hidden = !instructions.length;
+  $('instructions-more').hidden = instructions.length <= 3;
+  $('instructions-more').textContent = `Show all ${instructions.length}`;
+  $('instructions-more').onclick = () => {
+    for (const li of list.children) li.hidden = false;
+    $('instructions-more').hidden = true;
+  };
+}
+
+// The developer-docs chip: the library's verdict (site status or /quick);
+// unknown or unreachable: a local guess (llms.txt or a .md twin found, a docs
+// path, code in the page). While a background crawl is still deciding: "Checking…".
+function devDocs(index, quick, scoop, crawling) {
+  const said = index?.isDevDocs?.verdict ?? quick?.isDevDocs?.verdict;
+  if (said === 'yes' || said === 'no') return said;
+  if (crawling && (!background?.phase || background.phase === 'gate')) return 'checking';
+  const kinds = new Set([...(scoop?.sections ?? []), ...(quick?.sources ?? [])].map((s) => s?.kind));
+  const code = (scoop?.sections ?? []).some((s) => /^```/m.test(s.content ?? ''));
+  return kinds.has('llms') || kinds.has('page-md') || docsLike(tab.url) || code ? 'yes' : 'no';
+}
+const CHIP = { yes: 'Developer docs ✓', no: 'Not developer docs', checking: 'Checking…' };
+function setChip(state) {
+  $('devdocs').dataset.state = state;
+  $('devdocs').textContent = CHIP[state];
+  $('devdocs').hidden = false;
+}
+
+// The site's instructions for coding agents, as /quick reports them.
+function siteInstructions() {
+  const list = siteInfo?.quick?.agentInstructions;
+  if (!Array.isArray(list)) return [];
+  return list.map((i) => (typeof i === 'string' ? { text: i, url: null } : { text: String(i?.text ?? '').trim(), url: i?.url ?? i?.source ?? null })).filter((i) => i.text);
 }
 
 // A site in the docs index: its package anchored on this page, used as the
@@ -249,7 +323,8 @@ async function deliverIndexed(scoop, { fresh = false } = {}) {
   }
   if (!res.ok || typeof res.data !== 'string' || !res.data.trim()) return false;
   $('rebuild').hidden = false;
-  await deliver({ text: res.data, scoop, indexed: true, summary: `${kb(res.data)} · from the ${site} docs index` });
+  showPageMeta(packageMeta(res.data));
+  await deliver({ text: res.data, scoop, indexed: true, summary: `${kb(res.data)} · ${tokenEstimate(res.data)} · from the ${site} docs index` });
   return true;
 }
 
@@ -276,16 +351,9 @@ async function deliverInstant(scoop, quick) {
     else if (!sections.some((x) => x.kind === s.kind)) sections.push(s);
   }
   if (!sections.length) throw new Error(NO_TEXT);
-  // No dead links for the agent (lib/links.js): bad or unconfirmed links are
-  // unlinked, inside the loader's time. The library is asked only when it is
-  // reachable and sharing is on; what's shared stays exactly as fetched.
-  const live = await withLiveLinks({ sections, relatedLinks: scoop?.relatedLinks ?? [] }, {
-    library,
-    useBackend: Boolean(settings.share && siteInfo?.libraryUp && !current.private),
-  });
-  sections = live.sections;
-  const text = buildPackage({ site, pageUrl: scoop?.pageUrl ?? tab.url, sections, relatedLinks: live.relatedLinks });
-  const ok = await copyAndRecord({ text, scoop, sections, summary: `${kb(text)} · ${plural(sections.length, 'source')} on ${site}` });
+  // What's shared stays exactly as fetched; only the copy is composed.
+  const text = await composePage({ site, scoop, sections, relatedLinks: scoop?.relatedLinks ?? [] });
+  const ok = await copyAndRecord({ text, scoop, sections, summary: `${kb(text)} · ${tokenEstimate(text)} · ${plural(sections.length, 'source')} on ${site}` });
   // Sharing runs while the animation plays; both finish before the scoop does.
   await Promise.all([revealAfterCopy(ok), scoop ? share(scoop) : null]);
 }
@@ -320,6 +388,10 @@ async function followCrawl(site, scoop, id) {
     if (!res.ok) { if (res.status === 404) break; errors++; continue; }
     await rememberCrawl(chrome, { requestId: id, site, url: scoop.pageUrl, state: res.data.state });
     background = res.data;
+    if ($('devdocs').dataset.state === 'checking') {
+      if (res.data.state === 'rejected') setChip('no');
+      else if (res.data.phase && res.data.phase !== 'gate') setChip('yes');
+    }
     if (res.data.state === 'complete') {
       note('crawl-note', `The full docs for ${site} are ready.`);
       $('full-docs').textContent = `Copy all ${site} docs`;
@@ -352,6 +424,8 @@ async function run({ skipLibrary = false } = {}) {
   $('full-docs').hidden = true;
   showFeedback(null);
   $('rebuild').hidden = true;
+  setChip('checking');
+  showPageMeta();
   showLoader();
   const site = siteKey(tab.url);
   // The site is named on scoop_result, once it's known whether the page is public.
@@ -387,6 +461,9 @@ async function run({ skipLibrary = false } = {}) {
   siteInfo.pageUrl = scoop?.pageUrl;
   background = pending ?? (index?.crawling ? index.request : null);
 
+  const crawlingNow = Boolean(pending && !isTerminal(pending.state)) || Boolean(index?.crawling);
+  setChip(devDocs(index, null, scoop, crawlingNow));
+
   // 1. A crawl this install asked for has completed: the full docs.
   let askedIndex = false;
   if (pending && pagePublic && pending.state === 'complete' && !pending.delivered) {
@@ -412,14 +489,17 @@ async function run({ skipLibrary = false } = {}) {
   }
   const crawl = !crawlId && unseen && mayCrawl ? backgroundCrawl(site, scoop) : Promise.resolve(crawlId);
   const followUp = crawl.then((id) => { if (id && scoop) followCrawl(site, scoop, id); }).catch(() => {});
+  // What the library finds for the page right away: sources, the site's
+  // instructions for agents, and whether it's developer docs.
+  const quick = pagePublic ? await library.quick(scoop.pageUrl) : null;
+  siteInfo.quick = quick?.ok ? quick.data : null;
+  setChip(devDocs(index, siteInfo.quick, scoop, crawlingNow || Boolean(crawlId) || (unseen && mayCrawl)));
   // 3. The shared skill.
   if (shared) {
     await deliverShared(shared, scoop);
     return followUp;
   }
   // 4. Instant: the local build with what the library finds right away.
-  const quick = pagePublic ? await library.quick(scoop.pageUrl) : null;
-  siteInfo.quick = quick?.ok ? quick.data : null;
   await deliverInstant(scoop, siteInfo.quick);
   return followUp;
 }
