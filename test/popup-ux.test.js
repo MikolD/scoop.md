@@ -248,7 +248,7 @@ test('"Copy this page now" copies at once; the crawl carries on in the backgroun
   await p.ready;
   assert.match(p.clipboard.text, /# Get started with Widgets/);
   assert.match(p.$('crawl-note').textContent, /still figuring out the docs for docs\.example\.com/);
-  assert.equal(p.document.body.dataset.stage, 'content');
+  assert.equal(p.document.body.dataset.stage, 'content', JSON.stringify(stageLog));
   assert.notEqual(p.local[PENDING_KEY][SITE].state, 'complete');
   assert.equal(p.badge.text, '…');
   assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'copied_page');

@@ -8,11 +8,14 @@ Behind it is a shared library: once a package for a site has helped someone's ag
 
 ## How a click works
 
-1. **Shared library.** If the library has a skill for this site that people confirmed worked, copy it (plus the current page if the skill doesn't already cover it).
-2. **What the site already publishes.** Look for the page's Markdown twin (`<page>.md`), `llms.txt` and `llms-full.txt`, at the site root and under the docs prefix. Files over 2 MB are not downloaded; the agent gets the link instead.
-3. **Extraction.** Otherwise convert the page's main content to Markdown, and list related pages from the site's navigation so the agent can fetch more.
-4. **Copy.** The package opens with its sources and a note telling the agent to treat the material as reference, not instructions.
-5. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
+The popup shows a short loader (at least 600 ms) while it asks the library and builds the page locally in parallel, copies as soon as a package is ready, plays a brief "copied to your clipboard" moment (a still check with reduced motion), then shows the package.
+
+1. **Docs index.** If the site's docs are indexed, copy the library's package anchored on this page (`GET /v1/packages`). If the site has never been seen and the page is public (and sharing is on), ask for a crawl (`POST /v1/crawl-requests`) and show "Figuring out the docs for <site>…" with progress, polling every 2 s; "Copy this page now" copies the local build meanwhile. Close the popup and the service worker keeps polling every 30 s, with "…" then "✓" on the toolbar badge; reopen it on that site to get the result. Not developer docs, a failed crawl or a busy index: the local build, with a short note.
+2. **Shared library.** Else, if the library has a skill for this site that people confirmed worked, copy it (plus the current page if the skill doesn't already cover it). A never-seen site gets a crawl request in the background too, so the next scoop finds it indexed.
+3. **What the site already publishes.** Look for the page's Markdown twin (`<page>.md`), `llms.txt` and `llms-full.txt`, at the site root and under the docs prefix. Files over 2 MB are not downloaded; the agent gets the link instead.
+4. **Extraction.** Otherwise convert the page's main content to Markdown, and list related pages from the site's navigation so the agent can fetch more.
+5. **Copy.** The package opens with its sources and a note telling the agent to treat the material as reference, not instructions.
+6. **Feedback.** "It worked" / "It didn't" decides what the library serves next time.
 
 Only material fetched without your cookies is shared with the library. If a page only renders when you're signed in, you still get it on your clipboard, but it's never uploaded.
 
@@ -48,6 +51,8 @@ extension/            Chrome MV3 extension
   lib/scoop.js        builds a page's sections (shared by the popup and check-live)
   lib/library.js      api.scoop.md/v1 client; never throws, short timeouts
   lib/package.js      assembles the clipboard document within a size budget
+  lib/crawl.js        crawl requests: progress labels, pending requests, the badge
+  lib/ux.js           popup timing (loader minimum, copied moment, poll interval)
   popup.js            the click flow
   STORE.md            Chrome Web Store listing, permissions, data disclosures
 server/               shared library (Node, no dependencies, JSON file store)

@@ -272,13 +272,13 @@ async function waitForCrawl(scoop, initial) {
   setStage('waiting');
   waitingSince = Date.now();
   let stopped = false;
-  const copyNow = new Promise((resolve) => {
-    $('copy-now').onclick = () => {
-      stopped = true;
-      waitOutcome('copied_page');
-      resolve(deliverLocal(scoop, { crawlNote: `We're still figuring out the docs for ${site}. The scoop.md icon shows ✓ when they're ready.` }));
-    };
-  });
+  let copyingNow = null;
+  $('copy-now').onclick = () => {
+    if (stopped) return;
+    stopped = true;
+    waitOutcome('copied_page');
+    copyingNow = deliverLocal(scoop, { crawlNote: `We're still figuring out the docs for ${site}. The scoop.md icon shows ✓ when they're ready.` });
+  };
   const poll = (async () => {
     let req = initial;
     let errors = 0;
@@ -308,8 +308,9 @@ async function waitForCrawl(scoop, initial) {
     await forgetCrawl(chrome, site);
     return deliverLocal(scoop, { crawlNote: req.state === 'rejected' ? REJECTED_NOTE : failedNote(site) });
   })();
-  await Promise.race([copyNow, poll]);
-  // Whichever finished first did the copy; the other has stopped.
+  // The poll returns soon after "Copy this page now" too; then that copy is what's left.
+  await poll;
+  if (copyingNow) await copyingNow;
 }
 
 async function run({ skipLibrary = false } = {}) {
