@@ -308,6 +308,11 @@ async function waitForCrawl(scoop, initial) {
   const poll = (async () => {
     let req = initial;
     let errors = 0;
+    // Indexing that makes no progress for timing.stallMs: if the index already
+    // answers for this page, deliver that and leave the rest to the service worker.
+    let progress = '';
+    let progressAt = Date.now();
+    let triedStalled = false;
     while (!stopped && !isTerminal(req.state)) {
       if (Date.now() - waitStarted >= timing.maxWaitMs) {
         req = { state: 'timeout' };
@@ -322,6 +327,24 @@ async function waitForCrawl(scoop, initial) {
         req = { ...res.data, id: initial.id };
         showProgress(req);
         await rememberCrawl(chrome, { requestId: initial.id, site, url: scoop.pageUrl, state: req.state });
+        const now = `${req.state}:${req.pagesIndexed ?? 0}`;
+        if (now !== progress) {
+          progress = now;
+          progressAt = Date.now();
+        } else if (req.state === 'indexing' && req.pagesIndexed > 0 && !triedStalled && Date.now() - progressAt >= timing.stallMs) {
+          triedStalled = true;
+          const pkg = await library.pagePackage(site, scoop.pageUrl);
+          if (stopped) return;
+          if (pkg.ok && typeof pkg.data === 'string' && pkg.data.trim()) {
+            stopped = true;
+            $('copy-now').onclick = null;
+            $('copy-now').disabled = true;
+            waitOutcome('stalled_index');
+            showLoader();
+            $('rebuild').hidden = false;
+            return deliver({ text: pkg.data, scoop, indexed: true, summary: `${kb(pkg.data)} · from the ${site} docs index` });
+          }
+        }
       } else if (res.status === 404 || ++errors >= 5) {
         req = { state: 'failed' };
       }
@@ -394,6 +417,12 @@ async function run({ skipLibrary = false } = {}) {
       askedIndex = true;
       if (await deliverIndexed(scoop, { fresh: true })) return;
     } else if (!isTerminal(pending.state)) {
+      // Pages are already in the index (a re-crawl, or one stuck on its last
+      // pages): give them now; the service worker keeps following the crawl.
+      if (index?.indexed) {
+        askedIndex = true;
+        if (await deliverIndexed(scoop)) return;
+      }
       return waitForCrawl(scoop, { id: pending.requestId, state: pending.state, phase: pending.phase });
     } else {
       await forgetCrawl(chrome, site);

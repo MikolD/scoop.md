@@ -12,6 +12,8 @@ export const timing = {
   maxWaitMs: 10 * 60_000,
   // Retries of the page's package right after a crawl completes.
   packageRetryMs: [1_500, 3_000, 6_000],
+  // Indexing with no progress for this long: try the index for this page.
+  stallMs: 60_000,
 };
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

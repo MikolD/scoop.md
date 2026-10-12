@@ -58,7 +58,7 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   copied_animation_shown: ['extension', { reducedMotion: bool }],
   // The docs index: asking for a crawl and waiting for it
   crawl_request: ['extension', { site, state: oneOf('queued', 'running', 'indexing', 'complete', 'rejected', 'failed', 'rate_limited', 'error') }],
-  crawl_wait: ['extension', { durationMs: int, outcome: oneOf('complete', 'rejected', 'failed', 'copied_page', 'closed', 'timeout') }],
+  crawl_wait: ['extension', { durationMs: int, outcome: oneOf('complete', 'rejected', 'failed', 'copied_page', 'closed', 'timeout', 'stalled_index') }],
   // Library
   share_result: ['extension', { site, path, outcome: oneOf('shared', 'duplicate', 'not_shared'), reason: str(40) }],
   vote: ['extension', { site, path, skillId: { t: 'skill' }, worked: bool, ok: bool }],

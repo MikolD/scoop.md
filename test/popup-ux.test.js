@@ -45,7 +45,7 @@ before(async () => {
 after(() => { globalThis.fetch = realFetch; docs.close(); mock?.close(); });
 
 beforeEach(() => {
-  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000, packageRetryMs: [10, 20, 40] });
+  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000, packageRetryMs: [10, 20, 40], stallMs: 60_000 });
   stageLog.length = 0;
 });
 
@@ -565,4 +565,33 @@ test('an indexed site opened normally is asked once (no retries)', () => withMoc
   const p = await openPopup(PAGE);
   await p.ready;
   assert.equal(gets('/v1/packages').length, 1);
+}));
+
+test('indexing stuck on its last page: after stallMs the pages already indexed are delivered', () => withMock({
+  // Live on staging: docs.astral.sh sat at "indexing 100/101" for minutes while
+  // the site was already indexed (99 pages), and the popup kept waiting.
+  sites: { [SITE]: { hold: true, steps: [{ state: 'queued', phase: 'gate' }, { state: 'indexing', phase: 'index', pagesFound: 101, pagesIndexed: 100 }, { state: 'complete', phase: 'done' }] } },
+}, async () => {
+  timing.stallMs = 60;
+  mock.sites[SITE].indexed = false;
+  const p = await openPopup(PAGE);
+  await waitFor(() => p.document.body.dataset.stage === 'waiting');
+  mock.sites[SITE].indexed = true; // the index answers for its pages already
+  await p.ready;
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'stalled_index');
+  assert.ok(p.local[PENDING_KEY][SITE], 'the crawl stays for the service worker');
+  assert.equal(p.badge.text, '…');
+}));
+
+test('reopening while a crawl still runs on an already-indexed site delivers the index at once', () => withMock({ sites: { [SITE]: { indexed: true } } }, async () => {
+  const r = mock.newRequest(SITE, PAGE);
+  r.advance();
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: r.view().id, site: SITE, url: PAGE, state: 'indexing', startedAt: Date.now() } } };
+  const p = await openPopup(PAGE, { local });
+  await p.ready;
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  assert.ok(!stages().includes('waiting'));
+  assert.equal(gets('/v1/packages').length, 1);
+  assert.ok(p.local[PENDING_KEY][SITE], 'still followed in the background');
 }));
