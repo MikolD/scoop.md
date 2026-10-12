@@ -1,5 +1,6 @@
 import type { CrawlParams } from './crawl/workflow.ts';
 import type { IndexMessage } from './index/indexer.ts';
+import type { BatchParams } from './admin/batch-workflow.ts';
 
 export interface Env {
   DB: D1Database;
@@ -14,8 +15,15 @@ export interface Env {
   AI: Ai;
   VECTORS: Vectorize;
   INDEX_QUEUE: Queue<IndexMessage>;
+  // Admin console (admin.scoop.md): static UI, seed crawl batches, failed Basic auth attempts (10/min per IP).
+  ASSETS: Fetcher;
+  CRAWL_BATCH: Workflow<BatchParams>;
+  ADMIN_AUTH_LIMITER: RateLimit;
   // Secrets.
   ADMIN_TOKEN?: string;
+  // Admin console Basic auth: user name and passcode. Unset means no one gets in.
+  ADMIN_UI_USER?: string;
+  ADMIN_UI_PASSCODE?: string;
   RATE_KEY?: string;
   E2B_API_KEY?: string;
   // R2 S3 API token (Object Read & Write on the crawl bucket) for presigning uploads.

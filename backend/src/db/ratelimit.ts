@@ -28,7 +28,7 @@ export function ipSubject(ip: string): string {
   return `${groups.slice(0, 4).map((g) => (parseInt(g, 16) || 0).toString(16)).join(':')}::/64`;
 }
 
-async function hmacHex(secret: string, message: string): Promise<string> {
+export async function hmacHex(secret: string, message: string): Promise<string> {
   const enc = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const sig = await crypto.subtle.sign('HMAC', key, enc.encode(message));

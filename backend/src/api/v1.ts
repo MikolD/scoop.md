@@ -11,8 +11,9 @@ import { indexDeps } from '../index/deps.ts';
 import { workersAiEmbed } from '../index/embed.ts';
 import { indexPage, pageKey } from '../index/indexer.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
-import { newId, safeEqual, sha256Hex } from '../lib/ids.ts';
+import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
+import { startCrawl } from '../crawl/start.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { withServerText } from '../lib/skilltext.ts';
@@ -73,7 +74,7 @@ async function loadLive(store: Store, row: SkillRow) {
   throw new Error(`R2 object missing for ${row.id}`);
 }
 
-const searchDeps = (env: Env): SearchDeps => ({
+export const searchDeps = (env: Env): SearchDeps => ({
   db: env.DB,
   vectors: env.VECTORS,
   embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default),
@@ -131,7 +132,7 @@ function gateJson(r: { gate_category: string | null; gate_method: string | null;
   return r.gate_method ? { category: r.gate_category, method: r.gate_method, reason: r.gate_reason } : null;
 }
 
-function profileJson(r: SiteProfileRow) {
+export function profileJson(r: SiteProfileRow) {
   // The devtool gate turned the site away: nothing else about it is known.
   if (r.status === 'not_devtool') {
     return {
@@ -171,7 +172,7 @@ function profileJson(r: SiteProfileRow) {
   };
 }
 
-function runJson(r: CrawlRunRow) {
+export function runJson(r: CrawlRunRow) {
   return {
     id: r.id,
     site: r.site,
@@ -318,19 +319,9 @@ const routes: Route[] = [
     handler: async (c) => {
       await requireAdmin(c);
       const crawl = validateCrawl(await readJson(c.req), allowLocalhost(c.env));
-      const runId = newId('cr');
-      const crawls = new CrawlStore(c.env.DB, c.env.SKILLS);
       // One queued or running crawl per site.
-      if (!(await crawls.createRun(runId, crawl.site, crawl.startUrl, new Date(), crawl.force))) {
-        throw new ApiError('conflict', `A crawl of ${crawl.site} is already queued or running`, 409);
-      }
-      try {
-        await c.env.CRAWL_SITE.create({ id: runId, params: { runId, ...crawl } });
-      } catch (e) {
-        // No Workflow will ever finish this run; don't leave it blocking the site.
-        await crawls.updateRun(runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'Workflow could not be created' });
-        throw e;
-      }
+      const runId = await startCrawl({ db: c.env.DB, bucket: c.env.SKILLS, workflow: c.env.CRAWL_SITE }, crawl);
+      if (!runId) throw new ApiError('conflict', `A crawl of ${crawl.site} is already queued or running`, 409);
       return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl, forced: crawl.force });
     },
   },
