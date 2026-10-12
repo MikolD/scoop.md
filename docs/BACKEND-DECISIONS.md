@@ -975,15 +975,17 @@ What a crawl costs, so the average per crawl and per page is known over time.
 `src/crawl/requests.ts`, migration `0008_crawl_requests.sql`, spec in
 BACKEND.md §5 "Crawl requests".
 
-- **Only a request that would start a crawl uses quota.** Joining a queued or
-  running crawl, answering from a crawl in the last 7 days, and rejecting a
-  `not_devtool` site are cheap D1 reads, so the daily limits (5 per install, 15
-  per IP subject, `CRAWL_REQUESTS_DAILY_MAX` overall) count starts only.
+- **Two-phase counting, starts only** (review H1, L5). Rejections (denylist,
+  `not_devtool`), joins and recent answers count nothing. Otherwise the
+  per-install and per-IP daily counters are bumped and checked first; only
+  when both pass is the global counter bumped, and if that goes over
+  `CRAWL_REQUESTS_DAILY_MAX`, or the crawl then doesn't start (a lost race),
+  all three are given back. So a flood from one IP can't eat the global
+  budget: 400 requests from one IP leave it at 15 (tested). A request that
+  waits for another scope counts as a start, since its crawl will run.
   Because every POST still writes a `crawl_requests` row, all of them are also
-  limited hourly (60 per install, 300 per IP) with the existing hourly
-  counters. Limited requests (429) are not recorded. All counters are bumped
-  before any is checked (as with the hourly limits), so a request refused by
-  the IP limit still spends one of its install's five.
+  limited hourly (60 per install, 300 per IP). Limited requests (429) are not
+  recorded. IPv6 counts by /48 for these limits (a site's usual allocation).
 - **Daily windows get their own table** (`daily_counters`, keyed like
   `rate_counters` with an HMAC of `bucket:day:subject`): `rate_counters`
   prunes every past hour on each check, which would delete a day's counts.
@@ -997,10 +999,52 @@ BACKEND.md §5 "Crawl requests".
   → `/d1/`, `docs.python.org/3/library/os.html` → `/3/`), so a 100-page crawl
   covers the product the user is reading rather than the whole host; else the
   site root. The profile is still per host.
-- **"Recent" means a finished crawl in the last 7 days** with status `ready`,
-  `empty` or `blocked` (`last_crawled_at`, set only when a crawl finishes),
-  answered from the site's last `complete` run. A failed crawl doesn't count,
-  so a new request retries it.
+- **Scopes** (review L1). A request's scope is its start URL; scopes compare
+  by site and path (`www.` and a trailing slash ignored). A request joins a
+  queued/running crawl of its own scope, and is answered from a complete
+  crawl of its own scope in the last 7 days. While another scope of the site
+  crawls (one crawl per site at a time), it is recorded as `waiting` (no run)
+  and reported `queued`; the first poll of any waiting request after the
+  site is free starts the oldest waiting scope's crawl and points every
+  request waiting for that scope at it. A waiting request older than 6 hours
+  is `failed` ("busy, try again later"). A lost start race with nothing
+  running falls back to the scope's (or site's) last complete crawl (L3).
+- **Checks run cheapest first**: the gate's lists (a denylisted site is
+  rejected before anything is counted), then `not_devtool`, scope join and
+  cooldown, then the spend share, then the counters (review M3).
+- **Spend share** (M3). Requested runs are marked (`crawl_runs.requested`).
+  At request time, today's requested sandbox spend (reservations included)
+  must be under `ONDEMAND_E2B_SHARE` × `E2B_DAILY_CAP_USD`, and requested
+  runs' AI spend (their pages' classification and their gate checks) under
+  `ONDEMAND_INDEX_SHARE` × `INDEX_DAILY_TOTAL_CAP_USD`; both default to 0.5,
+  leaving half of each cap to admin crawls. Past either, 429 "busy". In the
+  Workflow, a requested run's sandbox reservation must also fit the share
+  (as well as the full cap), so runs already admitted can't overshoot it.
+- **Approval for requested sites** (M2, the owner's default). A requested
+  crawl passes the gate with `requireAi`: allowlisted sites are admitted;
+  otherwise the signals can reject but only the AI check admits (no key, or
+  its cap reached, fails the run as busy). A site first seen through a
+  request gets `source = 'requested'` and `approved = 0` (`1` when
+  allowlisted); an existing profile keeps its source and approval. Unapproved
+  sites serve their own endpoints but are filtered out of `/v1/search`
+  without `site` (a post-filter on the fused hits). Admin: Approve (sets
+  `approved`) and Reject (status `not_devtool`, gate method `admin`, and the
+  site's chunks, vectors, entities, topics, page_index rows and page rows
+  deleted; refused with 409 while a crawl of it runs; R2 Markdown, which is
+  content-addressed and may be shared, stays). The Overview shows the
+  pending count; Sites has a "pending" filter.
+- **Public reasons** (M1). A failed request's `reason` is one of three fixed
+  strings (`crawl failed`, `this site needs a browser and that's unavailable
+  right now`, `busy, try again later`), chosen from the run's error; the
+  error itself is shown only in the admin console. Gate rejection reasons are
+  passed through as they are.
+- **Unreachable hosts** (L4). A requested crawl whose robots.txt is
+  unreachable (5xx, network) stops right after the robots step: the run fails
+  and the profile's status stays as it was (`new` for a first crawl, so not
+  public) instead of becoming `blocked`.
+- **Retention** (L2). Crawl requests are deleted after 90 days by the hourly
+  cron: a page address is browsing interest even with the install ID
+  hashed. The privacy page says so.
 - **`not_devtool` is final for requests**: an admin can still force a crawl.
 - **State comes from the run, not the request row.** `crawl_requests.state`
   records what the request did (`started`, `joined`, `recent`, `rejected`);

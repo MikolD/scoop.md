@@ -194,13 +194,19 @@ Public, `cache-control: public, max-age=15, s-maxage=15`. Never 404: an unknown 
 
 #### `POST /v1/crawl-requests`
 Request: `{ "url": "<the page the user is on>" }` (≤ 1024 chars). Requires `X-Scoop-Install`; same CORS as other writes; the URL passes the same SSRF and site normalisation as any fetch (private host → 400). The site is the URL's host.
-- **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started (devtool gate first; at most 100 pages and 10 minutes; it starts at the URL's first path segment when the URL has a deeper path, e.g. `/d1/`, else at the site root). The requested page itself is always crawled, first: its `.md` twin if it has one, else its HTML; on a client-rendered site the browser crawl starts there.
+- The crawl's **scope** is its start URL: the URL's first path segment when the URL has a deeper path (e.g. `/d1/`), else the site root. Joins and the cooldown are per scope.
+- **202** `{ id, site, state: "queued", etaSeconds }`: a crawl was started, at most 100 pages and 10 minutes. The requested page itself is always crawled, first (its `.md` twin if it has one, else its HTML; on a client-rendered site the browser crawl starts there). When another scope of the same site is crawling, the request waits instead (still 202, `queued`) and its crawl starts after that one, when the request is next polled.
 - **200** with the full request view (below), without starting anything, when:
-  - the site already has a crawl queued or running: the request joins it;
-  - the site was crawled in the last 7 days (`ready`, `empty` or `blocked`): answered from that crawl (`complete`, or `indexing` if its pages are still being indexed);
-  - the site is `not_devtool`: `state: "rejected"` with `reason`.
-- **429** `rate_limited` with `Retry-After` (until 00:00 UTC) past the daily limits on requests that would **start** a crawl: 5 per install ID, 15 per IP subject (IPv4, or IPv6 /64), `CRAWL_REQUESTS_DAILY_MAX` (default 300) overall. Every request, whatever it does, is also limited to 60 per hour per install and 300 per hour per IP (each one writes a row).
-- Every answered request is recorded (install ID only as an HMAC). E2B and indexing cost caps apply to requested crawls as to any other.
+  - the site is on the gate's denylist, or `not_devtool`: `state: "rejected"` with `reason` (nothing is counted);
+  - a crawl of the same scope is queued or running, or another request already waits for it: the request joins it;
+  - the scope was crawled completely in the last 7 days: answered from that crawl (`complete`, or `indexing` while its pages are still being indexed).
+- **429** `rate_limited` with `Retry-After` (until 00:00 UTC):
+  - past the daily limits on requests that start or queue a crawl: 5 per install ID and 15 per IP subject (IPv4, or IPv6 /48), checked first; then `CRAWL_REQUESTS_DAILY_MAX` (default 300) overall, counted only when a crawl really starts (or queues) and given back with the others when none does;
+  - message `"busy, try again later"` when requested crawls have used their share of today's caps (`ONDEMAND_E2B_SHARE` of `E2B_DAILY_CAP_USD`, `ONDEMAND_INDEX_SHARE` of `INDEX_DAILY_TOTAL_CAP_USD`, default 0.5 each), or past the overall limit;
+  - every request, whatever it does, is also limited to 60 per hour per install and 300 per hour per IP (each one writes a row).
+- **Requested sites need approval for cross-site search.** A requested crawl of a site off the gate's allowlist must pass the gate's AI check (signals alone can reject but not admit). A site first crawled this way is `source: requested`, `approved: false`: its own endpoints (status, profile, topics, packages by `url`, `q` or `topic`, site-scoped search) work, but `GET /v1/search` without `site` leaves it out until an admin approves it. An admin can also reject it (`not_devtool`, its index deleted).
+- A requested crawl of a host whose robots.txt can't be fetched (5xx, unreachable) fails without making a profile public.
+- Every answered request is recorded (install ID only as an HMAC) and kept 90 days.
 
 #### `GET /v1/crawl-requests/:id`
 Public; the ID (`rq_` + ULID, 80 random bits) is the capability. 404 if unknown.
@@ -209,7 +215,7 @@ Public; the ID (`rq_` + ULID, 80 random bits) is the capability. 404 if unknown.
 { "id": "rq_…", "site": "developers.cloudflare.com", "state": "indexing", "phase": "index",
   "pagesFound": 55, "pagesIndexed": 39, "path": "markdown", "reason": null, "etaSeconds": 128 }
 ```
-- `state`: `queued | running | indexing | complete | rejected | failed`. `indexing`: the crawl finished but some of its new or changed pages are still in the index queue (the run's `pages_indexed` < pages stored); `complete` once they are all indexed (or 30 minutes after the crawl finished, so a page lost to the dead-letter queue can't hold it forever).
+- `state`: `queued | running | indexing | complete | rejected | failed`. `reason` for `failed` is one of `crawl failed`, `this site needs a browser and that's unavailable right now`, `busy, try again later`; for `rejected` it is the gate's reason. `indexing`: the crawl finished but some of its new or changed pages are still in the index queue (the run's `pages_indexed` < pages stored); `complete` once they are all indexed (or 30 minutes after the crawl finished, so a page lost to the dead-letter queue can't hold it forever).
 - `phase`: `gate | discover | fetch | browser | index | done`, written by the Workflow at step boundaries (`crawl_runs.phase`); `index` is derived.
 - `pagesFound`: pages stored or confirmed unchanged so far; `pagesIndexed` counts unchanged pages (indexed by an earlier crawl).
 - `etaSeconds`: a rough guide for a progress message (0 when final).

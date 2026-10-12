@@ -12,7 +12,10 @@ import { registerHooks } from 'node:module';
 import type { Env } from '../src/env.ts';
 import { CrawlStore } from '../src/db/crawl.ts';
 import type { CrawlRunRow } from '../src/db/crawl.ts';
+import { dailyCount } from '../src/db/ratelimit.ts';
+import { search } from '../src/search/search.ts';
 import {
+  LIMIT_BUCKETS, PUBLIC_REASONS, pruneCrawlRequests, REQUEST_RETENTION_DAYS, publicReason, requestIpSubject, requestView, scopeKey, startWaiting,
   COOLDOWN_DAYS, etaSeconds, REQUEST_LIMITS, REQUEST_MAX_MINUTES, REQUEST_MAX_PAGES, requestCrawl, siteStatus, startUrlFor, viewOf,
 } from '../src/crawl/requests.ts';
 import type { RequestDeps } from '../src/crawl/requests.ts';
@@ -47,6 +50,10 @@ function deps(over: Partial<RequestDeps> = {}) {
     workflow: { create: async (o) => { created.push(o as never); return {} as never; } },
     rateKey: 'test-rate-key',
     dailyMax: 300,
+    e2bCapUsd: 2,
+    indexTotalCapUsd: 10,
+    e2bShare: 0.5,
+    indexShare: 0.5,
     now: T0,
     ...over,
   };
@@ -62,10 +69,10 @@ function run(over: Partial<CrawlRunRow> = {}): CrawlRunRow {
     id: 'cr_X', site: 'ex.com', start_url: 'https://ex.com/', started_at: T0.toISOString(), finished_at: null, status: 'running', path: null,
     pages_new: 0, pages_changed: 0, pages_unchanged: 0, pages_failed: 0, pages_skipped: 0, browser_seconds: 0, cost_usd: 0, error: null,
     forced: 0, gate_decision: null, gate_category: null, gate_method: null, gate_reason: null, gate_cost_usd: 0,
-    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, ...over,
+    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, requested: 1, ...over,
   };
 }
-const REQ = { id: 'rq_X', site: 'ex.com', state: 'started' as const, reason: null };
+const REQ = { id: 'rq_X', site: 'ex.com', state: 'started' as const, reason: null, created_at: T0.toISOString() };
 
 // ---- Pure rules --------------------------------------------------------------
 
@@ -87,8 +94,8 @@ test('viewOf: run status and phase map to the request state', () => {
 
   const rejected = viewOf(REQ, run({ status: 'rejected', phase: 'done', gate_reason: 'an online shop' }), T0);
   assert.deepEqual([rejected.state, rejected.phase, rejected.reason, rejected.etaSeconds], ['rejected', 'done', 'an online shop', 0]);
-  const failed = viewOf(REQ, run({ status: 'failed', phase: 'browser', error: 'E2B daily cap reached' }), T0);
-  assert.deepEqual([failed.state, failed.phase, failed.reason], ['failed', 'browser', 'E2B daily cap reached']);
+  const failed = viewOf(REQ, run({ status: 'failed', phase: 'browser', error: 'E2B daily cap reached: $1.90 of $2.00 spent today (E2B_DAILY_CAP_USD)' }), T0);
+  assert.deepEqual([failed.state, failed.phase, failed.reason], ['failed', 'browser', "this site needs a browser and that's unavailable right now"]);
 
   // Finished, pages still in the index queue: indexing, then complete.
   const done = { status: 'complete', phase: 'done', path: 'markdown', finished_at: T0.toISOString(), pages_new: 10, pages_changed: 2, pages_unchanged: 5 };
@@ -131,6 +138,7 @@ test('a request for an unknown site starts a small crawl (202) and is recorded w
     runId: created[0].id, site: 'developers.cloudflare.com', startUrl: 'https://developers.cloudflare.com/d1/',
     maxPages: REQUEST_MAX_PAGES, maxMinutes: REQUEST_MAX_MINUTES, force: false,
     priorityUrl: 'https://developers.cloudflare.com/d1/get-started/',
+    requested: true,
   });
   const row = raw.prepare('SELECT * FROM crawl_requests WHERE id = ?').get(r.body.id) as Record<string, string>;
   assert.equal(row.state, 'started');
@@ -579,4 +587,238 @@ test('stored page titles drop permalink markers and keep a real # (C#)', () => {
   assert.equal(markdownTitle('# Uploading Files [¶](#uploading-files)\n\ntext'), 'Uploading Files');
   assert.equal(markdownTitle('# Using C#\n\ntext'), 'Using C#');
   assert.equal(markdownTitle('## Webhooks ##\n'), 'Webhooks');
+});
+
+// ---- Review fixes (production) -------------------------------------------------
+
+const globalCount = (d: RequestDeps) => dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.global, '', T0.getTime());
+
+test('H1/L5: install and IP are checked first; the global counter only counts crawls that start (400 requests from one IP leave it at 15)', async () => {
+  const { d } = deps();
+  let started = 0;
+  for (let i = 0; i < 400; i++) {
+    const r = await ask(d, `https://s${i}.example.dev/`, randomUUID(), '198.51.100.7').catch((e) => e);
+    if (r.status === 202) started++;
+    else assert.equal(r.status, 429);
+  }
+  assert.equal(started, REQUEST_LIMITS.ip);
+  assert.equal(await globalCount(d), 15);
+  // Joining a crawl doesn't count at all.
+  const join = await ask(d, 'https://s0.example.dev/other', randomUUID(), '203.0.113.99');
+  assert.equal(join.outcome, 'joined');
+  assert.equal(await globalCount(d), 15);
+  assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.ip, '203.0.113.99', T0.getTime()), 0);
+});
+
+test('H1: past the global cap, the request is refused and its install and IP counts are given back', async () => {
+  const { d } = deps({ dailyMax: 1 });
+  const install = randomUUID();
+  assert.equal((await ask(d, 'https://a.example.dev/', randomUUID(), '192.0.2.1')).status, 202);
+  const over = await ask(d, 'https://b.example.dev/', install, '192.0.2.2').catch((e) => e);
+  assert.equal(over.status, 429);
+  assert.equal(over.message, PUBLIC_REASONS.busy);
+  assert.equal(await globalCount(d), 1);
+  assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.install, install, T0.getTime()), 0);
+  assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.ip, '192.0.2.2', T0.getTime()), 0);
+});
+
+test('M1: users see a short reason; the run error stays for admins; gate reasons are unchanged', () => {
+  assert.equal(publicReason('E2B daily cap reached: $1.9 of $2'), PUBLIC_REASONS.browser);
+  assert.equal(publicReason('needs a browser, but E2B_API_KEY / E2B_TEMPLATE_ID are not set'), PUBLIC_REASONS.browser);
+  assert.equal(publicReason('devtool gate: signals inconclusive and the daily classifier cap is reached'), PUBLIC_REASONS.busy);
+  assert.equal(publicReason('D1_ERROR: no such table: crawl_runs at line 4'), PUBLIC_REASONS.failed);
+  assert.equal(publicReason(null), PUBLIC_REASONS.failed);
+  const failed = viewOf(REQ, run({ status: 'failed', phase: 'fetch', error: 'TypeError: x is undefined at y.ts:12' }), T0);
+  assert.equal(failed.reason, PUBLIC_REASONS.failed);
+  assert.equal(viewOf(REQ, run({ status: 'rejected', gate_reason: 'an online shop' }), T0).reason, 'an online shop');
+});
+
+test('M3: IPv6 counts by /48; denylisted sites are rejected before any counting', async () => {
+  assert.equal(requestIpSubject('2001:db8:aa:1::1'), '2001:db8:aa::/48');
+  assert.equal(requestIpSubject('2001:db8:aa:ffff:1::2'), '2001:db8:aa::/48');
+  assert.equal(requestIpSubject('203.0.113.4'), '203.0.113.4');
+  const { d } = deps();
+  for (let i = 0; i < REQUEST_LIMITS.ip; i++) assert.equal((await ask(d, `https://v6-${i}.example.dev/`, randomUUID(), `2001:db8:aa:${i.toString(16)}::1`)).status, 202);
+  await assert.rejects(ask(d, 'https://v6-x.example.dev/', randomUUID(), '2001:db8:aa:ff00::9'), (e: { status: number }) => e.status === 429);
+
+  const fresh = deps();
+  const install = randomUUID();
+  const denied = await ask(fresh.d, 'https://www.amazon.com/dp/B000', install);
+  assert.deepEqual([denied.status, denied.outcome, denied.body.state], [200, 'rejected', 'rejected']);
+  assert.match(denied.body.reason!, /amazon/);
+  assert.equal(fresh.created.length, 0);
+  assert.equal(await dailyCount(fresh.d.db, fresh.d.rateKey, LIMIT_BUCKETS.install, install, T0.getTime()), 0);
+  assert.equal(await globalCount(fresh.d), 0);
+});
+
+test('M3: requested crawls may use only their share of the E2B and AI caps; past it, 429 busy and nothing counted', async () => {
+  const { d, store, raw } = deps();
+  await store.createRun('cr_REQ', 'used.example.dev', 'https://used.example.dev/', T0, false, true);
+  await store.updateRun('cr_REQ', { cost_usd: 1.0, status: 'complete' }); // half of the $2 E2B cap
+  const install = randomUUID();
+  const r = await ask(d, 'https://next.example.dev/', install).catch((e) => e);
+  assert.equal(r.status, 429);
+  assert.equal(r.message, PUBLIC_REASONS.busy);
+  assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.install, install, T0.getTime()), 0);
+  // Admin crawls' spend doesn't use the on-demand share.
+  raw.prepare(`UPDATE crawl_runs SET requested = 0 WHERE id = 'cr_REQ'`).run();
+  assert.equal((await ask(d, 'https://next.example.dev/')).status, 202);
+
+  // The AI side: requested runs' classification and gate spend against 50% of the total index cap.
+  const ai = deps();
+  await ai.store.createRun('cr_AI', 'ai.example.dev', 'https://ai.example.dev/', T0, false, true);
+  await ai.store.updateRun('cr_AI', { status: 'complete', gate_cost_usd: 5 });
+  await assert.rejects(ask(ai.d, 'https://more.example.dev/'), (e: { status: number }) => e.status === 429);
+
+  // In the Workflow: a requested run's sandbox must also fit the share.
+  const share = deps();
+  await share.store.createRun('cr_A', 'a.example.dev', 'https://a.example.dev/', T0, false, true);
+  await share.store.updateRun('cr_A', { cost_usd: 0.9 });
+  await share.store.createRun('cr_B', 'b.example.dev', 'https://b.example.dev/', T0, false, true);
+  assert.equal((await share.store.reserveBrowser('cr_B', 0.2, 2, T0, 1)).ok, false); // 0.9 + 0.2 > 1
+  assert.equal((await share.store.reserveBrowser('cr_B', 0.2, 2, T0)).ok, true); // an admin run: only the full cap
+});
+
+test('L1: join and cooldown are per scope; a scope waits while another scope of the site crawls, then starts when polled', async () => {
+  assert.equal(scopeKey('https://www.docs.example.dev/d1/'), scopeKey('https://docs.example.dev/d1'));
+  const { d, created, store, raw } = deps();
+  const d1 = await ask(d, 'https://docs.example.dev/d1/get-started/');
+  assert.equal(d1.status, 202);
+  // Same scope: joins. Another scope: waits (202, queued), counted, no crawl yet.
+  assert.equal((await ask(d, 'https://docs.example.dev/d1/other')).outcome, 'joined');
+  const workers = await ask(d, 'https://docs.example.dev/workers/start/');
+  assert.deepEqual([workers.status, workers.outcome, workers.body.state, workers.body.phase], [202, 'waiting', 'queued', 'gate']);
+  assert.equal(created.length, 1);
+  // Another request for the waiting scope waits with it, free.
+  const again = await ask(d, 'https://docs.example.dev/workers/x/');
+  assert.deepEqual([again.status, again.outcome], [200, 'waiting']);
+  assert.equal(await globalCount(d), 2);
+
+  // Polling while /d1/ still runs changes nothing; once it finishes, the poll starts /workers/.
+  assert.equal((await requestView(d.db, workers.body.id, T0, d))!.state, 'queued');
+  assert.equal(created.length, 1);
+  const d1Run = (raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(d1.body.id) as { run_id: string }).run_id;
+  await store.updateRun(d1Run, { status: 'complete', finished_at: T0.toISOString(), phase: 'done' });
+  const polled = await requestView(d.db, workers.body.id, T0, d);
+  assert.equal(polled!.state, 'queued');
+  assert.equal(created.length, 2);
+  assert.equal((created[1].params as { startUrl: string }).startUrl, 'https://docs.example.dev/workers/');
+  // The oldest waiting request's page leads (both were made at the same instant here).
+  assert.ok(['https://docs.example.dev/workers/start/', 'https://docs.example.dev/workers/x/'].includes((created[1].params as { priorityUrl: string }).priorityUrl));
+  const rows = raw.prepare(`SELECT state, run_id FROM crawl_requests WHERE start_url = 'https://docs.example.dev/workers/'`).all() as { state: string; run_id: string }[];
+  assert.ok(rows.length === 2 && rows.every((r) => r.state === 'started' && r.run_id === created[1].id));
+  await startWaiting(d, 'docs.example.dev', T0); // nothing left to start
+  assert.equal(created.length, 2);
+
+  // Cooldown per scope: /d1/ was just crawled, so it is answered; the root scope is not.
+  const recent = await ask(d, 'https://docs.example.dev/d1/x');
+  assert.equal(recent.outcome, 'recent');
+});
+
+test('L3/L5: a lost start race with no crawl running falls back to the last complete crawl, and gives its counts back', async () => {
+  const { d, store } = deps();
+  await store.createRun('cr_DONE', 'race.example.dev', 'https://race.example.dev/', new Date(T0.getTime() - 10 * DAY));
+  await store.updateRun('cr_DONE', { status: 'complete', finished_at: new Date(T0.getTime() - 10 * DAY).toISOString(), pages_new: 4, pages_indexed: 4 });
+  const original = CrawlStore.prototype.createRun;
+  CrawlStore.prototype.createRun = async () => false; // as if another start won and already finished
+  try {
+    const install = randomUUID();
+    const r = await ask(d, 'https://race.example.dev/page', install);
+    assert.deepEqual([r.status, r.outcome, r.body.state, r.body.pagesFound], [200, 'joined', 'complete', 4]);
+    assert.equal(await dailyCount(d.db, d.rateKey, LIMIT_BUCKETS.install, install, T0.getTime()), 0);
+    assert.equal(await globalCount(d), 0);
+  } finally {
+    CrawlStore.prototype.createRun = original;
+  }
+});
+
+test('M2: a site first crawled on request is held for approval and left out of cross-site search until approved', async () => {
+  const { d1, raw } = fakeD1();
+  const store = new CrawlStore(d1, fakeR2().r2);
+  await store.beginCrawl('asked.example.dev', T0, { approved: false });
+  await store.beginCrawl('developers.cloudflare.com', T0, { approved: true });
+  await store.beginCrawl('admin.example.dev', T0);
+  await store.beginCrawl('admin.example.dev', T0, { approved: false }); // an existing profile keeps its approval
+  const prof = (site: string) => raw.prepare('SELECT source, approved FROM site_profiles WHERE site = ?').get(site) as { source: string; approved: number };
+  assert.deepEqual({ ...prof('asked.example.dev') }, { source: 'requested', approved: 0 });
+  assert.deepEqual({ ...prof('developers.cloudflare.com') }, { source: 'requested', approved: 1 });
+  assert.deepEqual({ ...prof('admin.example.dev') }, { source: 'admin', approved: 1 });
+
+  const chunk = raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES (?, ?, ?, 0, 'T', 'T', 'webhook signatures explained')`);
+  chunk.run('c1', 'https://asked.example.dev/a', 'asked.example.dev');
+  chunk.run('c2', 'https://admin.example.dev/a', 'admin.example.dev');
+  const sites = async (site?: string) => (await search({ db: d1 }, { q: 'webhook signatures', site, limit: 10 })).map((h) => h.url);
+  assert.deepEqual(await sites(), ['https://admin.example.dev/a']);
+  assert.deepEqual(await sites('asked.example.dev'), ['https://asked.example.dev/a']); // its own search works
+  await store.approveSite('asked.example.dev');
+  assert.equal((await sites()).length, 2);
+});
+
+test('M2: admin Approve/Reject; reject purges the index (vectors too) and refuses while a crawl runs; Overview counts pending', async () => {
+  const deleted: string[][] = [];
+  const { env: e, raw } = env({ VECTORS: { deleteByIds: async (ids: string[]) => { deleted.push(ids); } } as never });
+  const store = new CrawlStore(e.DB, e.SKILLS);
+  await store.beginCrawl('pending.example.dev', T0, { approved: false });
+  await store.finishCrawl('pending.example.dev', 'ready', T0);
+  raw.prepare(`INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES ('https://pending.example.dev/a', 'pending.example.dev', 'h', 'guide', 'm', 0, '2026-10-12')`).run();
+  raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES ('k1', 'https://pending.example.dev/a', 'pending.example.dev', 0, 'A', 'A', 'text')`).run();
+  raw.prepare(`INSERT INTO pages (url, site, source_url, source_kind, content_hash, bytes, fetched_at, changed_at, run_id) VALUES ('https://pending.example.dev/a', 'pending.example.dev', 'https://pending.example.dev/a.md', 'page-md', 'h', 1, 'x', 'x', 'r')`).run();
+  await store.beginCrawl('second.example.dev', T0, { approved: false });
+
+  const basic = `Basic ${Buffer.from('admin:correct horse battery staple, twice over').toString('base64')}`;
+  const admin = async (path: string, method = 'GET') => {
+    const req = new Request(`https://admin.scoop.md${path}`, { method, headers: { authorization: basic, ...(method === 'POST' ? { origin: 'https://admin.scoop.md', 'sec-fetch-site': 'same-origin' } : {}) } });
+    const res = await handleAdmin(req, e, new URL(req.url), '203.0.113.7');
+    return { status: res.status, json: await res.json() as any };
+  };
+  assert.equal((await admin('/api/overview')).json.pendingApproval, 2);
+  assert.deepEqual((await admin('/api/sites?status=pending')).json.sites.map((s: { site: string }) => s.site).sort(), ['pending.example.dev', 'second.example.dev']);
+
+  assert.deepEqual((await admin('/api/sites/second.example.dev/approve', 'POST')).json, { site: 'second.example.dev', approved: true });
+  // Reject: not while a crawl runs.
+  await store.createRun('cr_RUN', 'pending.example.dev', 'https://pending.example.dev/', new Date());
+  assert.equal((await admin('/api/sites/pending.example.dev/reject', 'POST')).status, 409);
+  await store.updateRun('cr_RUN', { status: 'complete' });
+  const rejected = await admin('/api/sites/pending.example.dev/reject', 'POST');
+  assert.equal(rejected.status, 200);
+  assert.deepEqual(rejected.json.purged, { chunks: 1, pages: 1 });
+  assert.deepEqual(deleted, [['k1']]);
+  for (const t of ['page_index', 'chunks', 'pages']) assert.equal((raw.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE site = 'pending.example.dev'`).get() as { n: number }).n, 0, t);
+  assert.equal((await store.getProfile('pending.example.dev'))!.status, 'not_devtool');
+  assert.equal((await admin('/api/overview')).json.pendingApproval, 0);
+  // A request for it now is rejected without a crawl.
+  const r = await call(e, 'POST', '/v1/crawl-requests', { body: { url: 'https://pending.example.dev/x' }, headers: { 'x-scoop-install': randomUUID() } });
+  assert.deepEqual([r.status, r.json.state, r.json.reason], [200, 'rejected', 'rejected by an admin']);
+});
+
+test('L4: a requested crawl of a host that doesn\'t answer keeps no public profile', async () => {
+  const { CrawlSite } = await import('../src/crawl/workflow.ts');
+  const { d1 } = fakeD1();
+  const store = new CrawlStore(d1, fakeR2().r2);
+  await store.createRun('cr_U', 'down.example.dev', 'https://down.example.dev/', new Date(), false, true);
+  const e = { DB: d1, SKILLS: fakeR2().r2, CRAWL: fakeR2().r2, INDEX_QUEUE: { sendBatch: async () => {} }, ENVIRONMENT: 'dev' } as unknown as Env;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('down', { status: 503 })) as typeof fetch;
+  try {
+    const out = await new CrawlSite({} as ExecutionContext, e).run(
+      { payload: { runId: 'cr_U', site: 'down.example.dev', startUrl: 'https://down.example.dev/', maxPages: 5, maxMinutes: 5, requested: true }, timestamp: new Date(), instanceId: 'cr_U' } as never,
+      { do: async (_: string, a: unknown, b?: unknown) => ((b ?? a) as () => Promise<unknown>)(), sleep: async () => {} } as never,
+    );
+    assert.deepEqual(out, { runId: 'cr_U', unreachable: true });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const p = (await store.getProfile('down.example.dev'))!;
+  assert.deepEqual([p.status, p.crawl_state, p.source, p.approved], ['new', 'idle', 'requested', 0]);
+  assert.equal((await store.getRun('cr_U'))!.status, 'failed');
+  assert.equal((await siteStatus(d1, 'down.example.dev')).status, 'new');
+});
+
+test('L2: crawl requests (page addresses: browsing interest) are deleted after 90 days', async () => {
+  const { d, raw } = deps();
+  await ask(d, 'https://old.example.dev/page');
+  await ask({ ...d, now: new Date(T0.getTime() + 89 * DAY) }, 'https://new.example.dev/page');
+  assert.equal(REQUEST_RETENTION_DAYS, 90);
+  assert.equal(await pruneCrawlRequests(d.db, new Date(T0.getTime() + 91 * DAY)), 1);
+  assert.deepEqual(raw.prepare('SELECT site FROM crawl_requests').all().map((r) => (r as { site: string }).site), ['new.example.dev']);
 });

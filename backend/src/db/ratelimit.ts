@@ -91,3 +91,17 @@ export async function dailyCount(db: D1Database, secret: string | undefined, buc
   const row = await db.prepare('SELECT count FROM daily_counters WHERE key = ? AND day = ?').bind(key, day).first<{ count: number }>();
   return row?.count ?? 0;
 }
+
+// Adds `delta` to one daily counter (no check) and returns the new count:
+// counting a crawl request's global start only once the crawl really starts,
+// and taking back counts for a request that ended up starting nothing.
+export async function adjustDaily(db: D1Database, secret: string | undefined, bucket: string, subject: string, delta: number, now = Date.now()): Promise<number> {
+  if (!secret) throw new Error('RATE_KEY is not set');
+  const day = new Date(now).toISOString().slice(0, 10);
+  const key = await hmacHex(secret, `${bucket}:${day}:${subject}`);
+  const row = await db
+    .prepare('INSERT INTO daily_counters (key, day, count) VALUES (?1, ?2, MAX(?3, 0)) ON CONFLICT (key, day) DO UPDATE SET count = MAX(count + ?3, 0) RETURNING count')
+    .bind(key, day, delta)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+}

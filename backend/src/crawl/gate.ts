@@ -414,6 +414,9 @@ export interface GateOptions {
   limiter?: HostLimiter;
   // Null when no OpenRouter key is configured.
   ai: GateAi | null;
+  // Crawl requests (a user asked, not an admin): a site off the allowlist
+  // needs the AI check to be crawled; signals can still reject on their own.
+  requireAi?: boolean;
 }
 
 export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: GateOptions): Promise<GateVerdict> {
@@ -458,9 +461,11 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
   }
   // A page over the cap is judged on the part that was read.
   if (!page.ok || page.notModified || !page.text) {
-    if (llms) return { decision: 'crawl', category: 'devtool-docs', confidence: 0.7, reason: 'llms.txt found (start page unreadable)', method: 'signals', costUsd: 0 };
+    if (llms && !o.requireAi) return { decision: 'crawl', category: 'devtool-docs', confidence: 0.7, reason: 'llms.txt found (start page unreadable)', method: 'signals', costUsd: 0 };
     const why = `start page unreadable (${page.ok ? (page.notModified ? 'not modified' : 'too large') : page.reason})`;
-    // Judged by its URL when a model is available; otherwise discovery finds out.
+    // Judged by its URL when a model is available; otherwise discovery finds out
+    // (a requested crawl can't go ahead undecided).
+    if (!o.ai && o.requireAi) throw new GateUndecided(`${why}; a requested crawl needs the AI check and no OpenRouter key is configured`);
     if (!o.ai) return pass(`${why}; left to discovery`.slice(0, REASON_MAX));
     const none = pageSignals('', start.href, 'text/html').signals;
     return aiVerdict(gateSummary(start.href, { title: '', description: '', headings: [], nav: [] }, none, why), o.ai, none);
@@ -474,10 +479,15 @@ export async function gateSite(startUrl: string, robotsFile: RobotsFile, o: Gate
   }
 
   const score = scoreSignals(signals);
-  if (score.decision) {
+  // A requested crawl: signals may reject, but only the AI check admits.
+  if (score.decision && !(o.requireAi && score.decision === 'crawl')) {
     const confidence = Math.min(0.95, 0.6 + Math.abs(score.positive - score.negative) / 30);
     return { decision: score.decision, category: score.category, confidence, reason: clean(score.reason, REASON_MAX), method: 'signals', costUsd: 0, signals };
   }
-  if (!o.ai) throw new GateUndecided(`signals inconclusive and no OpenRouter key is configured; crawl with force to override`);
+  if (!o.ai) {
+    throw new GateUndecided(o.requireAi && score.decision === 'crawl'
+      ? 'a requested crawl needs the AI check and no OpenRouter key is configured'
+      : `signals inconclusive and no OpenRouter key is configured; crawl with force to override`);
+  }
   return aiVerdict(gateSummary(start.href, facts, signals), o.ai, signals);
 }

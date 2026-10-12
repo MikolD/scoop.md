@@ -63,4 +63,8 @@ export interface Env {
   TELEMETRY_API_DAILY_MAX?: string;
   // Crawl requests from the extension that may start a crawl per UTC day, for everyone (default 300).
   CRAWL_REQUESTS_DAILY_MAX?: string;
+  // Share (0-1, default 0.5) of E2B_DAILY_CAP_USD and of INDEX_DAILY_TOTAL_CAP_USD
+  // that requested crawls may use; the rest is headroom for admin crawls.
+  ONDEMAND_E2B_SHARE?: string;
+  ONDEMAND_INDEX_SHARE?: string;
 }

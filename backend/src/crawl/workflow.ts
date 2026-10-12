@@ -19,7 +19,8 @@ import type { IndexMessage } from '../index/indexer.ts';
 import type { Env } from '../env.ts';
 import { addCost, capsReached } from '../index/indexer.ts';
 import { indexDeps } from '../index/deps.ts';
-import { gateSite, GateUndecided } from './gate.ts';
+import { gateSite, GateUndecided, listVerdict } from './gate.ts';
+import { ondemandShare } from './requests.ts';
 import type { GateVerdict } from './gate.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
@@ -37,6 +38,10 @@ export interface CrawlParams {
   maxMinutes: number; // browser crawl only
   force?: boolean; // skip the devtool gate
   priorityUrl?: string; // crawl requests: the user's page, planned first
+  // A crawl request started it: a site off the allowlist needs the gate's AI
+  // check, a new site is held for approval, an unreachable host stays hidden,
+  // and the sandbox spend counts against the on-demand share.
+  requested?: boolean;
 }
 
 const PAGES_PER_STEP = 10;
@@ -71,13 +76,23 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       await step.do('start', DB, async () => {
         // The phase is written at step boundaries for crawl requests (src/crawl/requests.ts).
         await store().updateRun(p.runId, { status: 'running', phase: p.force ? 'discover' : 'gate' });
-        await store().beginCrawl(p.site);
+        await store().beginCrawl(p.site, new Date(), p.requested ? { approved: listVerdict(p.startUrl)?.decision === 'crawl' } : undefined);
         // The last verdict no longer describes why this site is crawled.
         if (p.force) await store().forceGate(p.runId, p.site);
       });
 
       const robots: RobotsFile = await step.do('robots', NET, () => fetchRobots(origin, { limiter: new HostLimiter(), allowLocalhost: local }));
       const interval = intervalFor(robotsFrom(robots).crawlDelay);
+
+      // A requested crawl of a host that doesn't answer: no profile is made
+      // public for it (it would read 'blocked'); the status stays as it was.
+      if (p.requested && robots.state === 'unreachable') {
+        await step.do('unreachable', DB, async () => {
+          await store().updateRun(p.runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'site unreachable (robots.txt unavailable)' });
+          await store().endCrawl(p.site);
+        });
+        return { runId: p.runId, unreachable: true };
+      }
 
       // The devtool gate, unless an admin forced the crawl. An undecided gate
       // (no OpenRouter key, cap reached) fails the run without a verdict.
@@ -88,6 +103,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
               allowLocalhost: local,
               limiter: new HostLimiter({ intervalMs: interval }),
               ai: gateAi(env, p.site),
+              requireAi: p.requested,
             });
           } catch (e) {
             if (e instanceof GateUndecided) return { undecided: e.message };
@@ -168,7 +184,13 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         const capUsd = e2bDailyCap(env);
         const budget = await step.do('browser-budget', DB, async () => {
           await store().updateRun(p.runId, { phase: 'browser' });
-          return store().reserveBrowser(p.runId, Number((Math.min(MAX_SANDBOX_SECONDS, Math.ceil(maxMinutes * 60) + 180) * E2B_USD_PER_SECOND).toFixed(6)), capUsd);
+          return store().reserveBrowser(
+            p.runId,
+            Number((Math.min(MAX_SANDBOX_SECONDS, Math.ceil(maxMinutes * 60) + 180) * E2B_USD_PER_SECOND).toFixed(6)),
+            capUsd,
+            new Date(),
+            p.requested ? capUsd * ondemandShare(env.ONDEMAND_E2B_SHARE) : undefined,
+          );
         });
         if (!budget.ok) throw new Error(`E2B daily cap reached: $${budget.spentUsd.toFixed(2)} of $${capUsd.toFixed(2)} spent today (E2B_DAILY_CAP_USD)`);
 

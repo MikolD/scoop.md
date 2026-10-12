@@ -103,6 +103,8 @@ export async function listSites(db: D1Database, f: { status?: string; q?: string
   const where: string[] = [];
   const params: string[] = [];
   if (f.status === 'crawling') where.push(`sp.crawl_state = 'crawling'`);
+  // Requested sites awaiting approval for cross-site search.
+  else if (f.status === 'pending') where.push(`sp.approved = 0 AND sp.status != 'not_devtool'`);
   else if (f.status) (where.push('sp.status = ?'), params.push(f.status));
   if (f.q) (where.push(`sp.site LIKE ? ESCAPE '\\'`), params.push(`%${f.q.replace(/[\\%_]/g, '\\$&')}%`));
   const { results } = await db
@@ -359,4 +361,20 @@ export async function requestCounts(db: D1Database, now = new Date()) {
     .all<{ state: string; n: number }>();
   const by = Object.fromEntries(results.map((r) => [r.state, r.n]));
   return { total: results.reduce((n, r) => n + r.n, 0), started: num(by.started), byOutcome: by };
+}
+
+// Requested sites awaiting an admin's approval (not rejected).
+export async function pendingApproval(db: D1Database): Promise<number> {
+  const row = await db.prepare(`SELECT COUNT(*) AS n FROM site_profiles WHERE approved = 0 AND status != 'not_devtool'`).first<{ n: number }>();
+  return num(row?.n);
+}
+
+// site → approved (false: requested and pending or rejected), for the sites given.
+export async function siteApprovals(db: D1Database, sites: string[]): Promise<Map<string, boolean>> {
+  if (!sites.length) return new Map();
+  const { results } = await db
+    .prepare(`SELECT site, approved, status FROM site_profiles WHERE site IN (${sites.map(() => '?').join(', ')})`)
+    .bind(...sites)
+    .all<{ site: string; approved: number; status: string }>();
+  return new Map(results.map((r) => [r.site, Boolean(r.approved)]));
 }

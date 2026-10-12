@@ -98,6 +98,11 @@ export function sourceWeight(url: string): number {
   }
 }
 
+async function unapprovedSites(db: D1Database): Promise<Set<string>> {
+  const { results } = await db.prepare('SELECT site FROM site_profiles WHERE approved = 0').all<{ site: string }>();
+  return new Set(results.map((r) => r.site));
+}
+
 export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHit[]> {
   const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p)]);
   const fused = rrf([fts.ids, vec]);
@@ -114,9 +119,13 @@ export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHi
     .bind(...wanted.map((w) => w.id))
     .all<{ id: string; url: string; site: string; title: string; ord: number; heading_path: string; text: string; slot: string | null; topic_path: string | null }>();
   const rows = new Map(results.map((r) => [r.id, r]));
+  // Cross-site search leaves out sites first crawled on a user's request that
+  // an admin hasn't approved yet (site_profiles.approved); a site-scoped
+  // search includes them.
+  const unapproved = p.site ? new Set<string>() : await unapprovedSites(deps.db);
   const ranked = wanted
     .map(({ id, score }) => ({ id, score, r: rows.get(id) }))
-    .filter((w) => w.r && (!p.site || w.r.site === p.site) && (!p.slot || w.r.slot === p.slot))
+    .filter((w) => w.r && (!p.site || w.r.site === p.site) && (!p.slot || w.r.slot === p.slot) && !unapproved.has(w.r.site))
     .map((w) => ({ ...w, score: w.score * sourceWeight(w.r!.url) }))
     .sort((a, b) => b.score - a.score);
   const hits: ChunkHit[] = [];

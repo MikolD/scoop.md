@@ -17,6 +17,7 @@ import { Store, summary } from '../db/store.ts';
 import { SLOTS } from '../index/classify.ts';
 import { indexDeps } from '../index/deps.ts';
 import { pageKey } from '../index/indexer.ts';
+import { purgeSiteIndex } from '../index/purge.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { MAX_CRAWL_PAGES, validateCrawl } from '../lib/validate.ts';
@@ -87,6 +88,8 @@ function profileFull(r: SiteProfileRow) {
     ...profileJson({ ...r, status: r.status === 'not_devtool' ? 'ready' : r.status }),
     status: r.status,
     crawlState: r.crawl_state,
+    source: r.source,
+    approved: Boolean(r.approved),
     lastRunId: r.last_run_id,
     gate: r.gate_method
       ? { category: r.gate_category, method: r.gate_method, reason: r.gate_reason, confidence: r.gate_confidence, checkedAt: r.gate_checked_at }
@@ -180,6 +183,8 @@ const routes: Route[] = [
         e2bCapUsd: e2bDailyCap(env),
         // Today's crawl requests from the extension; `started` is what the cap counts.
         crawlRequests: { ...(await q.requestCounts(env.DB)), capPerDay: requestsDailyMax(env) },
+        // Requested sites waiting for an admin's approval (left out of cross-site search).
+        pendingApproval: await q.pendingApproval(env.DB),
       });
     },
   },
@@ -357,6 +362,8 @@ const routes: Route[] = [
           hasLlms: Boolean(r.has_llms),
           needsBrowser: Boolean(r.needs_browser),
           gate: r.gate_method ? { category: r.gate_category, method: r.gate_method, reason: r.gate_reason } : null,
+          source: r.source,
+          approved: Boolean(r.approved),
           lastCrawledAt: r.last_crawled_at,
           lastRun: r.last_run_id ? { id: r.last_run_id, status: r.last_run_status, startedAt: r.last_run_started_at } : null,
           updatedAt: r.updated_at,
@@ -378,6 +385,29 @@ const routes: Route[] = [
       ]);
       if (!profile && !counts.pages && !counts.indexed && !runs.length) throw notFound('Nothing known about this site');
       return json(200, { site, profile: profile && profileFull(profile), counts, topics: topicTree(topics.rows), runs: runs.map(runJson) });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/sites\/([^/]+)\/approve$/,
+    // A requested site joins cross-site search.
+    handler: async ({ env, params }) => {
+      const site = siteArg(params[0]);
+      if (!(await crawlStore(env).approveSite(site))) throw notFound('No profile for this site');
+      return json(200, { site, approved: true });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/sites\/([^/]+)\/reject$/,
+    // Not a devtool site after all: mark it not_devtool and purge its index.
+    handler: async ({ env, params }) => {
+      const site = siteArg(params[0]);
+      const active = await env.DB.prepare(`SELECT id FROM crawl_runs WHERE site = ? AND status IN ('queued', 'running')`).bind(site).first<{ id: string }>();
+      if (active) throw new ApiError('conflict', `Cancel the running crawl first (${active.id})`, 409);
+      if (!(await crawlStore(env).rejectSite(site))) throw notFound('No profile for this site');
+      const purged = await purgeSiteIndex(env.DB, env.VECTORS, site);
+      return json(200, { site, status: 'not_devtool', purged });
     },
   },
   {
@@ -564,6 +594,7 @@ const routes: Route[] = [
       const p = page(url);
       const site = url.searchParams.get('site') ? siteArg(url.searchParams.get('site')) : undefined;
       const { rows, more } = await q.crawlRequests(env.DB, { site, limit: p.limit, offset: p.offset });
+      const approvals = await q.siteApprovals(env.DB, [...new Set(rows.map((r) => r.row.site))]);
       return json(200, {
         requests: rows.map(({ row, run }) => {
           const live = viewOf(row, run);
@@ -573,11 +604,14 @@ const routes: Route[] = [
             url: row.url,
             install: row.install_hash.slice(0, 8),
             outcome: row.state,
+            siteApproved: approvals.get(row.site) ?? null,
             state: live.state,
             phase: live.phase,
             pagesFound: live.pagesFound,
             pagesIndexed: live.pagesIndexed,
             reason: live.reason,
+            // The run's own error, for admins only (users see live.reason).
+            error: run?.error ?? null,
             runId: row.run_id,
             costs: run ? runCosts(run) : null,
             createdAt: row.created_at,

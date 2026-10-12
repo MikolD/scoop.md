@@ -9,6 +9,7 @@ import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
 import { handleIndexBatch } from './index/consumer.ts';
+import { pruneCrawlRequests } from './crawl/requests.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { ApiError, notFound } from './lib/errors.ts';
@@ -98,6 +99,7 @@ export default {
   async scheduled(controller: ScheduledController, env: Env): Promise<void> {
     if (controller.cron === HOURLY) {
       console.log(JSON.stringify({ cron: 'telemetry-prune', ...(await pruneTelemetry(env.TELEMETRY_DB)) }));
+      console.log(JSON.stringify({ cron: 'crawl-requests-prune', deleted: await pruneCrawlRequests(env.DB) }));
       return;
     }
     if (!env.OPENROUTER_API_KEY) return;
