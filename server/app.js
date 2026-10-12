@@ -124,6 +124,8 @@ function validateSkill(body, allowLocalhost) {
 
 // Crawl requests (docs/BACKEND.md §5): the reference server can't crawl, so a
 // request stays queued; it keeps the contract's shapes and rules in memory.
+// Tests that don't exercise crawling pass crawlOutcome ('rejected', 'failed')
+// to createApp: each request then answers that state at once.
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 const requestId = () => `rq_${[...randomBytes(26)].map((b) => CROCKFORD[b % 32]).join('')}`;
 const requestView = (r) => ({ id: r.id, site: r.site, state: 'queued', phase: 'gate', pagesFound: 0, pagesIndexed: 0, path: null, reason: null, etaSeconds: 300 });
@@ -144,7 +146,11 @@ function adminOk(req, token) {
   return given.length === want.length && timingSafeEqual(given, want);
 }
 
-export function createApp(store, { allowLocalhost = false, adminToken = '', fetchImpl = fetch, version = '0.2.0' } = {}) {
+export function createApp(store, { allowLocalhost = false, adminToken = '', fetchImpl = fetch, version = '0.2.0', crawlOutcome = null } = {}) {
+  // A request as GET /crawl-requests/:id shows it (ended at once under crawlOutcome).
+  const viewOf = (r) => (crawlOutcome
+    ? { ...requestView(r), state: crawlOutcome, reason: crawlOutcome === 'rejected' ? 'not_devtool' : 'test', etaSeconds: null }
+    : requestView(r));
   return createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname;
@@ -205,10 +211,10 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
       if (req.method === 'GET' && (hit = m(/^\/v1\/sites\/([^/]+)\/status$/))) {
         const site = publicSite(hit[1], allowLocalhost);
         const latest = [...(store.crawlRequests?.values() ?? [])].filter((r) => r.site === site).at(-1);
-        const v = latest && requestView(latest);
+        const v = latest && viewOf(latest);
         res.setHeader('cache-control', 'public, max-age=15, s-maxage=15');
         return send(req, res, 200, {
-          site, indexed: false, status: 'new', crawling: Boolean(latest), pages: 0, lastCrawledAt: null,
+          site, indexed: false, status: crawlOutcome === 'rejected' && latest ? 'not_devtool' : 'new', crawling: Boolean(latest) && !crawlOutcome, pages: 0, lastCrawledAt: null,
           request: v ? { id: v.id, state: v.state, phase: v.phase, pagesFound: v.pagesFound, pagesIndexed: v.pagesIndexed } : null,
         });
       }
@@ -225,6 +231,7 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
         const joined = [...store.crawlRequests.values()].some((r) => r.site === site);
         const r = { id: requestId(), site, url: target.href };
         store.crawlRequests.set(r.id, r);
+        if (crawlOutcome) return send(req, res, 200, viewOf(r));
         if (joined) return send(req, res, 200, requestView(r));
         return send(req, res, 202, { id: r.id, site, state: 'queued', etaSeconds: 300 });
       }
@@ -232,7 +239,7 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
       if (req.method === 'GET' && (hit = m(/^\/v1\/crawl-requests\/(rq_[0-9A-Z]{26})$/))) {
         const r = store.crawlRequests?.get(hit[1]);
         if (!r) throw fail('not_found', 'No such crawl request', 404);
-        return send(req, res, 200, requestView(r));
+        return send(req, res, 200, viewOf(r));
       }
 
       if (req.method === 'GET' && path === '/v1/packages' && url.searchParams.has('url')) {

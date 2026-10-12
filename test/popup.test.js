@@ -11,7 +11,7 @@ import { createApp } from '../server/app.js';
 import { timing } from '../extension/lib/ux.js';
 
 // The loader and the copied moment are covered in popup-ux.test.js; here they only cost time.
-Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0 });
+Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0, pollMs: 5 });
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(read('../extension/manifest.json'));
@@ -37,7 +37,8 @@ before(async () => {
   });
   docsUrl = await listen(docs);
   store = await new Store(null).load();
-  api = createApp(store, { allowLocalhost: true });
+  // Crawl requests are covered in popup-ux.test.js; here they end at once.
+  api = createApp(store, { allowLocalhost: true, crawlOutcome: 'rejected' });
   apiUrl = `${await listen(api)}/v1`;
 });
 

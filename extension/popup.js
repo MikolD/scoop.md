@@ -298,6 +298,10 @@ async function waitForCrawl(scoop, initial) {
     let req = initial;
     let errors = 0;
     while (!stopped && !isTerminal(req.state)) {
+      if (Date.now() - waitingSince >= timing.maxWaitMs) {
+        req = { state: 'timeout' };
+        break;
+      }
       await sleep(timing.pollMs);
       if (stopped) return;
       const res = await library.crawlRequest(initial.id);
@@ -322,6 +326,10 @@ async function waitForCrawl(scoop, initial) {
       await forgetCrawl(chrome, site);
       if (await deliverIndexed(scoop)) return;
       return deliverLocal(scoop);
+    }
+    if (req.state === 'timeout') {
+      // Still running: the service worker carries on and shows ✓ when it's ready.
+      return deliverLocal(scoop, { crawlNote: `This is taking longer than usual, so we copied just this page. The scoop.md icon shows ✓ when the docs for ${site} are ready.` });
     }
     await forgetCrawl(chrome, site);
     return deliverLocal(scoop, { crawlNote: req.state === 'rejected' ? REJECTED_NOTE : failedNote(site) });

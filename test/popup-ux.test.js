@@ -45,7 +45,7 @@ before(async () => {
 after(() => { globalThis.fetch = realFetch; docs.close(); mock?.close(); });
 
 beforeEach(() => {
-  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15 });
+  Object.assign(timing, { loaderMs: 60, celebrateMs: 120, reducedMs: 20, pollMs: 15, maxWaitMs: 60_000 });
   stageLog.length = 0;
 });
 
@@ -522,4 +522,18 @@ test('service worker: the hourly alarm clears a ✓ nobody picked up', () => wit
   await waitFor(() => badge.length);
   assert.equal(badge.at(-1), '');
   assert.deepEqual(local[PENDING_KEY], {});
+}));
+
+test('a crawl that never finishes: after maxWaitMs the page is copied, and the request stays for the service worker', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  timing.maxWaitMs = 120;
+  const p = await openPopup(PAGE);
+  await p.ready;
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+  assert.match(p.$('crawl-note').textContent, /taking longer than usual/);
+  assert.equal(queued(p.local, 'crawl_wait')[0].outcome, 'timeout');
+  assert.ok(p.local[PENDING_KEY][SITE], 'still tracked');
+  assert.equal(p.badge.text, '…');
+  const polls = gets('/v1/crawl-requests/').length;
+  await sleep(60);
+  assert.equal(gets('/v1/crawl-requests/').length, polls, 'the popup stopped polling');
 }));

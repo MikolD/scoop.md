@@ -41,7 +41,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `rebuild` | popup | `site`, `path` |
 | `copied_animation_shown` | popup | `reducedMotion` (the "copied to your clipboard" moment played; never for private hosts) |
 | `crawl_request` | popup | `site`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` / `error` when the request itself failed) |
-| `crawl_wait` | popup | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it)) |
+| `crawl_wait` | popup | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it) / `timeout` (gave up after 10 minutes and copied the page; the service worker keeps following it)) |
 | `share_result` | popup | `site`, `path`, `outcome` (`shared` / `duplicate` / `not_shared`), `reason` (`sharing_off`, `private_host`, `signed_in`, or the library's error code) |
 | `vote` | popup | `site`, `path`, `skillId`, `worked`, `ok` |
 | `report` | popup | `site`, `path`, `skillId`, `reason`, `ok` |

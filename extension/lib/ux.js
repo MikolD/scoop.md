@@ -7,6 +7,9 @@ export const timing = {
   celebrateMs: 900,
   reducedMs: 450,
   pollMs: 2_000,
+  // The popup stops waiting for a crawl after this and copies the page; the
+  // service worker keeps following the request.
+  maxWaitMs: 10 * 60_000,
 };
 
 export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
