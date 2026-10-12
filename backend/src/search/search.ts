@@ -1,0 +1,122 @@
+// Hybrid search: FTS5 bm25 over chunk text, heading trail and page title, plus
+// a Vectorize query on the embedded question, merged with reciprocal-rank
+// fusion. Exact identifiers (`constructEvent`) come through FTS5; paraphrases
+// through the vectors. If the vector side fails, results are FTS5 only.
+
+import type { Embed } from '../index/embed.ts';
+import { rrf } from './rrf.ts';
+
+export interface SearchParams {
+  q: string;
+  site?: string;
+  slot?: string;
+  limit: number;
+}
+
+export interface ChunkHit {
+  id: string;
+  url: string;
+  title: string;
+  ord: number;
+  heading_path: string;
+  text: string;
+  snippet: string;
+  slot: string;
+  topic_path: string[];
+  score: number;
+}
+
+export interface SearchDeps {
+  db: D1Database;
+  vectors?: Pick<Vectorize, 'query'>;
+  embed?: Embed;
+}
+
+// Candidates taken from each side before fusion.
+const DEPTH = 50;
+const MAX_TERMS = 16;
+const STOPWORDS = new Set('a an and are as at be by can do does for from how i in is it my of on or the to what when where which with you your'.split(' '));
+
+// A safe FTS5 query: words and identifiers only, each quoted, OR-ed so bm25
+// ranks chunks by how many terms they hold. Operators in the input are just text.
+export function ftsQuery(q: string): string {
+  const terms = [...new Set((q.match(/[\p{L}\p{N}_]+/gu) ?? []).map((t) => t.toLowerCase()))];
+  const useful = terms.filter((t) => !STOPWORDS.has(t));
+  return (useful.length ? useful : terms).slice(0, MAX_TERMS).map((t) => `"${t}"`).join(' OR ');
+}
+
+export const excerpt = (text: string, max = 240) => {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? flat.slice(0, max - 1).trimEnd() + '…' : flat;
+};
+
+async function ftsIds(db: D1Database, p: SearchParams): Promise<{ ids: string[]; snippets: Map<string, string> }> {
+  const match = ftsQuery(p.q);
+  if (!match) return { ids: [], snippets: new Map() };
+  const where = ['chunks_fts MATCH ?'];
+  const binds: (string | number)[] = [match];
+  if (p.site) { where.push('c.site = ?'); binds.push(p.site); }
+  if (p.slot) { where.push('pi.slot = ?'); binds.push(p.slot); }
+  const { results } = await db
+    .prepare(
+      `SELECT c.id, snippet(chunks_fts, 0, '', '', '…', 40) AS snippet
+       FROM chunks_fts JOIN chunks c ON c.rowid = chunks_fts.rowid
+       ${p.slot ? 'JOIN page_index pi ON pi.url = c.url' : ''}
+       WHERE ${where.join(' AND ')}
+       ORDER BY bm25(chunks_fts, 1.0, 3.0, 2.0) LIMIT ${DEPTH}`,
+    )
+    .bind(...binds)
+    .all<{ id: string; snippet: string }>();
+  return { ids: results.map((r) => r.id), snippets: new Map(results.map((r) => [r.id, r.snippet])) };
+}
+
+async function vectorIds(deps: SearchDeps, p: SearchParams): Promise<string[]> {
+  if (!deps.vectors || !deps.embed) return [];
+  try {
+    const [vector] = await deps.embed([p.q], 'query');
+    const filter: VectorizeVectorMetadataFilter = {};
+    if (p.site) filter.site = p.site;
+    if (p.slot) filter.slot = p.slot;
+    const res = await deps.vectors.query(vector, { topK: DEPTH, filter, returnMetadata: 'none' });
+    return res.matches.map((m) => m.id);
+  } catch (e) {
+    console.error(JSON.stringify({ search: 'vector', error: e instanceof Error ? e.message : String(e) }));
+    return [];
+  }
+}
+
+export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHit[]> {
+  const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p)]);
+  const fused = rrf([fts.ids, vec]);
+  // Over-fetch: vectors can point at chunks deleted since, or carry stale metadata.
+  const wanted = fused.slice(0, Math.min(DEPTH, p.limit * 2));
+  if (!wanted.length) return [];
+  const { results } = await deps.db
+    .prepare(
+      `SELECT c.id, c.url, c.site, c.title, c.ord, c.heading_path, c.text, pi.slot, pi.topic_path
+       FROM chunks c LEFT JOIN page_index pi ON pi.url = c.url
+       WHERE c.id IN (${wanted.map(() => '?').join(', ')})`,
+    )
+    .bind(...wanted.map((w) => w.id))
+    .all<{ id: string; url: string; site: string; title: string; ord: number; heading_path: string; text: string; slot: string | null; topic_path: string | null }>();
+  const rows = new Map(results.map((r) => [r.id, r]));
+  const hits: ChunkHit[] = [];
+  for (const { id, score } of wanted) {
+    const r = rows.get(id);
+    if (!r || (p.site && r.site !== p.site) || (p.slot && r.slot !== p.slot)) continue;
+    hits.push({
+      id,
+      url: r.url,
+      title: r.title,
+      ord: r.ord,
+      heading_path: r.heading_path,
+      text: r.text,
+      snippet: excerpt(fts.snippets.get(id) ?? r.text),
+      slot: r.slot ?? 'other',
+      topic_path: JSON.parse(r.topic_path ?? '[]'),
+      score: Math.round(score * 1e5) / 1e5,
+    });
+    if (hits.length === p.limit) break;
+  }
+  return hits;
+}

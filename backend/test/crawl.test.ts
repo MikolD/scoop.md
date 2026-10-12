@@ -17,6 +17,7 @@ import { browserPages } from '../src/crawl/result.ts';
 import { E2BCrawler } from '../src/crawl/e2b.ts';
 import { runCrawl } from '../src/crawl/runner.ts';
 import { validateCrawl } from '../src/lib/validate.ts';
+import { parseMessage } from '../src/index/consumer.ts';
 import { fakeD1, fakeFetch, fakeR2 } from './helpers.ts';
 
 // --- robots.txt
@@ -316,7 +317,8 @@ test('CrawlStore.record: dedupes R2 by hash, skips writes for unchanged pages, q
 
   const third = await store.record('cr_3', 'ex.com', [page('https://ex.com/a', md('A2'))]);
   assert.deepEqual([third.new, third.changed, third.unchanged], [0, 1, 0]);
-  assert.equal(third.toIndex[0].change, 'changed');
+  assert.deepEqual(Object.keys(third.toIndex[0]).sort(), ['contentHash', 'site', 'url']); // the M4 message contract, exactly
+  assert.equal(third.toIndex[0].contentHash, await contentHash(md('A2')));
   const row = raw.prepare("SELECT title, run_id, etag FROM pages WHERE url = 'https://ex.com/a'").get() as { title: string; run_id: string; etag: string | null };
   assert.equal(row.title, 'A2');
   assert.equal(row.run_id, 'cr_3');
@@ -471,4 +473,11 @@ test('E2BCrawler: a sandbox that refuses the job is killed', async () => {
   const crawler = new E2BCrawler({ apiKey: 'key', templateId: 'tpl', fetchImpl: impl, sleep: async () => {} });
   await assert.rejects(crawler.start({ site: 'ex.com', startUrls: ['https://ex.com/'], budget: { maxPages: 5, maxMinutes: 2 }, uploadUrl: null }), /did not accept/);
   assert.equal(calls.filter((c) => c.method === 'DELETE').length, 1);
+});
+
+test('index-pages messages: client-side routes keep their #/ path, plain anchors are dropped', () => {
+  const h = 'a'.repeat(64);
+  assert.equal(parseMessage({ site: 'docsify.js.org', url: 'https://docsify.js.org/#/cdn', contentHash: h }).url, 'https://docsify.js.org/#/cdn');
+  assert.equal(parseMessage({ site: 'docsify.js.org', url: 'https://docsify.js.org/#/cdn?id=x', contentHash: h }).url, 'https://docsify.js.org/#/cdn');
+  assert.equal(parseMessage({ site: 'ex.com', url: 'https://ex.com/a#intro', contentHash: h }).url, 'https://ex.com/a');
 });

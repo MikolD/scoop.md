@@ -1,11 +1,12 @@
 // D1 + R2 store for the crawl pipeline (migrations/0002_crawl.sql): site
-// profiles, crawl runs and pages. Page Markdown is content-addressed in R2 at
-// pages/<sha256>.md, so identical content is stored once and unchanged pages
-// write nothing.
+// profiles, crawl runs and pages. Page Markdown is content-addressed in the
+// skills bucket at pages/<sha256>.md (shared with the M4 indexer), so identical
+// content is stored once and unchanged pages write nothing.
 
 import { classify, contentHash, pageKey } from '../crawl/changes.ts';
-import type { Change, PrevPage } from '../crawl/changes.ts';
+import type { PrevPage } from '../crawl/changes.ts';
 import type { FetchedSource } from '../crawl/site.ts';
+import type { IndexMessage } from '../index/indexer.ts';
 
 export interface SiteProfileRow {
   site: string;
@@ -42,15 +43,6 @@ export interface CrawlRunRow {
   browser_seconds: number;
   cost_usd: number;
   error: string | null;
-}
-
-// What the index-pages queue receives for each new or changed page.
-export interface IndexMessage {
-  site: string;
-  url: string;
-  contentHash: string;
-  change: Exclude<Change, 'unchanged'>;
-  runId: string;
 }
 
 export interface RecordStats {
@@ -187,7 +179,7 @@ export class CrawlStore {
           )
           .bind(p.url, site, p.sourceUrl, p.kind, p.title, hash, new TextEncoder().encode(markdown).byteLength, p.etag, p.lastModified, at, runId),
       );
-      stats.toIndex.push({ site, url: p.url, contentHash: hash!, change, runId });
+      stats.toIndex.push({ site, url: p.url, contentHash: hash! });
     }
     if (writes.length) await this.db.batch(writes);
     return stats;

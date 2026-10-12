@@ -1,12 +1,50 @@
-// Queue consumer for `index-pages`: one message per new or changed page
-// (src/db/crawl.ts IndexMessage). A stub until M4 (classify → chunks →
-// embeddings); it logs counts per site and acks the batch.
+// Queue consumer for `index-pages`. One message per changed page:
+// { site, url, contentHash }. Messages are handled one at a time (classifying
+// takes seconds each); each is acked on success, retried with exponential
+// backoff on failure, and acked and logged when retrying can't help.
 
-import type { IndexMessage } from '../db/crawl.ts';
+import { normalizeSite, siteOf } from '../lib/ssrf.ts';
+import { indexPage, PermanentError } from './indexer.ts';
+import type { IndexDeps, IndexMessage } from './indexer.ts';
 
-export async function indexPages(batch: MessageBatch<IndexMessage>): Promise<void> {
-  const perSite = new Map<string, number>();
-  for (const m of batch.messages) perSite.set(m.body.site, (perSite.get(m.body.site) ?? 0) + 1);
-  for (const [site, pages] of perSite) console.log(JSON.stringify({ queue: batch.queue, site, pages, stub: true }));
-  batch.ackAll();
+const HEX64 = /^[0-9a-f]{64}$/;
+
+export function parseMessage(body: unknown): IndexMessage {
+  const b = (body ?? {}) as Record<string, unknown>;
+  if (typeof b.url !== 'string' || typeof b.site !== 'string' || typeof b.contentHash !== 'string') {
+    throw new PermanentError('message needs site, url and contentHash strings');
+  }
+  // One spelling per page: parsed, fragment dropped, re-serialised. A
+  // client-side route (docsify's #/page) is part of the page's identity, so it
+  // stays; the browser crawler stores those pages under such URLs.
+  let u: URL;
+  try { u = new URL(b.url); } catch { throw new PermanentError('url is not a URL'); }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') throw new PermanentError('url is not http(s)');
+  u.hash = u.hash.startsWith('#/') ? u.hash.split('?')[0] : '';
+  const site = normalizeSite(b.site);
+  if (siteOf(u.href) !== site) throw new PermanentError('url is not on site');
+  if (!HEX64.test(b.contentHash)) throw new PermanentError('contentHash is not a sha256 hex digest');
+  return { site, url: u.href, contentHash: b.contentHash };
+}
+
+// 30 s, 60 s, 2 min, … capped at an hour. `attempts` starts at 1.
+export const backoffSeconds = (attempts: number) => Math.min(3600, 30 * 2 ** Math.max(0, attempts - 1));
+
+export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: IndexDeps): Promise<void> {
+  for (const msg of batch.messages) {
+    try {
+      const outcome = await indexPage(deps, parseMessage(msg.body));
+      console.log(JSON.stringify({ queue: batch.queue, status: outcome.status, ...(outcome.status === 'indexed' ? { chunks: outcome.chunks, model: outcome.model, capped: outcome.capped } : {}) }));
+      msg.ack();
+    } catch (e) {
+      const error = e instanceof Error ? e.message : String(e);
+      if (e instanceof PermanentError) {
+        console.error(JSON.stringify({ queue: batch.queue, status: 'dropped', error }));
+        msg.ack();
+      } else {
+        console.error(JSON.stringify({ queue: batch.queue, status: 'retry', attempts: msg.attempts, error }));
+        msg.retry({ delaySeconds: backoffSeconds(msg.attempts) });
+      }
+    }
+  }
 }

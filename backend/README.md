@@ -8,9 +8,16 @@ repo root is the dependency-free reference implementation of the same contract.
 - Metadata, votes, reports, write rate-limit counters: **D1** (`DB`)
 - Skill content (`skills/<id>.json`): **R2** (`SKILLS`)
 - Read rate limit (600/min/IP): **rate limiting binding** (`READ_LIMITER`)
-- Crawl pipeline: **Workflow** `CrawlSite` (`CRAWL_SITE`), **R2** `CRAWL`
-  (`pages/<sha256>.md`, `crawl-results/`), **Queue** `index-pages`
-  (`INDEX_QUEUE`), E2B sandboxes for client-rendered sites (`/crawler`)
+- Crawl pipeline: **Workflow** `CrawlSite` (`CRAWL_SITE`) writes page Markdown
+  to **R2** `SKILLS` (`pages/<sha256>.md`) and one message per new or changed
+  page to `INDEX_QUEUE`; browser crawls run in E2B sandboxes (`/crawler`) and
+  upload their results to a separate **R2** bucket `CRAWL` (`crawl-results/`)
+- Indexing and search (M4): page Markdown in **R2** (`SKILLS`, `pages/<sha256>.md`),
+  index tables + FTS5 in **D1**, chunk vectors in **Vectorize** (`VECTORS`),
+  embeddings from **Workers AI** (`AI`), page classification via **OpenRouter**,
+  work arriving on the **Queue** `index-pages-<env>` (`INDEX_QUEUE`), failures
+  ending in `index-pages-dlq-<env>`, and a daily **cron** re-enqueueing pages
+  still waiting for a classification
 
 ## Layout
 
@@ -21,8 +28,8 @@ src/api/          v1 routes (v1.ts) and HTTP helpers (http.ts)
 src/lib/          portable logic, no Workers APIs: verify, ssrf, validate, ids, ranking
 src/db/           D1/R2 stores (skills; crawl profiles, runs, pages) and hourly rate-limit counters
 src/crawl/        Workflow "CrawlSite" and its portable parts (see src/crawl/README.md)
-src/index/        Queue consumer for index-pages (stub until M4: classify → chunks → embeddings)
-src/search/       (later) Vectorize + D1 FTS5 hybrid search
+src/index/        Queue consumer and pipeline: classify → chunk → embed → Vectorize + D1
+src/search/       hybrid search (FTS5 + Vectorize, RRF), topic trees, Markdown packages
 migrations/       D1 migrations (wrangler d1 migrations apply)
 test/             unit tests (node:test; node:sqlite stands in for D1)
 ```
@@ -50,6 +57,35 @@ npx tsc --noEmit                      # typecheck
 npm test                              # unit tests
 # contract tests, from the repo root, with `npm run dev` running:
 SCOOP_API=http://127.0.0.1:8787 SCOOP_ADMIN_TOKEN=local-admin-token npm run test:contract
+```
+
+### Indexing and search locally
+
+Workers AI and Vectorize have no local simulation, so the top-level config
+binds `AI` and `VECTORS` with `remote: true` to the dev index
+`scoop-chunks-dev` (needs `npx wrangler login`; embeddings are billed to the
+account, fractions of a cent). D1, R2 and the queue stay local. Put
+`OPENROUTER_API_KEY` in `.dev.vars`. Then:
+
+```sh
+npm run db:migrate:local
+npx wrangler dev --port 8791
+curl -X POST http://127.0.0.1:8791/v1/admin/index -H "Authorization: Bearer local-admin-token" \
+  -d '{"url":"https://docs.stripe.com/webhooks.md"}'            # add "queue": true to go through index-pages-dev
+curl 'http://127.0.0.1:8791/v1/search?q=verify+webhook+signature&site=docs.stripe.com'
+curl  http://127.0.0.1:8791/v1/sites/docs.stripe.com/topics
+curl 'http://127.0.0.1:8791/v1/packages?site=docs.stripe.com&q=verify+webhook+signature'
+```
+
+`npx wrangler dev --local` (what CI runs) needs no login: the remote bindings
+are off, search answers from FTS5 alone and indexing fails at the embedding step.
+
+The dev index was created with (it also has a `url` metadata index from
+before that was dropped from the plan; harmless):
+
+```sh
+npx wrangler vectorize create scoop-chunks-dev --dimensions=1024 --metric=cosine
+for p in site slot; do npx wrangler vectorize create-metadata-index scoop-chunks-dev --property-name=$p --type=string; done
 ```
 
 Local state persists in `.wrangler/state`. Each contract run makes about a dozen
@@ -103,20 +139,39 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    done
    ```
 4. Rate limiting namespaces need no creation, but `namespace_id` must be unique
-   on the account: `4100` (dev), `4101` (staging), `4102` (production). Change
+   on the account: `4100` (dev), `4101` (staging), `4102` (production) for
+   reads, and `4110`-`4112` for the stricter search limiter. Change
    them if another Worker already uses those numbers.
 5. Custom domains (`api-staging.scoop.md`, `api.scoop.md`) are created by
    `wrangler deploy` from `routes`. The `scoop.md` zone must be on the same
    account and those hostnames must not already have DNS records.
 6. When the extension's Chrome Web Store ID is known, set `EXTENSION_IDS` in
    the `production` (and `staging`) vars.
-7. Crawl pipeline (M2/M3), per environment (`-staging` / production):
+7. Indexing and search (M4), per environment. Metadata indexes must exist
+   before the first vector is inserted (vectors inserted earlier aren't
+   filterable):
+   ```sh
+   npx wrangler vectorize create scoop-chunks-staging --dimensions=1024 --metric=cosine
+   for p in site slot; do
+     npx wrangler vectorize create-metadata-index scoop-chunks-staging --property-name=$p --type=string
+   done
+   npx wrangler queues create index-pages-staging
+   npx wrangler queues create index-pages-dlq-staging
+   npx wrangler secret put OPENROUTER_API_KEY --env staging
+   ```
+   Production is the same with `scoop-chunks-production`, `index-pages-production`
+   and `index-pages-dlq-production`. The `AI` binding and the daily cron
+   (`17 4 * * *` UTC) need nothing created. Classifier spend caps per UTC day:
+   `INDEX_DAILY_CAP_USD` per site (default 2) and `INDEX_DAILY_TOTAL_CAP_USD`
+   for the account (default 10). A deploy fails while the index or queue named
+   in `wrangler.jsonc` doesn't exist (a missing dead-letter queue is created).
+8. Crawl pipeline (M2/M3), per environment (`-staging` / production):
    ```sh
    npx wrangler r2 bucket create scoop-crawl-staging
    npx wrangler r2 bucket create scoop-crawl-production
-   npx wrangler queues create index-pages-staging
-   npx wrangler queues create index-pages
    ```
+   This bucket only holds browser-crawl results; page Markdown goes to the
+   skills bucket under `pages/`. The queues are the ones from step 7.
    - Lifecycle rule on each crawl bucket: delete objects under
      `crawl-results/` after 1 day (the Workflow deletes them itself; this
      catches failed runs).
@@ -133,8 +188,8 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    - `E2B_TEMPLATE_ID` in `wrangler.jsonc` is the `scoop-crawler` template
      built from `/crawler` (see `crawler/README.md`). If production uses a
      different E2B team, build the template there and set its ID.
-8. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
-   D1, Workers Routes edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
+9. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
+   D1, Workers Routes, Queues and Vectorize edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
    variable `BACKEND_DEPLOY=1` to switch the deploy jobs on.
 
 ## Deploy

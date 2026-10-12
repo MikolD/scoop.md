@@ -8,7 +8,7 @@
 import { WorkflowEntrypoint } from 'cloudflare:workers';
 import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from 'cloudflare:workers';
 import { CrawlStore } from '../db/crawl.ts';
-import type { IndexMessage } from '../db/crawl.ts';
+import type { IndexMessage } from '../index/indexer.ts';
 import type { Env } from '../env.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
@@ -40,7 +40,9 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
   async run(event: Readonly<WorkflowEvent<CrawlParams>>, step: WorkflowStep): Promise<unknown> {
     const p = event.payload;
     const env = this.env;
-    const store = () => new CrawlStore(env.DB, env.CRAWL);
+    // Page Markdown goes to the skills bucket (pages/), shared with the indexer;
+    // the CRAWL bucket only holds browser-crawl results (crawl-results/).
+    const store = () => new CrawlStore(env.DB, env.SKILLS);
     const origin = new URL(p.startUrl).origin;
     const local = allowLocalhost(env);
     let handle: RunHandle | null = null;
@@ -181,8 +183,12 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
   }
 }
 
+// One message per new or changed page, body exactly { site, url, contentHash };
+// sendBatch takes at most 100 messages.
 async function enqueue(env: Env, messages: IndexMessage[]): Promise<void> {
-  if (messages.length) await env.INDEX_QUEUE.sendBatch(messages.map((body) => ({ body })));
+  for (let i = 0; i < messages.length; i += 100) {
+    await env.INDEX_QUEUE.sendBatch(messages.slice(i, i + 100).map(({ site, url, contentHash }) => ({ body: { site, url, contentHash } })));
+  }
 }
 
 // A presigned PUT for this run's result object only, valid for the crawl plus

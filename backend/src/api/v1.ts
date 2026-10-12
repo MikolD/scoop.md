@@ -5,11 +5,22 @@ import { CrawlStore } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
 import type { SkillRow } from '../db/store.ts';
-import { ApiError, notFound } from '../lib/errors.ts';
-import { newId, safeEqual } from '../lib/ids.ts';
-import { normalizeSite } from '../lib/ssrf.ts';
+import { SLOTS } from '../index/classify.ts';
+import type { Slot } from '../index/classify.ts';
+import { indexDeps } from '../index/deps.ts';
+import { workersAiEmbed } from '../index/embed.ts';
+import { indexPage, pageKey } from '../index/indexer.ts';
+import { ApiError, bad, notFound } from '../lib/errors.ts';
+import { newId, safeEqual, sha256Hex } from '../lib/ids.ts';
+import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
-import { verifyAll } from '../lib/verify.ts';
+import { fetchSource, verifyAll } from '../lib/verify.ts';
+import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
+import { siteTopics, topicChunks } from '../search/queries.ts';
+import { cachedQueryEmbed } from '../search/embedcache.ts';
+import { search } from '../search/search.ts';
+import type { SearchDeps } from '../search/search.ts';
+import { topicTree } from '../search/topics.ts';
 import type { Env } from '../env.ts';
 import { CACHE_BEST, CACHE_LIST, json, readJson } from './http.ts';
 
@@ -58,6 +69,51 @@ async function loadLive(store: Store, row: SkillRow) {
   if (skill) return skill;
   if ((await store.getRow(row.id))?.removed_at) throw new ApiError('removed', 'This skill was removed', 410);
   throw new Error(`R2 object missing for ${row.id}`);
+}
+
+const searchDeps = (env: Env, scope: { site?: string; slot?: string }): SearchDeps => ({
+  db: env.DB,
+  vectors: env.VECTORS,
+  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default, scope),
+});
+
+// Queries that embed text get a stricter per-IP limit than other reads.
+async function limitSearch(env: Env, ip: string): Promise<void> {
+  if (env.SEARCH_LIMITER && !(await env.SEARCH_LIMITER.limit({ key: ipSubject(ip) })).success) {
+    const err = new ApiError('rate_limited', 'Too many searches; try again later', 429);
+    err.retryAfter = 60;
+    throw err;
+  }
+}
+
+const MAX_QUERY = 200;
+const TOPIC = /^[\p{L}\p{N}._-]+(\/[\p{L}\p{N}._-]+){0,3}$/u;
+
+function queryParam(url: URL): string {
+  const q = (url.searchParams.get('q') ?? '').replace(/\s+/g, ' ').trim();
+  if (!q) throw bad('q is required');
+  if (q.length > MAX_QUERY) throw bad(`q is over ${MAX_QUERY} characters`);
+  return q;
+}
+
+function slotParam(url: URL): Slot | undefined {
+  const slot = url.searchParams.get('slot');
+  if (!slot) return undefined;
+  if (!SLOTS.includes(slot as Slot)) throw bad(`slot must be one of ${SLOTS.join(', ')}`);
+  return slot as Slot;
+}
+
+function intParam(url: URL, name: string, fallback: number, min: number, max: number): number {
+  const raw = url.searchParams.get(name);
+  const n = raw === null ? fallback : Math.trunc(Number(raw));
+  return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : fallback;
+}
+
+function siteParam(raw: string): string {
+  let site: string;
+  try { site = normalizeSite(decodeURIComponent(raw)); } catch { throw bad('Invalid site'); }
+  if (!/^[a-z0-9.-]{1,253}$/.test(site)) throw bad('Invalid site');
+  return site;
 }
 
 async function requireAdmin(c: Ctx): Promise<void> {
@@ -115,7 +171,7 @@ const routes: Route[] = [
     name: '/v1/health',
     // Whether the secrets are set (never their values), so a deploy smoke test can catch a missing one.
     handler: async ({ env }) =>
-      json(200, { ok: true, version: env.VERSION || VERSION, secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY) } }),
+      json(200, { ok: true, version: env.VERSION || VERSION, secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY) } }),
   },
   {
     method: 'GET',
@@ -233,7 +289,7 @@ const routes: Route[] = [
       await requireAdmin(c);
       const crawl = validateCrawl(await readJson(c.req), allowLocalhost(c.env));
       const runId = newId('cr');
-      await new CrawlStore(c.env.DB, c.env.CRAWL).createRun(runId, crawl.site, crawl.startUrl);
+      await new CrawlStore(c.env.DB, c.env.SKILLS).createRun(runId, crawl.site, crawl.startUrl);
       await c.env.CRAWL_SITE.create({ id: runId, params: { runId, ...crawl } });
       return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl });
     },
@@ -244,7 +300,7 @@ const routes: Route[] = [
     name: '/v1/admin/crawl/:runId',
     handler: async (c) => {
       await requireAdmin(c);
-      const crawls = new CrawlStore(c.env.DB, c.env.CRAWL);
+      const crawls = new CrawlStore(c.env.DB, c.env.SKILLS);
       const run = await crawls.getRun(c.params[0]);
       if (!run) throw notFound('No such crawl run');
       let workflow: InstanceStatus | null = null;
@@ -264,7 +320,7 @@ const routes: Route[] = [
     handler: async ({ params, env }) => {
       let raw: string;
       try { raw = decodeURIComponent(params[0]); } catch { throw notFound('No profile for this site'); }
-      const row = await new CrawlStore(env.DB, env.CRAWL).getProfile(normalizeSite(raw));
+      const row = await new CrawlStore(env.DB, env.SKILLS).getProfile(normalizeSite(raw));
       if (!row) throw notFound('No profile for this site');
       return json(200, { profile: profileJson(row) }, { 'cache-control': CACHE_LIST });
     },
@@ -276,6 +332,96 @@ const routes: Route[] = [
     handler: async (c) => {
       await requireAdmin(c);
       return json(200, { reports: await c.store.openReports() });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/search$/,
+    name: '/v1/search',
+    handler: async ({ env, url, ip }) => {
+      const q = queryParam(url);
+      await limitSearch(env, ip);
+      const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
+      const slot = slotParam(url);
+      const limit = intParam(url, 'limit', 10, 1, 50);
+      const hits = await search(searchDeps(env, { site, slot }), { q, site, slot, limit });
+      return json(
+        200,
+        {
+          query: q,
+          site: site ?? null,
+          slot: slot ?? null,
+          hits: hits.map((h) => ({
+            url: h.url, title: h.title, heading_path: h.heading_path, snippet: h.snippet, slot: h.slot, topic_path: h.topic_path, score: h.score,
+          })),
+        },
+        { 'cache-control': CACHE_LIST },
+      );
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/sites\/([^/]+)\/topics$/,
+    name: '/v1/sites/:site/topics',
+    handler: async ({ env, params }) => {
+      const site = siteParam(params[0]);
+      const { pages, rows } = await siteTopics(env.DB, site);
+      if (!pages) throw notFound('No indexed pages for this site');
+      return json(200, { site, pages, topics: topicTree(rows) }, { 'cache-control': CACHE_LIST });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/packages$/,
+    name: '/v1/packages',
+    handler: async ({ env, url, ip }) => {
+      const site = siteParam(url.searchParams.get('site') ?? '');
+      const topic = url.searchParams.get('topic');
+      const budget = intParam(url, 'budget', DEFAULT_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET);
+      let label: string;
+      let chunks;
+      if (topic !== null) {
+        if (url.searchParams.has('q')) throw bad('Pass q or topic, not both');
+        label = topic.trim().toLowerCase();
+        if (!TOPIC.test(label)) throw bad('topic must be a path like webhooks/signatures');
+        chunks = await topicChunks(env.DB, site, label);
+      } else {
+        label = queryParam(url);
+        await limitSearch(env, ip);
+        chunks = await search(searchDeps(env, { site }), { q: label, site, limit: 40 });
+      }
+      if (!chunks.length) throw notFound('Nothing indexed matches');
+      return new Response(buildIndexPackage({ site, label, chunks, budget }), {
+        headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
+      });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/admin\/index$/,
+    name: '/v1/admin/index',
+    // Fetches one Markdown page, stores it at pages/<sha256>.md and indexes it
+    // (inline, or through the queue with {"queue": true}).
+    handler: async (c) => {
+      await requireAdmin(c);
+      const body = (await readJson(c.req)) as { url?: unknown; queue?: unknown };
+      if (typeof body.url !== 'string') throw bad('url is required');
+      const target = assertFetchable(body.url, { allowLocalhost: allowLocalhost(c.env) });
+      target.hash = '';
+      const pageUrl = target.href;
+      const site = siteOf(pageUrl);
+      const fetched = await fetchSource(pageUrl, site, { allowLocalhost: allowLocalhost(c.env) });
+      if (fetched.over) throw new ApiError('too_large', 'Page is over 2 MB', 413);
+      if (/html/i.test(fetched.contentType)) throw new ApiError('source_unreachable', `${pageUrl} served HTML; index its Markdown (.md) URL`);
+      if (!fetched.text.trim()) throw new ApiError('source_unreachable', `${pageUrl} is empty`);
+      const contentHash = await sha256Hex(fetched.text);
+      await c.env.SKILLS.put(pageKey(contentHash), fetched.text, { httpMetadata: { contentType: 'text/markdown; charset=utf-8' } });
+      const msg = { site, url: pageUrl, contentHash };
+      if (body.queue === true) {
+        await c.env.INDEX_QUEUE.send(msg);
+        return json(202, { queued: true, ...msg });
+      }
+      return json(200, { ...msg, ...(await indexPage(indexDeps(c.env), msg)) });
     },
   },
 ];
