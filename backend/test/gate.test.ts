@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { aiVerdict, gateSite, gateSummary, GateUndecided, listVerdict, pageSignals, parseGate, scoreSignals } from '../src/crawl/gate.ts';
+import { aiVerdict, gateSite, gateSummary, GateUndecided, listVerdict, pageSignals, parseGate, scoreSignals, stubTarget } from '../src/crawl/gate.ts';
 import type { GateAi, Signals } from '../src/crawl/gate.ts';
 import { HostLimiter } from '../src/crawl/polite.ts';
 import type { RobotsFile } from '../src/crawl/site.ts';
@@ -136,6 +136,35 @@ test('gateSite: listed sites make no request; signals decide with the start page
   assert.equal(b.decision, 'crawl');
   assert.equal(b.category, null);
   assert.equal(blocked.calls.length, 0);
+});
+
+test('gateSite: redirect stubs are followed once; a start page refused for the Markdown Accept header is asked for as HTML', async () => {
+  const kotlin = '<!DOCTYPE html><html><title>You will be redirected shortly</title><meta http-equiv="refresh" content="0; url=home.html"><h1>Redirecting</h1><a href="home.html">Click here</a></html>';
+  assert.equal(stubTarget(kotlin, 'https://acme.dev/docs/', 'text/html'), 'https://acme.dev/docs/home.html');
+  assert.equal(stubTarget('[Continue to ../2.14/index.html](https://acme.dev/docs/2.14/index.html)\n', 'https://acme.dev/docs/stable/', 'text/plain'), 'https://acme.dev/docs/2.14/index.html');
+  // Off-site targets and real pages are not stubs.
+  assert.equal(stubTarget('<meta http-equiv="refresh" content="0; url=https://evil.example/">', 'https://acme.dev/', 'text/html'), null);
+  assert.equal(stubTarget(fixture('docs.html'), 'https://acme.dev/docs/', 'text/html'), null);
+
+  const stub = fakeFetch({
+    'https://acme.dev/docs/': html(kotlin),
+    'https://acme.dev/docs/home.html': html(fixture('docs.html')),
+  });
+  const v = await gateSite('https://acme.dev/docs/', NO_ROBOTS, { fetchImpl: stub.impl, limiter: fast(), ai: null });
+  assert.equal(v.decision, 'crawl');
+  assert.ok(stub.calls.some((c) => c.url === 'https://acme.dev/docs/home.html'));
+
+  const accepts: string[] = [];
+  const picky = async (url: string, init: RequestInit) => {
+    const accept = new Headers(init.headers).get('accept') ?? '';
+    if (url === 'https://acme.dev/docs/start') accepts.push(accept);
+    if (url !== 'https://acme.dev/docs/start') return new Response('not found', { status: 404 });
+    return accept.startsWith('text/markdown') ? new Response('oops', { status: 500 }) : html(fixture('docs.html'))();
+  };
+  const p = await gateSite('https://acme.dev/docs/start', NO_ROBOTS, { fetchImpl: picky, limiter: fast(), ai: null });
+  assert.equal(p.decision, 'crawl');
+  assert.equal(accepts.length, 2);
+  assert.match(accepts[1], /^text\/html/);
 });
 
 test('gate AI check: inconclusive signals ask the model once; its verdict, confidence and cost are used', async () => {
