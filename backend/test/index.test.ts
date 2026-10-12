@@ -736,7 +736,13 @@ function fakeBatch(bodies: unknown[]) {
 }
 
 test('consumer acks indexed and invalid messages, retries failures with backoff', async () => {
-  const { deps, put } = await setup([cls('guide', ['a', 'b'])]);
+  const { deps, put } = await setup();
+  // The batch's messages run concurrently, so the classifier answers by page,
+  // not by call order: /ok gets a classification, /fail has none (a retry).
+  deps.classify = async (p) => {
+    if (p.url === 'https://ex.com/ok') return cls('guide', ['a', 'b']);
+    throw new Error('no classification left');
+  };
   const good = await put('https://ex.com/ok', '# OK\n\nfine');
   const missing = { site: 'ex.com', url: 'https://ex.com/missing', contentHash: 'a'.repeat(64) };
   const failing = await put('https://ex.com/fail', '# Fail\n\nclassifier is out of answers');
