@@ -3,7 +3,8 @@
 // job server (crawler/server.js), already running when the sandbox boots:
 //   1. POST {api}/v2/sandboxes  -> sandboxID, domain, trafficAccessToken
 //   2. POST https://8080-<id>.<domain>/run { token, job }
-//   3. GET  .../status until finished; GET .../result only when not uploading
+//   3. GET  .../status until finished, then GET .../result (the Worker stores
+//      it in R2 itself; an optional presigned upload can deliver it instead)
 //   4. DELETE {api}/sandboxes/<id>, always
 // Public traffic to the sandbox is off, so every call carries the traffic
 // token; the per-job token stops pages inside the sandbox from using the
@@ -15,6 +16,10 @@ import type { BrowserCrawler, CrawlJob, RunHandle, RunState } from './runner.ts'
 
 export const E2B_API = 'https://api.e2b.app';
 const JOB_PORT = 8080;
+// The crawler caps its own result at 20 MB (crawler/lib.js); the Worker
+// enforces the same limit when it reads the result.
+export const MAX_RESULT_BYTES = 20_000_000;
+const RESULT_TIMEOUT_MS = 120_000;
 // Hobby plan sandboxes run for at most an hour.
 export const MAX_SANDBOX_SECONDS = 3600;
 // Template resources (crawler/package.json, template:build) and E2B's
@@ -139,13 +144,32 @@ export class E2BCrawler implements BrowserCrawler {
     }
   }
 
+  // The crawl result, read from the job server: streamed with a byte cap and
+  // its own timeout, so a hostile or broken sandbox can't exhaust the Worker.
   async result(h: RunHandle): Promise<string | null> {
-    const r = await this.job(h, '/result');
-    if (!r.ok) {
+    const r = await this.job(h, '/result', { signal: AbortSignal.timeout(RESULT_TIMEOUT_MS) });
+    if (!r.ok || !r.body) {
       await r.body?.cancel();
       return null;
     }
-    return r.text();
+    if (Number(r.headers.get('content-length')) > MAX_RESULT_BYTES) {
+      await r.body.cancel();
+      throw new Error(`crawl result is over ${MAX_RESULT_BYTES} bytes`);
+    }
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let size = 0;
+    let text = '';
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return text + decoder.decode();
+      size += value.byteLength;
+      if (size > MAX_RESULT_BYTES) {
+        await reader.cancel();
+        throw new Error(`crawl result is over ${MAX_RESULT_BYTES} bytes`);
+      }
+      text += decoder.decode(value, { stream: true });
+    }
   }
 
   async stop(h: RunHandle): Promise<void> {

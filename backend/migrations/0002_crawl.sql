@@ -5,7 +5,7 @@
 -- One row per site (hostname, normalised like skills.site).
 CREATE TABLE site_profiles (
   site               TEXT PRIMARY KEY,
-  status             TEXT NOT NULL,          -- crawling | ready | needs_browser | html_only | blocked | failed
+  status             TEXT NOT NULL,          -- crawling | ready | needs_browser | empty | blocked | failed
   docs_root          TEXT NOT NULL DEFAULT '/',
   has_llms           INTEGER NOT NULL DEFAULT 0,
   has_llms_full      INTEGER NOT NULL DEFAULT 0,
@@ -30,7 +30,7 @@ CREATE TABLE crawl_runs (
   started_at      TEXT NOT NULL,
   finished_at     TEXT,
   status          TEXT NOT NULL,             -- queued | running | complete | failed
-  path            TEXT,                      -- markdown | browser | html_only | blocked | none
+  path            TEXT,                      -- markdown | html | browser | blocked | none
   pages_new       INTEGER NOT NULL DEFAULT 0,
   pages_changed   INTEGER NOT NULL DEFAULT 0,
   pages_unchanged INTEGER NOT NULL DEFAULT 0,
@@ -45,7 +45,7 @@ CREATE TABLE pages (
   url           TEXT PRIMARY KEY,            -- the page's URL (the HTML page, not its .md twin)
   site          TEXT NOT NULL,
   source_url    TEXT NOT NULL,               -- where the Markdown came from (.md twin, llms.txt, or the page itself)
-  source_kind   TEXT NOT NULL,               -- page-md | llms | llms-full | browser
+  source_kind   TEXT NOT NULL,               -- page-md | llms | llms-full | page-html (converted in the Worker) | browser
   title         TEXT,
   content_hash  TEXT NOT NULL,               -- sha256 of the stored Markdown; R2 key pages/<hash>.md
   bytes         INTEGER NOT NULL,

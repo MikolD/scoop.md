@@ -22,6 +22,7 @@ import type { FetchImpl } from './polite.ts';
 import { ALLOW_ALL, DISALLOW_ALL, parseRobots } from './robots.ts';
 import type { Robots } from './robots.ts';
 import { parseSitemap } from './sitemap.ts';
+import { extractPage, MIN_WORDS } from './html.ts';
 
 export const DEFAULT_PAGE_BUDGET = 500;
 const TWIN_SAMPLE = 10;
@@ -32,7 +33,8 @@ const MAX_SITEMAP_FETCHES = 8;
 const MAX_URLS_KEPT = 5000;
 const SITEMAP_CAP = 10_000_000;
 
-export type SourceKind = 'page-md' | 'llms' | 'llms-full' | 'browser';
+// page-html: a server-rendered page converted to Markdown in the Worker.
+export type SourceKind = 'page-md' | 'llms' | 'llms-full' | 'page-html' | 'browser';
 
 // One Markdown source to fetch: `url` is the page it stands for.
 export interface PlannedPage {
@@ -245,13 +247,25 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   }
   out.plan = plan;
 
-  // 5. No Markdown worth fetching: is the HTML readable, or a client-rendered shell?
+  // 5. No Markdown worth fetching. Server-rendered HTML is converted in the
+  // Worker (page-html): the start page, then its same-site links, then sitemap
+  // pages. A client-rendered shell, or a start page that converts to too
+  // little text, goes to the browser crawler instead.
   const markdownPages = plan.filter((p) => p.kind === 'page-md').length;
   if (!out.llmsUrl && !out.llmsFullUrl && markdownPages === 0) {
     const r = await get(start.href);
-    out.clientShell = r.ok && !r.notModified && !r.over ? looksLikeClientShell(r.text) : null;
-    out.needsBrowser = out.clientShell === true;
-    out.browserStartUrls = [start.href, ...sample(sitemapPages.filter((u) => u !== start.href), 20)];
+    const html = r.ok && !r.notModified && !r.over ? r.text : null;
+    out.clientShell = html === null ? null : looksLikeClientShell(html);
+    const page = html !== null && !out.clientShell ? extractPage(html, r.url) : null;
+    if (page && page.words >= MIN_WORDS) {
+      for (const u of [r.url, ...page.links, ...sitemapPages]) {
+        if (sameSite(u) && inRoot(u) && !/\.(?!html?$)[a-z0-9]{1,5}$/i.test(new URL(u).pathname)) add({ url: u, sourceUrl: u, kind: 'page-html' });
+      }
+      out.plan = plan;
+    } else if (html !== null) {
+      out.needsBrowser = true;
+      out.browserStartUrls = [start.href, ...sample(sitemapPages.filter((u) => u !== start.href), 20)];
+    }
   }
   out.requests = requests;
   return out;
@@ -297,8 +311,15 @@ export async function fetchPlanned(
       });
       if (!r.ok) return null;
       if (r.notModified) return { ...p, title: null, markdown: null, etag: r.etag, lastModified: r.lastModified };
-      if (r.over || !looksLikeText(r.contentType, r.text)) return null;
-      return { ...p, title: markdownTitle(r.text), markdown: r.text, etag: r.etag, lastModified: r.lastModified };
+      if (r.over) return null;
+      if (looksLikeText(r.contentType, r.text)) {
+        // Markdown, including an HTML page that answered our Accept header with Markdown.
+        return { ...p, kind: p.kind === 'page-html' ? 'page-md' : p.kind, title: markdownTitle(r.text), markdown: r.text, etag: r.etag, lastModified: r.lastModified };
+      }
+      if (p.kind !== 'page-html') return null;
+      const page = extractPage(r.text, r.url);
+      if (page.words < MIN_WORDS) return null;
+      return { ...p, title: page.title, markdown: page.markdown, etag: r.etag, lastModified: r.lastModified };
     }),
   );
   const pages = results.filter((r): r is FetchedSource => r !== null);

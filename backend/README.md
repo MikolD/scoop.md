@@ -109,10 +109,10 @@ curl http://127.0.0.1:8787/v1/sites/developers.cloudflare.com/profile           
 
 `wrangler dev` runs the Workflow and the Queue locally. Browser crawls need
 `E2B_API_KEY` in `.dev.vars` and create a real sandbox (template
-`E2B_TEMPLATE_ID`, built from `/crawler`). Without the R2 API token secrets, and
-only when `ENVIRONMENT` is `dev`, the Workflow reads the result from the sandbox
-instead of via the presigned upload; staging and production refuse to run a
-browser crawl without them.
+`E2B_TEMPLATE_ID`, built from `/crawler`). In every environment the Workflow
+reads the crawl result from the sandbox itself (20 MB cap) and kills it right
+after; the R2 API token secrets are optional and only switch on a presigned
+upload instead.
 
 ## Before the first deploy
 
@@ -172,16 +172,20 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    ```
    This bucket only holds browser-crawl results; page Markdown goes to the
    skills bucket under `pages/`. The queues are the ones from step 7.
+   Staging already has `scoop-crawl-staging` (with the lifecycle rule) and
+   `E2B_API_KEY`.
    - Lifecycle rule on each crawl bucket: delete objects under
      `crawl-results/` after 1 day (the Workflow deletes them itself; this
      catches failed runs).
-   - An **R2 API token** (dashboard → R2 → Manage API tokens → Create, *Object
-     Read & Write*, scoped to the crawl bucket only), then per environment:
+   - `npx wrangler secret put E2B_API_KEY --env staging` (and production).
+   - Optional: an **R2 API token** (dashboard → R2 → Manage API tokens →
+     Create, *Object Read & Write*, scoped to the crawl bucket only) makes the
+     sandbox upload its result to a presigned URL instead of the Worker
+     reading it. Not needed; without it the sandbox holds no credentials.
      ```sh
      npx wrangler secret put R2_ACCESS_KEY_ID --env staging       # token's Access Key ID
      npx wrangler secret put R2_SECRET_ACCESS_KEY --env staging   # token's Secret Access Key
      npx wrangler secret put R2_ACCOUNT_ID --env staging          # Cloudflare account ID
-     npx wrangler secret put E2B_API_KEY --env staging
      ```
    - The Workflows (`crawl-site-staging`, `crawl-site`) are created by
      `wrangler deploy`; nothing to create by hand.

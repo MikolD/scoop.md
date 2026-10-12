@@ -481,3 +481,85 @@ test('index-pages messages: client-side routes keep their #/ path, plain anchors
   assert.equal(parseMessage({ site: 'docsify.js.org', url: 'https://docsify.js.org/#/cdn?id=x', contentHash: h }).url, 'https://docsify.js.org/#/cdn');
   assert.equal(parseMessage({ site: 'ex.com', url: 'https://ex.com/a#intro', contentHash: h }).url, 'https://ex.com/a');
 });
+
+test('E2BCrawler.result: streamed with a 20 MB cap, sent with both tokens', async () => {
+  const handle = { id: 'sbx1', startedAt: 0, data: { domain: 'e2b.app', traffic: 'traffic', token: 'job' } };
+  const seen: Record<string, string>[] = [];
+  const big = () =>
+    new ReadableStream<Uint8Array>({
+      start(c) {
+        const chunk = new Uint8Array(1_000_000);
+        for (let i = 0; i < 21; i++) c.enqueue(chunk);
+        c.close();
+      },
+    });
+  const make = (body: () => BodyInit, headers: Record<string, string> = {}) =>
+    new E2BCrawler({
+      apiKey: 'key',
+      templateId: 'tpl',
+      fetchImpl: async (_url, init) => {
+        seen.push(init.headers as Record<string, string>);
+        return new Response(body(), { headers });
+      },
+    });
+  assert.equal(await make(() => '{"pages":[]}').result(handle), '{"pages":[]}');
+  assert.equal(seen[0]['e2b-traffic-access-token'], 'traffic');
+  assert.equal(seen[0].authorization, 'Bearer job');
+  await assert.rejects(make(big).result(handle), /over 20000000 bytes/);
+  await assert.rejects(make(() => 'x', { 'content-length': '30000000' }).result(handle), /over 20000000 bytes/);
+});
+
+// --- server-rendered HTML converted in the Worker
+
+const prose = (n: number) => Array.from({ length: n }, (_, i) => `word${i}`).join(' ');
+const docPage = (title: string, links: string[] = []) =>
+  `<!doctype html><html><head><title>${title} | Ex</title></head><body>
+  <nav>${links.map((l) => `<a href="${l}">${l}</a>`).join('')}</nav>
+  <main><h1>${title}<a class="headerlink" href="#x">¶</a></h1><p>${prose(120)}</p><pre><code class="language-py">print(1)</code></pre></main>
+  <footer>Footer text</footer></body></html>`;
+const htmlResponse = (body: string) => () => new Response(body, { headers: { 'content-type': 'text/html; charset=utf-8' } });
+
+test('discoverSite: a server-rendered site is planned as page-html (start page, its links, then sitemap pages)', async () => {
+  const { impl } = fakeFetch({
+    'https://ex.com/docs/': htmlResponse(docPage('Docs', ['/docs/a', '/docs/b.html', '/docs/file.pdf', '/blog/x', 'https://other.com/docs/y'])),
+    'https://ex.com/sitemap.xml': () => new Response('<urlset><url><loc>https://ex.com/docs/c</loc></url><url><loc>https://ex.com/docs/a</loc></url></urlset>'),
+  });
+  const d = await discoverSite('https://ex.com/docs/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.needsBrowser, false);
+  assert.equal(d.clientShell, false);
+  assert.deepEqual(d.plan.map((p) => [p.kind, p.url]), [
+    ['page-html', 'https://ex.com/docs/'],
+    ['page-html', 'https://ex.com/docs/a'],
+    ['page-html', 'https://ex.com/docs/b.html'],
+    ['page-html', 'https://ex.com/docs/c'],
+  ]);
+  const small = await discoverSite('https://ex.com/docs/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }), budget: 2 });
+  assert.equal(small.plan.length, 2);
+});
+
+test('discoverSite: a start page that extracts to too little text falls back to the browser crawler', async () => {
+  const thin = '<html><body><main><h1>Docs</h1><p>Loading the documentation, please wait.</p></main><script src="/a.js"></script></body></html>';
+  const { impl } = fakeFetch({ 'https://thin.com/': htmlResponse(thin) });
+  const d = await discoverSite('https://thin.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.clientShell, false);
+  assert.equal(d.needsBrowser, true);
+  assert.equal(d.plan.length, 0);
+});
+
+test('fetchPlanned: page-html pages become Markdown via extract.js; thin pages fail; Markdown answers are kept as is', async () => {
+  const { impl } = fakeFetch({
+    'https://ex.com/a': htmlResponse(docPage('Alpha')),
+    'https://ex.com/thin': htmlResponse('<html><body><main><h1>T</h1><p>short</p></main></body></html>'),
+    'https://ex.com/md': () => new Response(md('Negotiated'), { headers: { 'content-type': 'text/markdown' } }),
+  });
+  const plan = ['a', 'thin', 'md'].map((x) => ({ url: `https://ex.com/${x}`, sourceUrl: `https://ex.com/${x}`, kind: 'page-html' as const }));
+  const { pages, failed } = await fetchPlanned(plan, new Map(), { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(failed, 1);
+  const [a, m] = pages;
+  assert.equal(a.kind, 'page-html');
+  assert.equal(a.title, 'Alpha');
+  assert.match(a.markdown!, /^# Alpha\n\nword0 word1/);
+  assert.match(a.markdown!, /```py\nprint\(1\)\n```/);
+  assert.ok(!a.markdown!.includes('Footer text'));
+  assert.deepEqual([m.kind, m.title], ['page-md', 'Negotiated']);
+});

@@ -239,14 +239,21 @@ listening on `::` for that port.
   llms.txt, then twins of sitemap pages; deduplicated by source URL; cut at the
   page budget (default 500, max 1000). `pages.url` is the HTML page when we
   derived the twin, else the Markdown URL itself.
-- **HTML-only sites** (`html_only`: no llms files, no twins, server-rendered)
-  get a profile and no pages in M2. Converting their HTML needs a DOM, which
-  Workers lack; running `extract.js` over linkedom in the Worker, or sending
-  them to the browser crawler, is a later call.
-- **needs_browser** = no Markdown sources and the start page is a client shell:
-  fewer than 150 words once scripts/styles are dropped, plus an empty mount
-  point (`#root`, `#app`, `#__next`, …) or a "needs JavaScript" notice with any
-  script, or fewer than 30 words with 3+ scripts.
+- **Server-rendered sites without Markdown** (path `html`) are converted in the
+  Worker: `extension/lib/extract.js` runs over linkedom (`src/crawl/html.ts`),
+  imported directly with a small `extract.d.ts` beside it, so crawled pages
+  read like scooped ones. The plan is the start page, its same-site links
+  (navigation and main content) and then sitemap pages under the docs root,
+  skipping non-HTML file extensions. A page that converts to fewer than 50
+  words is counted as failed. If the server answers with Markdown anyway
+  (content negotiation on our `Accept`), that is stored as `page-md`. Parsing
+  is ~100 ms of CPU per page in Node, so it needs the Paid plan's CPU limit,
+  not Free's 10 ms.
+- **needs_browser** = no Markdown sources and either the start page is a
+  client shell (fewer than 150 words once scripts/styles are dropped, plus an
+  empty mount point (`#root`, `#app`, `#__next`, …) or a "needs JavaScript"
+  notice with any script, or fewer than 30 words with 3+ scripts), or it is
+  server-rendered but converts to fewer than 50 words.
 - **robots.txt:** our product token is `scoop.md-bot`; groups naming it win over
   `*`, longest match wins, Allow wins ties, `*`/`$` wildcards (glob matched
   without regex). 4xx → no rules; 5xx or unreachable → treated as disallow-all
@@ -268,9 +275,11 @@ listening on `::` for that port.
 - New tables in `0002_crawl.sql` (`site_profiles`, `crawl_runs`, `pages`); the
   v1 tables are untouched. Run IDs are `cr_<ulid>` and double as the Workflow
   instance ID.
-- New bucket binding `CRAWL` (`scoop-crawl-<env>`), not the skills bucket:
-  crawled pages and short-lived browser results get their own lifecycle rule and
-  the R2 API token can be scoped to this bucket alone.
+- **Buckets:** page Markdown is in the skills bucket (`SKILLS`,
+  `pages/<sha256>.md`), shared with the M4 indexer. Browser results go to a
+  separate `CRAWL` bucket (`scoop-crawl-<env>`, `crawl-results/`, expiring
+  after a day), so an optional R2 API token scoped to it can't touch skills or
+  pages.
 - **Content-addressed:** `pages/<sha256>.md` is the SHA-256 of the Markdown as
   fetched (no normalisation). R2 is `head`-checked before `put`, so identical
   content across URLs and runs is written once. Objects are never deleted when a
@@ -278,9 +287,11 @@ listening on `::` for that port.
 - **Unchanged** = 304 to our `If-None-Match`/`If-Modified-Since`, or the same
   hash. It refreshes `fetched_at`, `run_id` and validators only; no R2 write, no
   queue message.
-- **Queue messages** `{ site, url, contentHash, change, runId }`, one per new or
-  changed page, sent with `sendBatch` per step. The consumer logs per-site
-  counts and acks (M4 replaces it).
+- **Queue messages** are exactly `{ site, url, contentHash }` (the M4
+  contract), one per new or changed page, sent with `sendBatch` in chunks of at
+  most 100. `contentHash` is the SHA-256 of the UTF-8 bytes at
+  `pages/<contentHash>.md`. Client-side routes (`#/page`) are part of a page's
+  URL, and the consumer keeps them.
 
 ### Workflow
 
@@ -309,12 +320,15 @@ listening on `::` for that port.
   rendered inside the sandbox can't drive the job server via localhost. The
   `browser-start` step output (which holds both tokens) is marked
   `sensitive: 'output'`.
-- **Upload:** the Workflow presigns one SigV4 `PUT` (with `content-type`
-  signed) for `crawl-results/<runId>.json`, valid for the crawl + 10 minutes.
-  R2 presigned URLs can't be made single-use; the key is unique per run, short
-  lived and deleted after ingestion. In local dev without R2 credentials the
-  Workflow fetches `GET /result` from the sandbox and writes the same key;
-  staging/production refuse a browser crawl without the credentials.
+- **Result collection:** the Worker reads `GET /result` from the sandbox's job
+  server in every environment (traffic token + job token, streamed with a
+  20 MB cap and a 2-minute timeout), keeps only the validated pages at
+  `crawl-results/<runId>.json` in the `CRAWL` bucket, and kills the sandbox in
+  the same step. So the sandbox holds no credentials at all. A presigned SigV4
+  `PUT` (`content-type` signed, crawl + 10 minutes) is used instead only when an
+  R2 API token is configured (`R2_ACCESS_KEY_ID` etc.); R2 presigned URLs
+  can't be single-use, so the key is unique per run and deleted after
+  ingestion.
 - **Presigning by hand** (Web Crypto, ~80 lines) rather than `aws4fetch`: no new
   dependency, portable, and pinned by the AWS SigV4 test vector in the tests.
 - **Untrusted output:** pages are re-checked in the Worker (`result.ts`): same

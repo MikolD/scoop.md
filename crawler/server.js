@@ -2,7 +2,7 @@
 // is already running (snapshotted) when a sandbox is created. The backend:
 //   POST /run     { token, job }  start the one crawl this sandbox will do
 //   GET  /status  (Bearer token)  { state, pages, error, uploaded }
-//   GET  /result  (Bearer token)  the CrawlResult JSON (dev, when there is no upload URL)
+//   GET  /result  (Bearer token)  the CrawlResult JSON (how the backend normally collects it)
 //   GET  /health                  for the template's ready command
 // The public URL also requires E2B's traffic token (allowPublicTraffic: false);
 // the per-job token keeps pages rendered in this sandbox from driving the

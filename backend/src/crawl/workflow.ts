@@ -59,8 +59,9 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       const d: Discovery = await step.do('discover', NET, () =>
         discoverSite(p.startUrl, robots, { allowLocalhost: local, budget: p.maxPages, limiter: new HostLimiter({ intervalMs: interval }) }),
       );
-      const path = d.blocked ? 'blocked' : d.needsBrowser ? 'browser' : d.plan.length ? 'markdown' : 'html_only';
-      const status = { blocked: 'blocked', browser: 'needs_browser', markdown: 'ready', html_only: 'html_only' }[path];
+      const html = d.plan.some((pl) => pl.kind === 'page-html');
+      const path = d.blocked ? 'blocked' : d.needsBrowser ? 'browser' : html ? 'html' : d.plan.length ? 'markdown' : 'none';
+      const status = { blocked: 'blocked', browser: 'needs_browser', html: 'ready', markdown: 'ready', none: 'empty' }[path];
 
       await step.do('profile', DB, async () => {
         const now = new Date().toISOString();
@@ -131,22 +132,20 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           if (state !== 'running') break;
         }
 
-        // Without R2 credentials (local dev) the result is read from the
-        // sandbox and stored where the upload would have put it.
+        // The result comes from the sandbox's job server (traffic token + job
+        // token), unless the optional presigned upload already delivered it.
+        // Only the validated pages are kept in R2, and the sandbox is killed
+        // as soon as the result is in hand.
         const collected = await step.do('browser-collect', NET, async () => {
-          if (!(await env.CRAWL.head(resultKey(p.runId)))) {
-            const raw = await crawler.result(h);
-            if (raw) await env.CRAWL.put(resultKey(p.runId), raw, { httpMetadata: { contentType: 'application/json' } });
-          }
-          const obj = await env.CRAWL.get(resultKey(p.runId));
-          if (!obj) return { pages: 0, error: (await crawler.status(h))?.error ?? 'no result' };
-          return { pages: browserPages(await obj.text(), p.site, robotsFrom(robots), p.maxPages).length, error: null };
-        });
-
-        await step.do('browser-stop', DB, async () => {
+          const uploaded = await env.CRAWL.get(resultKey(p.runId));
+          const raw = uploaded ? await uploaded.text() : await crawler.result(h);
+          const error = raw === null ? ((await crawler.status(h))?.error ?? 'no result') : null;
+          const pages = raw === null ? [] : browserPages(raw, p.site, robotsFrom(robots), p.maxPages);
+          await env.CRAWL.put(resultKey(p.runId), JSON.stringify({ pages }), { httpMetadata: { contentType: 'application/json' } });
           await crawler.stop(h);
           const seconds = Math.round((Date.now() - h.startedAt) / 1000);
           await store().updateRun(p.runId, { browser_seconds: seconds, cost_usd: Number((seconds * E2B_USD_PER_SECOND).toFixed(6)) });
+          return { pages: pages.length, error };
         });
         handle = null;
         if (collected.error && !collected.pages) throw new Error(`browser crawl failed: ${collected.error}`);
@@ -191,15 +190,13 @@ async function enqueue(env: Env, messages: IndexMessage[]): Promise<void> {
   }
 }
 
-// A presigned PUT for this run's result object only, valid for the crawl plus
-// a margin. Null in local dev without R2 credentials (the Workflow then reads
-// the result from the sandbox); anywhere else missing credentials are an error.
+// Optional: a presigned PUT for this run's result object only, valid for the
+// crawl plus a margin, when an R2 API token is configured. Without one (the
+// default) the Workflow reads the result from the sandbox instead, and the
+// sandbox holds no credentials at all.
 async function presignResult(env: Env, runId: string, maxMinutes: number): Promise<string | null> {
   const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID, CRAWL_BUCKET_NAME } = env;
-  if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ACCOUNT_ID || !CRAWL_BUCKET_NAME) {
-    if (env.ENVIRONMENT === 'dev') return null;
-    throw new Error('R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID and CRAWL_BUCKET_NAME are required for browser crawls');
-  }
+  if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ACCOUNT_ID || !CRAWL_BUCKET_NAME) return null;
   return presign({
     method: 'PUT',
     url: r2Endpoint(R2_ACCOUNT_ID, CRAWL_BUCKET_NAME, resultKey(runId)),

@@ -18,10 +18,12 @@ Workflow when discovery marks a site `needs_browser`.
   `backend/src/crawl/robots.ts`. Refresh with `npm run sync`; a test fails when
   they drift.
 
-The sandbox holds no Cloudflare, database or OpenRouter credentials. Its only
-way out is the presigned R2 URL in the job, valid for one object key and for the
-crawl's duration plus 10 minutes. Page content is untrusted: the backend
-re-checks every page (`backend/src/crawl/result.ts`) before storing it.
+The sandbox holds no credentials at all. The backend reads the result from
+`GET /result` (E2B traffic token plus the per-job token) and stores it itself.
+Only when the Worker has an R2 API token configured does the job carry a
+presigned PUT URL for one object key, valid for the crawl plus 10 minutes. Page
+content is untrusted: the backend re-checks every page
+(`backend/src/crawl/result.ts`) before storing it.
 
 ## Run locally
 

@@ -13,7 +13,8 @@
   },
   "license": "MIT",
   "dependencies": {
-    "entities": "^8.1.0"
+    "entities": "^8.1.0",
+    "linkedom": "0.18.13"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261011.1",
