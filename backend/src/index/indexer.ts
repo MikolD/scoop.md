@@ -47,6 +47,11 @@ export const UNCLASSIFIED = 'none';
 export const NEEDS_CLASSIFYING = [UNCLASSIFIED, FAILED];
 // After this many FAILED results for the same content, the daily job stops trying.
 export const MAX_ATTEMPTS = 3;
+// From this queue delivery on (about 3.5 minutes of backoff in), a new page
+// whose classifier is unavailable is indexed unclassified rather than retried,
+// so an outage can't leave it unsearchable in the dead-letter queue. The
+// daily job classifies it later.
+export const UNAVAILABLE_FALLBACK_ATTEMPT = 4;
 // index_costs row for the account-wide total.
 export const ALL_SITES = '*';
 const VECTOR_BATCH = 500;
@@ -85,12 +90,17 @@ async function capsReached(deps: IndexDeps, site: string, now: Date): Promise<bo
   return siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd;
 }
 
+async function cachedClassification(deps: IndexDeps, contentHash: string): Promise<Classified | null> {
+  const cached = await deps.bucket.get(classifyKey(contentHash));
+  return cached ? cached.json<Classified>() : null;
+}
+
 // The cached result for this content, else a fresh call (cached when it succeeded).
 // Returns null when classification is skipped, with capped saying whether a cap did it.
 // Throws ClassifyUnavailable (after recording its cost) when the classifier is down.
 async function classifyOnce(deps: IndexDeps, page: PageInput, site: string, contentHash: string, now: Date): Promise<{ result: Classified | null; capped: boolean }> {
-  const cached = await deps.bucket.get(classifyKey(contentHash));
-  if (cached) return { result: await cached.json<Classified>(), capped: false };
+  const cached = await cachedClassification(deps, contentHash);
+  if (cached) return { result: cached, capped: false };
   if (!deps.classify) return { result: null, capped: false };
   if (await capsReached(deps, site, now)) return { result: null, capped: true };
   let result: Classified;
@@ -138,7 +148,8 @@ interface Existing {
   attempts: number;
 }
 
-export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<IndexOutcome> {
+// attempt is the queue delivery count (1 for the first; inline calls pass nothing).
+export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 1 }: { attempt?: number } = {}): Promise<IndexOutcome> {
   const { db, vectors, embed } = deps;
   const now = deps.now?.() ?? new Date();
   const { site, url, contentHash } = msg;
@@ -159,7 +170,14 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
   const values = rows.length ? await embed(rows.map((r) => `${r.heading}\n\n${r.text}`), 'document') : [];
 
   // Classified last of the slow steps: if embedding fails, nothing was paid for.
-  const { result, capped } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now);
+  let result: Classified | null = null;
+  let capped = false;
+  try {
+    ({ result, capped } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
+  } catch (e) {
+    // Its cost is already recorded; late in the retries, index without it.
+    if (!(e instanceof ClassifyUnavailable) || attempt < UNAVAILABLE_FALLBACK_ATTEMPT) throw e;
+  }
   const classification = result?.classification ?? EMPTY;
   const model = result?.model ?? UNCLASSIFIED;
   const costUsd = result?.costUsd ?? 0;
@@ -206,16 +224,19 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
   return { status: 'indexed', slot: classification.slot, topicPath: classification.topic_path, chunks: rows.length, model, costUsd, capped };
 }
 
-// Same content, classification missing: caps are checked before anything is
-// read, and only the classification-derived data changes.
+// Same content, classification missing. A cached classification (free) is
+// applied whatever the caps say; otherwise the caps are checked before the
+// page is read. Only the classification-derived data changes.
 async function reclassifyPage(deps: IndexDeps, msg: IndexMessage, existing: Existing, now: Date): Promise<IndexOutcome> {
   const { db, vectors } = deps;
   const { site, url, contentHash } = msg;
-  if (!deps.classify || (await capsReached(deps, site, now))) return { status: 'unchanged' };
-
-  const { markdown, title } = await readPage(deps, url, contentHash);
-  const { result } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now);
-  if (!result) return { status: 'unchanged' };
+  let result = await cachedClassification(deps, contentHash);
+  if (!result) {
+    if (!deps.classify || (await capsReached(deps, site, now))) return { status: 'unchanged' };
+    const { markdown, title } = await readPage(deps, url, contentHash);
+    ({ result } = await classifyOnce(deps, { url, title, markdown }, site, contentHash, now));
+    if (!result) return { status: 'unchanged' };
+  }
   if (!result.classification) {
     await db
       .prepare('UPDATE page_index SET model = ?, cost_usd = ?, attempts = attempts + 1, indexed_at = ? WHERE url = ?')

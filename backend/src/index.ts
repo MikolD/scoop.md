@@ -67,7 +67,8 @@ export default {
   // Daily: re-enqueue a bounded batch of pages still waiting for a classification.
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
     if (!env.OPENROUTER_API_KEY) return;
-    const queued = await reclassify(env.DB, env.INDEX_QUEUE, { totalCapUsd: indexDeps(env).totalCapUsd });
+    const { totalCapUsd, dailyCapUsd } = indexDeps(env);
+    const queued = await reclassify(env.DB, env.INDEX_QUEUE, { totalCapUsd, dailyCapUsd });
     console.log(JSON.stringify({ cron: 'reclassify', queued }));
   },
 } satisfies ExportedHandler<Env>;

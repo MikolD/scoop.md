@@ -272,7 +272,11 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   retrying can't fix them. A classifier that is unavailable (every model
   failed transiently: timeout, dropped connection, 429, 5xx or another HTTP
   error) throws, so the message is retried with backoff; the R2 cache means
-  any part that succeeded isn't paid for again. Output that fails validation
+  any part that succeeded isn't paid for again. From the 4th delivery of a
+  new page (about 3.5 minutes of backoff in) it is indexed unclassified
+  (`model` `none`) instead, so a long outage can't leave a first-seen page
+  unsearchable in the dead-letter queue, out of the daily job's reach. A
+  reclassify message keeps retrying: its page is already searchable. Output that fails validation
   is not retried here (see "Unclassified pages").
 - **Cost caps:** `index_costs(site, day)` sums OpenRouter `usage.cost` per
   site per UTC day, failed attempts included, plus an account-wide row with
@@ -295,8 +299,9 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   validation; all-transient failures throw instead, see "Retries"). Such rows
   don't count as indexed for the idempotency check.
 - **Reclassifying** (a message for content already indexed but unclassified):
-  the caps are checked first, and if one is reached the message is
-  `unchanged` without reading anything else. Otherwise only the
+  a classification already in the R2 cache is free, so it is applied whatever
+  the caps say. Otherwise the caps are checked first, and if one is reached
+  the message is `unchanged` without reading anything else. Otherwise only the
   classification-derived data changes: `page_index`, `entities`, topic counts
   and each vector's `slot` metadata. Vectorize can't update metadata alone, so
   vectors are read back with `getByIds` (20 at a time) and upserted with their
@@ -311,7 +316,10 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   is today's remaining account budget (`INDEX_DAILY_TOTAL_CAP_USD` minus spend)
   divided by the average cost of the last 500 classified pages (or the
   estimate for a 20,000-character page when there are none), clamped to
-  [50, 2000]. The cron does nothing without the API key.
+  [50, 2000]. Each site gets at most `INDEX_DAILY_CAP_USD` / that average
+  pages (`ROW_NUMBER() OVER (PARTITION BY site ORDER BY indexed_at)`), so one
+  site with a large backlog, which its own cap would stop anyway, can't take
+  the whole batch from the others. The cron does nothing without the API key.
 - **Classifier output** is validated, not trusted: `slot` must be in the
   enum, `topic_path` needs 2-4 levels (normalised to lowercase slugs of
   letters, digits, `.`, `_`, `-`, so `/` can join them), summary required;

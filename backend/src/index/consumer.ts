@@ -33,7 +33,7 @@ export const backoffSeconds = (attempts: number) => Math.min(3600, 30 * 2 ** Mat
 export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: IndexDeps): Promise<void> {
   for (const msg of batch.messages) {
     try {
-      const outcome = await indexPage(deps, parseMessage(msg.body));
+      const outcome = await indexPage(deps, parseMessage(msg.body), { attempt: msg.attempts });
       const { topicPath: _, ...fields } = outcome as { topicPath?: string[] };
       console.log(JSON.stringify({ queue: batch.queue, ...fields }));
       msg.ack();
