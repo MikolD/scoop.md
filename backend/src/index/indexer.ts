@@ -40,6 +40,9 @@ export interface IndexDeps {
 
 export type IndexOutcome =
   | { status: 'unchanged' }
+  // Acked without indexing: the site was rejected (not_devtool), or a crawl's
+  // page is no longer stored at this content (the site was purged since).
+  | { status: 'skipped'; reason: 'not_devtool' | 'no_page' }
   | { status: 'indexed'; slot: string; topicPath: string[]; chunks: number; model: string; costUsd: number; capped: boolean }
   | { status: 'reclassified'; slot: string; topicPath: string[]; model: string; costUsd: number };
 
@@ -193,6 +196,19 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
   const { db, vectors, embed } = deps;
   const now = deps.now?.() ?? new Date();
   const { site, url, contentHash } = msg;
+
+  // Late messages for a site an admin rejected (its index was purged), or for
+  // a crawled page whose row is gone or has moved on: nothing to index.
+  const gone = await db
+    .prepare(
+      `SELECT (SELECT status FROM site_profiles WHERE site = ?1) AS status,
+              (SELECT 1 FROM pages WHERE url = ?2 AND content_hash = ?3) AS stored`,
+    )
+    .bind(site, url, contentHash)
+    .first<{ status: string | null; stored: number | null }>();
+  if (gone?.status === 'not_devtool') return { status: 'skipped', reason: 'not_devtool' };
+  // Only crawl messages have a pages row; manual and reclassify ones don't need one.
+  if (msg.runId?.startsWith('cr_') && !gone?.stored) return { status: 'skipped', reason: 'no_page' };
 
   const existing = await db
     .prepare('SELECT content_hash, model, topic, attempts FROM page_index WHERE url = ?')

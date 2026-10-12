@@ -9,7 +9,7 @@ import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
 import { handleIndexBatch } from './index/consumer.ts';
-import { pruneCrawlRequests } from './crawl/requests.ts';
+import { pruneCrawlRequests, startAllWaiting } from './crawl/requests.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { ApiError, notFound } from './lib/errors.ts';
@@ -100,6 +100,7 @@ export default {
     if (controller.cron === HOURLY) {
       console.log(JSON.stringify({ cron: 'telemetry-prune', ...(await pruneTelemetry(env.TELEMETRY_DB)) }));
       console.log(JSON.stringify({ cron: 'crawl-requests-prune', deleted: await pruneCrawlRequests(env.DB) }));
+      console.log(JSON.stringify({ cron: 'crawl-requests-waiting', sites: await startAllWaiting({ db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE }) }));
       return;
     }
     if (!env.OPENROUTER_API_KEY) return;

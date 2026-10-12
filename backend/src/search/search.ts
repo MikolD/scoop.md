@@ -56,6 +56,8 @@ async function ftsIds(db: D1Database, p: SearchParams): Promise<{ ids: string[];
   const where = ['chunks_fts MATCH ?'];
   const binds: (string | number)[] = [match];
   if (p.site) { where.push('c.site = ?'); binds.push(p.site); }
+  // Cross-site: unapproved requested sites never take a candidate slot.
+  else where.push('c.site NOT IN (SELECT site FROM site_profiles WHERE approved = 0)');
   if (p.slot) { where.push('pi.slot = ?'); binds.push(p.slot); }
   const { results } = await db
     .prepare(
@@ -70,12 +72,17 @@ async function ftsIds(db: D1Database, p: SearchParams): Promise<{ ids: string[];
   return { ids: results.map((r) => r.id), snippets: new Map(results.map((r) => [r.id, r.snippet])) };
 }
 
-async function vectorIds(deps: SearchDeps, p: SearchParams): Promise<string[]> {
+// Vectorize's $nin takes a bounded list; past it, the post-filter in search()
+// still removes them (they can then take vector candidate slots).
+const MAX_NIN = 100;
+
+async function vectorIds(deps: SearchDeps, p: SearchParams, excluded: string[]): Promise<string[]> {
   if (!deps.vectors || !deps.embed) return [];
   try {
     const [vector] = await deps.embed([p.q], 'query');
     const filter: VectorizeVectorMetadataFilter = {};
     if (p.site) filter.site = p.site;
+    else if (excluded.length && excluded.length <= MAX_NIN) filter.site = { $nin: excluded };
     if (p.slot) filter.slot = p.slot;
     const res = await deps.vectors.query(vector, { topK: DEPTH, filter, returnMetadata: 'none' });
     return res.matches.map((m) => m.id);
@@ -104,7 +111,12 @@ async function unapprovedSites(db: D1Database): Promise<Set<string>> {
 }
 
 export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHit[]> {
-  const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p)]);
+  // Cross-site search leaves out sites first crawled on a user's request that
+  // an admin hasn't approved yet (site_profiles.approved), in the candidate
+  // queries themselves and again on the fused hits; a site-scoped search
+  // includes them.
+  const unapproved = p.site ? new Set<string>() : await unapprovedSites(deps.db);
+  const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p, [...unapproved])]);
   const fused = rrf([fts.ids, vec]);
   // Every fused candidate is read: vectors can point at chunks deleted since or
   // carry stale metadata, and down-weighted sources must make room for others.
@@ -119,10 +131,6 @@ export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHi
     .bind(...wanted.map((w) => w.id))
     .all<{ id: string; url: string; site: string; title: string; ord: number; heading_path: string; text: string; slot: string | null; topic_path: string | null }>();
   const rows = new Map(results.map((r) => [r.id, r]));
-  // Cross-site search leaves out sites first crawled on a user's request that
-  // an admin hasn't approved yet (site_profiles.approved); a site-scoped
-  // search includes them.
-  const unapproved = p.site ? new Set<string>() : await unapprovedSites(deps.db);
   const ranked = wanted
     .map(({ id, score }) => ({ id, score, r: rows.get(id) }))
     .filter((w) => w.r && (!p.site || w.r.site === p.site) && (!p.slot || w.r.slot === p.slot) && !unapproved.has(w.r.site))

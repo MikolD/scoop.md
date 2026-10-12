@@ -451,7 +451,9 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/crawl-requests\/(rq_[0-9A-Z]{26})$/,
     name: '/v1/crawl-requests/:id',
-    // Public: the ID is unguessable (80 random bits).
+    // Public, no auth: a request ID is a ULID, a 48-bit timestamp plus 80
+    // random bits, so IDs can't practically be enumerated; anyone holding one
+    // can read that request's progress (site, counts, state), nothing more.
     handler: async ({ params, env }) => {
       // A request waiting for another scope of its site starts its crawl here once the site is free.
       const view = await requestView(env.DB, params[0], new Date(), { db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE });
