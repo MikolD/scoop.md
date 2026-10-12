@@ -116,12 +116,14 @@ export interface NewCrawl {
   startUrl: string;
   maxPages: number;
   maxMinutes: number;
+  force: boolean;
 }
 
 export const MAX_CRAWL_PAGES = 1000;
 
-// POST /v1/admin/crawl: { site, startUrl?, maxPages?, maxMinutes? }. The start
-// URL defaults to the site's root and, when given, scopes the docs root.
+// POST /v1/admin/crawl: { site, startUrl?, maxPages?, maxMinutes?, force? }. The
+// start URL defaults to the site's root and, when given, scopes the docs root.
+// `force: true` skips the devtool gate.
 export function validateCrawl(body: unknown, allowLocalhost: boolean): NewCrawl {
   if (!isObject(body)) throw bad('Body must be a JSON object');
   const site = normalizeSite(str(body.site, 'site', 253));
@@ -134,5 +136,12 @@ export function validateCrawl(body: unknown, allowLocalhost: boolean): NewCrawl 
     if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > max) throw bad(`${name} must be an integer 1–${max}`);
     return v as number;
   };
-  return { site, startUrl, maxPages: int(body.maxPages, 'maxPages', 500, MAX_CRAWL_PAGES), maxMinutes: int(body.maxMinutes, 'maxMinutes', 10, 50) };
+  if (body.force !== undefined && typeof body.force !== 'boolean') throw bad('force must be a boolean');
+  return {
+    site,
+    startUrl,
+    maxPages: int(body.maxPages, 'maxPages', 500, MAX_CRAWL_PAGES),
+    maxMinutes: int(body.maxMinutes, 'maxMinutes', 10, 50),
+    force: body.force === true,
+  };
 }

@@ -1,5 +1,7 @@
-// Workflow CrawlSite: robots.txt → discovery → SiteProfile → pages in batches
-// → (client-rendered sites only) a browser crawl in an E2B sandbox.
+// Workflow CrawlSite: robots.txt → devtool gate → discovery → SiteProfile →
+// pages in batches → (client-rendered sites only) a browser crawl in an E2B
+// sandbox. A site the gate rejects ends the run there, before any page is
+// fetched or sandbox started.
 // Each step is short and safe to retry; the browser crawl is polled with
 // step.sleep, so no step holds a connection while it runs. Step outputs stay
 // small: the fetch plan and browser results live in R2 under
@@ -15,6 +17,10 @@ import type { WorkflowEvent, WorkflowStep, WorkflowStepConfig } from 'cloudflare
 import { CrawlStore } from '../db/crawl.ts';
 import type { IndexMessage } from '../index/indexer.ts';
 import type { Env } from '../env.ts';
+import { addCost, capsReached } from '../index/indexer.ts';
+import { indexDeps } from '../index/deps.ts';
+import { gateSite, GateUndecided } from './gate.ts';
+import type { GateVerdict } from './gate.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
@@ -29,6 +35,7 @@ export interface CrawlParams {
   startUrl: string;
   maxPages: number;
   maxMinutes: number; // browser crawl only
+  force?: boolean; // skip the devtool gate
 }
 
 const PAGES_PER_STEP = 10;
@@ -65,6 +72,27 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
 
       const robots: RobotsFile = await step.do('robots', NET, () => fetchRobots(origin, { limiter: new HostLimiter(), allowLocalhost: local }));
       const interval = intervalFor(robotsFrom(robots).crawlDelay);
+
+      // The devtool gate, unless an admin forced the crawl. An undecided gate
+      // (no OpenRouter key, cap reached) fails the run without a verdict.
+      if (!p.force) {
+        const gate: GateVerdict | { undecided: string } = await step.do('gate', NET, async () => {
+          try {
+            return await gateSite(p.startUrl, robots, {
+              allowLocalhost: local,
+              limiter: new HostLimiter({ intervalMs: interval }),
+              ai: gateAi(env, p.site),
+            });
+          } catch (e) {
+            if (e instanceof GateUndecided) return { undecided: e.message };
+            throw e;
+          }
+        });
+        if ('undecided' in gate) throw new Error(`devtool gate: ${gate.undecided}`);
+        // Signal counts stay in the step output; the run and profile get the verdict.
+        await step.do('gate-record', DB, () => store().recordGate(p.runId, p.site, { ...gate, signals: undefined }));
+        if (gate.decision === 'reject') return { runId: p.runId, rejected: true, category: gate.category, reason: gate.reason };
+      }
 
       const d: DiscoverySummary = await step.do('discover', NET, async () => {
         const { plan, ...rest } = await discoverSite(p.startUrl, robots, {
@@ -210,6 +238,19 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       throw e;
     }
   }
+}
+
+// The gate's AI check, on the classifier's key and daily caps; null without a key.
+function gateAi(env: Env, site: string) {
+  const apiKey = env.OPENROUTER_API_KEY;
+  if (!apiKey) return null;
+  const { db, dailyCapUsd, totalCapUsd } = indexDeps(env);
+  return {
+    apiKey,
+    capReached: () => capsReached({ db, dailyCapUsd, totalCapUsd }, site, new Date()),
+    addCost: (usd: number) => addCost(db, site, new Date(), usd),
+    signal: AbortSignal.timeout(60_000),
+  };
 }
 
 // One message per new or changed page, body exactly { site, url, contentHash }.

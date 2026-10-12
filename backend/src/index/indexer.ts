@@ -79,13 +79,13 @@ export async function spentToday(db: D1Database, site: string, now: Date): Promi
   return row?.cost_usd ?? 0;
 }
 
-async function addCost(db: D1Database, site: string, now: Date, cost: number) {
+export async function addCost(db: D1Database, site: string, now: Date, cost: number) {
   if (!(cost > 0)) return;
   const add = 'INSERT INTO index_costs (site, day, cost_usd) VALUES (?, ?, ?) ON CONFLICT (site, day) DO UPDATE SET cost_usd = cost_usd + excluded.cost_usd';
   await db.batch([site, ALL_SITES].map((s) => db.prepare(add).bind(s, capDay(now), cost)));
 }
 
-async function capsReached(deps: IndexDeps, site: string, now: Date): Promise<boolean> {
+export async function capsReached(deps: Pick<IndexDeps, 'db' | 'dailyCapUsd' | 'totalCapUsd'>, site: string, now: Date): Promise<boolean> {
   const [siteSpent, totalSpent] = await Promise.all([spentToday(deps.db, site, now), spentToday(deps.db, ALL_SITES, now)]);
   return siteSpent >= deps.dailyCapUsd || totalSpent >= deps.totalCapUsd;
 }
