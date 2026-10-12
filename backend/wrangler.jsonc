@@ -50,7 +50,7 @@
         "ALLOW_ANY_EXTENSION": "1"
       },
       "d1_databases": [
-        { "binding": "DB", "database_name": "scoop-staging", "database_id": "REPLACE_ME_STAGING_D1_ID", "migrations_dir": "migrations" }
+        { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" }
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" }
