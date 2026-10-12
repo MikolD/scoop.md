@@ -396,7 +396,8 @@ listening on `::` for that port.
   longer blocks. If creating the Workflow instance throws, the run is marked
   `failed`.
 - **Profile status** is the outcome of the last *finished* crawl: `ready`,
-  `empty`, `blocked` or `failed` (`new` before the first one finishes). It
+  `empty`, `blocked`, `failed` or `not_devtool` (the devtool gate rejected it;
+  see below) (`new` before the first one finishes). It
   changes only in `finish` and `fail` (migration `0004_crawl_state.sql`);
   whether a crawl is running now is the separate `crawl_state`
   (`idle`/`crawling`, shown publicly as `crawling: true`), so a re-crawl never
@@ -506,6 +507,106 @@ listening on `::` for that port.
 - **Hash routes:** docsify-style `#/page` URLs are distinct pages (kept in
   `pages.url`), and the crawler reloads the page for a hash-only navigation so it
   never reads the previous route's content.
+
+### Devtool gate
+
+scoop.md indexes developer documentation. A crawl of anything else (a shop, a
+search engine, a social network, a newspaper) wastes requests, sandbox time
+and classifier money, and puts junk in search. So the first decision of every
+crawl is the `gate` step, after `robots` and before `discover`
+(`src/crawl/gate.ts`), cheapest evidence first:
+
+- **Lists** (`src/crawl/gate-lists.ts`, plain data). A short allowlist of known
+  docs hosts, optionally with a path (`vercel.com/docs`), passes with no
+  request. The denylist rejects search engines, big shops and marketplaces
+  (`*.myshopify.com` too), social and video sites, news, banks and a few other
+  everyday services, with no request. Patterns: `host` (and subdomains),
+  `name.*` (any TLD, including two-part ones like `co.uk`), `*.suffix`. The
+  allowlist is checked first, so `docs.aws.amazon.com`,
+  `developers.google.com` and `docs.cloud.google.com` pass although
+  `amazon.*` and `google.*` are denied. robots.txt is still fetched first (one
+  request), as the step order is fixed.
+- **Signals** from a handful of polite requests: the start page (asked again
+  with an HTML Accept header if the Markdown-first request gets a 4xx/5xx:
+  TanStack and Apollo answer it with 500 and 404), llms.txt at up to two bases,
+  and the start page's `.md` twin. A redirect stub (meta refresh, or a
+  near-empty page whose only link is same-site, as on Kotlin's `/docs/` and
+  PyTorch's `/docs/stable/`) is followed, up to two hops. For: llms.txt (3), Markdown
+  pages (2), a docs path or `docs.*` host (2), a docs generator (3; generator
+  meta or class markers of Docusaurus, Starlight, Nextra, VitePress, MkDocs,
+  Sphinx, Mintlify), 3+ docs links (1), code blocks (1–2), install commands
+  (`npm i`, `pip install`, `brew install`, `cargo add`, `go get`,
+  `curl … | sh`, …; 2), distinct developer terms (1–2). Against: Product/Offer
+  JSON-LD or `og:type product` (4), add-to-cart (3), 3+ price elements (2),
+  cart/checkout links (2), Shopify markup (3), a search page shape (4),
+  NewsArticle JSON-LD (3). **Reject** when against >= 4 and for < against + 3;
+  **accept** when for >= 7 and against < 3; anything else is inconclusive.
+  llms.txt alone is not enough: Shopify now serves one for every store
+  (allbirds.com has one), which is why it is worth 3 and not 7.
+- **AI check**, only when the signals are inconclusive: one call to the
+  classifier's models (`qwen/qwen3.7-flash`, then `openai/gpt-6-luna` on
+  failure) through the same `callModel` (JSON mode, `usage.cost` accounting).
+  The input is a summary of at most 4,000 characters: URL, title, meta
+  description, up to 30 headings, up to 40 nav link texts and the signal
+  counts, never the page, inside a `<site>` block the prompt declares to be
+  untrusted data. Output `{isDevtool, category, confidence, reason}` is
+  validated (category in a fixed list, confidence 0–1, reason cut to 200
+  characters). Accepted only if `isDevtool`, category `devtool-docs` and
+  confidence >= 0.6; `devtool-marketing-only` is rejected (start the crawl at
+  the docs URL instead). The prompt says a thin page (a JavaScript shell, a
+  redirect page) is judged by URL, title and navigation: without that line
+  the model rejected Swift's DocC shell and PyTorch's stub as "placeholders"
+  in one of two runs. "Mainly for software developers" keeps Figma's and
+  Notion's home pages out. The cost goes to `index_costs` like page
+  classification, so it counts against the site's and the account's daily
+  caps; with the caps spent the call isn't made.
+- **Outcomes.** A rejection is recorded in one D1 batch (`recordGate`): run
+  `rejected` with the reason in `error`, profile `not_devtool` with
+  `gate_category/confidence/reason/method` (migration `0005_devtool_gate.sql`).
+  No discovery, no page, no sandbox. The public profile of a `not_devtool` site
+  is only `{site, status, category, reason, confidence, method, crawling,
+  checkedAt, updatedAt}`; other profiles carry the last verdict as `gate`. An
+  accepted verdict is stored the same way and the crawl goes on. Invalid JSON
+  from both models rejects with a reason (we couldn't verify it; force to
+  override). Two cases are *undecided* rather than rejected, because a
+  rejection would mislabel the site: no OpenRouter key, or the daily cap is
+  spent. The run then fails with the reason and the profile follows the usual
+  `fail` rule. A transient OpenRouter outage throws, so the step retries.
+  A start page that robots.txt keeps us off passes with no category
+  (discovery records `blocked`). One that can't be read (403, 5xx) is judged
+  by its URL alone by the model (bestbuy.ca, which answers our bot with 403, is
+  rejected as ecommerce); without a key it passes to discovery.
+- **Override.** `POST /v1/admin/crawl {"site", "force": true}` skips the gate;
+  `crawl_runs.forced` records it, and the profile keeps its last verdict. A
+  rejected site can be crawled again any time (a rejected run is finished, so
+  it doesn't block the next one); every crawl is gated again, so a site that
+  changed is re-judged.
+- **Measured** (2026-10-12, `wrangler dev`): docs.stripe.com, vercel.com/docs
+  and react.dev pass by allowlist; hono.dev/docs by signals (0.95); amazon,
+  google, bbc.com, etsy, wikipedia by denylist; allbirds.com by signals
+  (12 price elements, Shopify; 0.63); theverge.com by AI (news, 1.0, $0.0002).
+  Gate only, over the 42 seeds not on the allowlist: all 42 accepted (28 by
+  signals, 14 by AI) for $0.0015. Unlisted non-devtools: zappos, espn, nasa.gov,
+  notion, figma, canva and bestbuy.ca rejected by AI, gymshark by signals.
+  linear.app passes by signals (llms.txt, code blocks, API docs links): it
+  has a developer API, so that is defensible.
+
+### Seeds and the crawl runner
+
+- `backend/seeds/devtools.json`: 109 docs start URLs of tools developers use
+  daily (languages, frameworks, hosting, databases, payments/auth/email, AI,
+  tooling, UI). Each was fetched once with our UA on 2026-10-12 and answers 200
+  without leaving its host (the crawler refuses off-site redirects, so
+  `remix.run/docs` became `guides.remix.run`, `fly.io/docs` `docs.fly.io`, and
+  so on). Start URLs are directories, not pages, because the start path scopes
+  the docs root. Default `maxPages` 200.
+- `backend/scripts/crawl-seeds.mjs` is plain Node with no dependencies beyond
+  the backend's own source (the dry run imports `gate.ts` to show list
+  verdicts). It runs at most `--concurrency` crawls and never two of one site
+  (Cloudflare has three seeds), puts a 409 back in the queue for a minute (up
+  to 30 tries), polls each run every 10 s and treats an `errored`/`terminated`
+  Workflow with an unfinished run as failed. The token is only ever sent in
+  the Authorization header.
 
 ## Indexing model (for M4)
 

@@ -7,6 +7,8 @@ so it also runs in Node, E2B or on a VPS. Every outbound fetch goes through
 
 ```
 robots.ts    robots.txt (RFC 9309) for scoop.md-bot (+https://scoop.md/bot)
+gate.ts      the devtool gate: lists, start-page signals, one AI call when inconclusive
+gate-lists.ts  known docs hosts (allow) and non-devtool hosts (deny), plain data
 sitemap.ts   sitemap.xml / sitemap indexes (gzip too), linear scan, no DOM
 discover.ts  llms.txt links, .md twin URLs, docs root, client-shell detection
 html.ts      server-rendered HTML -> Markdown with extension/lib/extract.js over linkedom
@@ -32,7 +34,15 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
 
 1. `robots` — fetch robots.txt. 4xx: no rules. 5xx/unreachable: stay away
    (status `blocked`).
-2. `discover` (plan written to `crawl-results/<runId>/plan.json`) — llms.txt / llms-full.txt under the start path, `/docs`,
+2. `gate` — is this a developer tool's docs? Skipped when the run was started
+   with `force: true`. `gate-lists.ts` decides known hosts with no request;
+   otherwise the start page (plus llms.txt at up to two bases and the start
+   page's `.md` twin) is scored, and only an inconclusive score costs one
+   OpenRouter call over a short summary. `gate-record` stores the verdict on
+   the run and the profile; a rejection ends the run there (`rejected`, the
+   site `not_devtool`): no discovery, no pages, no sandbox. A gate that
+   cannot decide (no OpenRouter key, daily cap spent) fails the run.
+3. `discover` (plan written to `crawl-results/<runId>/plan.json`) — llms.txt / llms-full.txt under the start path, `/docs`,
    `/documentation` and the root; sitemaps from robots.txt or `/sitemap.xml`
    (indexes followed, up to 8 files); `.md` twins for 10 sampled pages
    (`<path>.md`, then `<path>/index.md`); OpenAPI links seen along the way.
@@ -43,13 +53,13 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
    page, its same-site links and the sitemap pages as `page-html` (converted
    in the Worker with the extension's extractor); a client-rendered shell, or a
    page that converts to too little text, is `needs_browser`.
-3. `profile` — upsert `site_profiles`.
-4. `pages-N` — 10 sources per step, conditional GETs; new/changed content goes
+4. `profile` — upsert `site_profiles`.
+5. `pages-N` — 10 sources per step, conditional GETs; new/changed content goes
    to R2 (`SKILLS`, `pages/<sha256>.md`) once per hash and is flagged
    `index_pending`; unchanged pages only refresh `fetched_at`. `index-N` then
    sends the flagged pages to `index-pages` as `{ site, url, contentHash }`
    and clears the flags (an outbox: a retry resends, nothing is lost).
-5. Browser sites only: `browser-start` (kill sandboxes left by an earlier
+6. Browser sites only: `browser-start` (kill sandboxes left by an earlier
    attempt, create one tagged with the run ID, start the job),
    `browser-wait-N`/`browser-poll-N` every 20 s, `browser-collect`
    (`collect.ts`; retry-safe through a manifest written last: read the
@@ -57,8 +67,8 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
    25 MB, unless an optional presigned upload already delivered it; validate
    once and store one batch object per page step), `browser-stop` (kill the
    sandbox; record seconds and cost), `browser-pages-N` + `index-browser-N`
-   (as step 4, source kind `browser`).
-6. `index-final`, `cleanup` (delete `crawl-results/<runId>/`), `finish` — run
+   (as step 5, source kind `browser`).
+7. `index-final`, `cleanup` (delete `crawl-results/<runId>/`), `finish` — run
    `complete`, profile `ready`/`empty`/`blocked`. On any error, `fail` kills
    every sandbox tagged with the run, marks the run `failed`, the profile
    `failed` (or keeps `ready` when the site still has pages) and deletes the
