@@ -1,12 +1,14 @@
 // The v1 API (docs/BACKEND.md §5). Each route names its pattern for the request log.
 
 import { checkHourly, ipSubject } from '../db/ratelimit.ts';
+import { CrawlStore } from '../db/crawl.ts';
+import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
 import type { SkillRow } from '../db/store.ts';
 import { ApiError, notFound } from '../lib/errors.ts';
-import { safeEqual } from '../lib/ids.ts';
+import { newId, safeEqual } from '../lib/ids.ts';
 import { normalizeSite } from '../lib/ssrf.ts';
-import { installId, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
+import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { verifyAll } from '../lib/verify.ts';
 import type { Env } from '../env.ts';
 import { CACHE_BEST, CACHE_LIST, json, readJson } from './http.ts';
@@ -63,6 +65,47 @@ async function requireAdmin(c: Ctx): Promise<void> {
   const given = c.req.headers.get('authorization') ?? '';
   // Wrong or missing token looks exactly like an unknown route.
   if (!token || !(await safeEqual(given, `Bearer ${token}`))) throw notFound();
+}
+
+function profileJson(r: SiteProfileRow) {
+  return {
+    site: r.site,
+    status: r.status,
+    docsRoot: r.docs_root,
+    hasLlms: Boolean(r.has_llms),
+    hasLlmsFull: Boolean(r.has_llms_full),
+    llmsUrl: r.llms_url,
+    llmsFullUrl: r.llms_full_url,
+    mdTwinsRatio: r.md_twins_ratio,
+    twinPattern: r.twin_pattern,
+    sitemapUrlsCount: r.sitemap_urls_count,
+    openapi: JSON.parse(r.openapi_json) as string[],
+    pagesFetched: r.pages_fetched,
+    needsBrowser: Boolean(r.needs_browser),
+    crawlDelay: r.crawl_delay,
+    lastCrawledAt: r.last_crawled_at,
+    lastRunId: r.last_run_id,
+    updatedAt: r.updated_at,
+  };
+}
+
+function runJson(r: CrawlRunRow) {
+  return {
+    id: r.id,
+    site: r.site,
+    startUrl: r.start_url,
+    status: r.status,
+    path: r.path,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    pagesNew: r.pages_new,
+    pagesChanged: r.pages_changed,
+    pagesUnchanged: r.pages_unchanged,
+    pagesFailed: r.pages_failed,
+    browserSeconds: r.browser_seconds,
+    costUsd: r.cost_usd,
+    error: r.error,
+  };
 }
 
 const routes: Route[] = [
@@ -180,6 +223,50 @@ const routes: Route[] = [
       if (!(await c.store.getRow(c.params[0]))) throw notFound('No such skill');
       await c.store.remove(c.params[0]);
       return json(200, { ok: true });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/admin\/crawl$/,
+    name: '/v1/admin/crawl',
+    handler: async (c) => {
+      await requireAdmin(c);
+      const crawl = validateCrawl(await readJson(c.req), allowLocalhost(c.env));
+      const runId = newId('cr');
+      await new CrawlStore(c.env.DB, c.env.CRAWL).createRun(runId, crawl.site, crawl.startUrl);
+      await c.env.CRAWL_SITE.create({ id: runId, params: { runId, ...crawl } });
+      return json(202, { runId, site: crawl.site, startUrl: crawl.startUrl });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/admin\/crawl\/(cr_[0-9A-Z]{26})$/,
+    name: '/v1/admin/crawl/:runId',
+    handler: async (c) => {
+      await requireAdmin(c);
+      const crawls = new CrawlStore(c.env.DB, c.env.CRAWL);
+      const run = await crawls.getRun(c.params[0]);
+      if (!run) throw notFound('No such crawl run');
+      let workflow: InstanceStatus | null = null;
+      try {
+        workflow = await (await c.env.CRAWL_SITE.get(run.id)).status();
+      } catch {
+        // instance expired from Workflow retention; the run row is the record
+      }
+      const pages = await crawls.pagesForRun(run.id, 10);
+      return json(200, { run: runJson(run), workflow: workflow && { status: workflow.status, error: workflow.error ?? null }, pages });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/sites\/([^/]+)\/profile$/,
+    name: '/v1/sites/:site/profile',
+    handler: async ({ params, env }) => {
+      let raw: string;
+      try { raw = decodeURIComponent(params[0]); } catch { throw notFound('No profile for this site'); }
+      const row = await new CrawlStore(env.DB, env.CRAWL).getProfile(normalizeSite(raw));
+      if (!row) throw notFound('No profile for this site');
+      return json(200, { profile: profileJson(row) }, { 'cache-control': CACHE_LIST });
     },
   },
   {

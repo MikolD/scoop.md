@@ -76,8 +76,9 @@ export function sample<T>(items: T[], n: number): T[] {
 }
 
 // The path prefix the docs live under: the start URL's path when given,
-// otherwise the most common first segment among sitemap URLs if it looks like
-// docs and covers a fair share of them, otherwise the root.
+// otherwise the most common first segment among sitemap URLs if it names the
+// docs as a whole (not a section such as /api or /guides) and covers a fair
+// share of them, otherwise the root.
 export function docsRoot(startPath: string, urls: string[]): string {
   const given = startPath.replace(/\/+$/, '');
   if (given) return given;
@@ -89,7 +90,7 @@ export function docsRoot(startPath: string, urls: string[]): string {
   let best = '';
   let bestCount = 0;
   for (const [seg, n] of counts) {
-    if (n > bestCount && /^(docs?|documentation|developers?|guides?|reference|api|learn|manual)$/i.test(seg)) {
+    if (n > bestCount && /^(docs?|documentation|developers?|manual)$/i.test(seg)) {
       best = seg;
       bestCount = n;
     }

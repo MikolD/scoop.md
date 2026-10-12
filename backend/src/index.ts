@@ -1,11 +1,16 @@
 // api.scoop.md Worker entry: CORS, read rate limiting, error mapping and the
-// one-line request log (docs/BACKEND.md §5, §8, §11).
+// one-line request log (docs/BACKEND.md §5, §8, §11); the index-pages queue
+// consumer; and the CrawlSite Workflow class.
 
 import { errorResponse, json, withCors } from './api/http.ts';
 import { match } from './api/v1.ts';
 import { ipSubject } from './db/ratelimit.ts';
+import type { IndexMessage } from './db/crawl.ts';
+import { indexPages } from './index/consumer.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import type { Env } from './env.ts';
+
+export { CrawlSite } from './crawl/workflow.ts';
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -54,4 +59,8 @@ export default {
     }));
     return withCors(res, req, env);
   },
-} satisfies ExportedHandler<Env>;
+
+  async queue(batch: MessageBatch<IndexMessage>): Promise<void> {
+    await indexPages(batch);
+  },
+} satisfies ExportedHandler<Env, IndexMessage>;

@@ -18,7 +18,9 @@
 
   "vars": {
     "ENVIRONMENT": "dev",
-    "EXTENSION_IDS": ""
+    "EXTENSION_IDS": "",
+    "CRAWL_BUCKET_NAME": "scoop-crawl-dev",
+    "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze"
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
   },
@@ -26,8 +28,16 @@
     { "binding": "DB", "database_name": "scoop-dev", "database_id": "00000000-0000-0000-0000-000000000000", "migrations_dir": "migrations" }
   ],
   "r2_buckets": [
-    { "binding": "SKILLS", "bucket_name": "scoop-skills-dev" }
+    { "binding": "SKILLS", "bucket_name": "scoop-skills-dev" },
+    { "binding": "CRAWL", "bucket_name": "scoop-crawl-dev" }
   ],
+  "workflows": [
+    { "name": "crawl-site-dev", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+  ],
+  "queues": {
+    "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }],
+    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 25, "max_batch_timeout": 5 }]
+  },
   "ratelimits": [
     // Reads: 600 per minute per IP (docs/BACKEND.md §8). Hourly write limits live in D1.
     { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } }
@@ -47,14 +57,24 @@
       "vars": {
         "ENVIRONMENT": "staging",
         "EXTENSION_IDS": "",
+        "CRAWL_BUCKET_NAME": "scoop-crawl-staging",
+        "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
         "ALLOW_ANY_EXTENSION": "1"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-staging", "database_id": "f3f020a8-fbce-46e5-b59f-5866c543fe46", "migrations_dir": "migrations" }
       ],
       "r2_buckets": [
-        { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" }
+        { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" },
+        { "binding": "CRAWL", "bucket_name": "scoop-crawl-staging" }
       ],
+      "workflows": [
+        { "name": "crawl-site-staging", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+      ],
+      "queues": {
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }],
+        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 25, "max_batch_timeout": 5 }]
+      },
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } }
       ]
@@ -71,14 +91,24 @@
       },
       "vars": {
         "ENVIRONMENT": "production",
-        "EXTENSION_IDS": ""
+        "EXTENSION_IDS": "",
+        "CRAWL_BUCKET_NAME": "scoop-crawl-production",
+        "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze"
       },
       "d1_databases": [
         { "binding": "DB", "database_name": "scoop-production", "database_id": "REPLACE_ME_PRODUCTION_D1_ID", "migrations_dir": "migrations" }
       ],
       "r2_buckets": [
-        { "binding": "SKILLS", "bucket_name": "scoop-skills-production" }
+        { "binding": "SKILLS", "bucket_name": "scoop-skills-production" },
+        { "binding": "CRAWL", "bucket_name": "scoop-crawl-production" }
       ],
+      "workflows": [
+        { "name": "crawl-site", "binding": "CRAWL_SITE", "class_name": "CrawlSite" }
+      ],
+      "queues": {
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages" }],
+        "consumers": [{ "queue": "index-pages", "max_batch_size": 25, "max_batch_timeout": 5 }]
+      },
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } }
       ]

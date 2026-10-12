@@ -139,15 +139,16 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   for (const base of llmsBases(origin, givenRoot)) {
     if (!out.llmsUrl && allowed(`${base}/llms.txt`)) {
       const r = await get(`${base}/llms.txt`);
+      // Recorded where it ended up: /docs/llms.txt often redirects to /llms.txt.
       if (r.ok && !r.notModified && !r.over && looksLikeText(r.contentType, r.text)) {
-        out.llmsUrl = `${base}/llms.txt`;
+        out.llmsUrl = r.url;
         links = llmsLinks(r.text, out.llmsUrl);
       }
     }
     if (!out.llmsFullUrl && allowed(`${base}/llms-full.txt`)) {
       // Only existence matters here; the page fetch reads it in full later.
       const r = await get(`${base}/llms-full.txt`, 64_000);
-      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text))) out.llmsFullUrl = `${base}/llms-full.txt`;
+      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text))) out.llmsFullUrl = r.url;
     }
     if (out.llmsUrl && out.llmsFullUrl) break;
   }

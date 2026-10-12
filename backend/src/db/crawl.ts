@@ -193,11 +193,12 @@ export class CrawlStore {
     return stats;
   }
 
-  async pagesForSite(site: string, limit = 20): Promise<{ url: string; source_kind: string; content_hash: string; bytes: number }[]> {
+  // A sample of the pages a run fetched, for the admin status view.
+  async pagesForRun(runId: string, limit = 10) {
     const { results } = await this.db
-      .prepare('SELECT url, source_kind, content_hash, bytes FROM pages WHERE site = ? ORDER BY url LIMIT ?')
-      .bind(site, limit)
-      .all<{ url: string; source_kind: string; content_hash: string; bytes: number }>();
-    return results;
+      .prepare('SELECT url, source_kind, title, content_hash, bytes, changed_at FROM pages WHERE run_id = ? ORDER BY url LIMIT ?')
+      .bind(runId, limit)
+      .all<{ url: string; source_kind: string; title: string | null; content_hash: string; bytes: number; changed_at: string }>();
+    return results.map((r) => ({ url: r.url, kind: r.source_kind, title: r.title, contentHash: r.content_hash, bytes: r.bytes, changedAt: r.changed_at }));
   }
 }

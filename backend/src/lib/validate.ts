@@ -90,3 +90,29 @@ export function validateReport(body: unknown): NewReport {
   }
   return { skillId, reason: body.reason, details: (body.details as string | undefined) ?? null };
 }
+
+export interface NewCrawl {
+  site: string;
+  startUrl: string;
+  maxPages: number;
+  maxMinutes: number;
+}
+
+export const MAX_CRAWL_PAGES = 1000;
+
+// POST /v1/admin/crawl: { site, startUrl?, maxPages?, maxMinutes? }. The start
+// URL defaults to the site's root and, when given, scopes the docs root.
+export function validateCrawl(body: unknown, allowLocalhost: boolean): NewCrawl {
+  if (!isObject(body)) throw bad('Body must be a JSON object');
+  const site = normalizeSite(str(body.site, 'site', 253));
+  if (site === 'scoop.md' || site.endsWith('.scoop.md')) throw bad('scoop.md itself cannot be crawled');
+  const startUrl = body.startUrl === undefined ? `https://${site}/` : str(body.startUrl, 'startUrl', 2048);
+  assertFetchable(startUrl, { allowLocalhost });
+  if (siteOf(startUrl) !== site) throw new ApiError('site_mismatch', `startUrl is not on ${site}`);
+  const int = (v: unknown, name: string, dflt: number, max: number) => {
+    if (v === undefined) return dflt;
+    if (!Number.isInteger(v) || (v as number) < 1 || (v as number) > max) throw bad(`${name} must be an integer 1–${max}`);
+    return v as number;
+  };
+  return { site, startUrl, maxPages: int(body.maxPages, 'maxPages', 500, MAX_CRAWL_PAGES), maxMinutes: int(body.maxMinutes, 'maxMinutes', 10, 50) };
+}

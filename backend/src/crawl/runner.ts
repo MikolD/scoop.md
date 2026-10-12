@@ -15,6 +15,9 @@ export interface CrawlJob {
   // Where the crawler PUTs its CrawlResult JSON: a presigned, short-lived URL
   // for one object key. The crawler holds no other credentials.
   uploadUrl: string | null;
+  docsRoot?: string; // stay under this path ('/' for the whole site)
+  robotsTxt?: string; // the site's robots.txt, honoured by the crawler too
+  intervalMs?: number; // at least this long between page loads
 }
 
 export interface CrawledPage {

@@ -13,6 +13,10 @@ import { classify, contentHash, needsIndexing, pageKey } from '../src/crawl/chan
 import { amzDate, presign, r2Endpoint, uriEncode } from '../src/crawl/presign.ts';
 import { discoverSite, fetchPlanned, markdownTitle } from '../src/crawl/site.ts';
 import { CrawlStore } from '../src/db/crawl.ts';
+import { browserPages } from '../src/crawl/result.ts';
+import { E2BCrawler } from '../src/crawl/e2b.ts';
+import { runCrawl } from '../src/crawl/runner.ts';
+import { validateCrawl } from '../src/lib/validate.ts';
 import { fakeD1, fakeFetch, fakeR2 } from './helpers.ts';
 
 // --- robots.txt
@@ -118,6 +122,7 @@ test('twinUrl, docsRoot and openApiLinks', () => {
   assert.equal(docsRoot('', urls), '/docs');
   assert.equal(docsRoot('/d1/', urls), '/d1');
   assert.equal(docsRoot('', ['https://ex.com/a', 'https://ex.com/b']), '/');
+  assert.equal(docsRoot('', ['https://ex.com/api/a', 'https://ex.com/api/b', 'https://ex.com/payments']), '/'); // a section, not the docs
   assert.deepEqual(openApiLinks(['https://ex.com/openapi.json', 'https://ex.com/api/v1/swagger.yaml', 'https://ex.com/docs']), [
     'https://ex.com/openapi.json',
     'https://ex.com/api/v1/swagger.yaml',
@@ -368,4 +373,102 @@ test('presign: R2 PUT URLs sign extra headers and reject bad expiries', async ()
   await assert.rejects(presign({ method: 'PUT', url: endpoint, accessKeyId: 'k', secretAccessKey: 's', expiresIn: 604_801 }));
   assert.equal(uriEncode("a!'()*~"), 'a%21%27%28%29%2A~');
   assert.equal(amzDate(new Date('2026-10-12T01:02:03.456Z')), '20261012T010203Z');
+});
+
+test('discoverSite records where llms.txt ended up after a same-site redirect', async () => {
+  const { impl } = fakeFetch({
+    'https://ex.com/docs/llms.txt': () => new Response(null, { status: 301, headers: { location: '/llms.txt' } }),
+    'https://ex.com/llms.txt': () => new Response(`# Ex\n- [A](https://ex.com/a.md)\n${'text '.repeat(20)}`, { headers: { 'content-type': 'text/plain' } }),
+    'https://ex.com/a.md': () => new Response(md('A')),
+  });
+  const d = await discoverSite('https://ex.com/', { state: 'missing', text: '' }, { fetchImpl: impl, limiter: new HostLimiter({ intervalMs: 0 }) });
+  assert.equal(d.llmsUrl, 'https://ex.com/llms.txt');
+  assert.deepEqual(d.plan.map((p) => p.sourceUrl), ['https://ex.com/llms.txt', 'https://ex.com/a.md']);
+});
+
+// --- admin crawl requests
+
+test('validateCrawl: defaults, scoping and refusals', () => {
+  assert.deepEqual(validateCrawl({ site: 'WWW.Ex.com' }, false), { site: 'ex.com', startUrl: 'https://ex.com/', maxPages: 500, maxMinutes: 10 });
+  assert.equal(validateCrawl({ site: 'ex.com', startUrl: 'https://ex.com/docs/', maxPages: 30 }, false).maxPages, 30);
+  assert.throws(() => validateCrawl({ site: 'ex.com', startUrl: 'https://other.com/' }, false), /not on ex.com/);
+  assert.throws(() => validateCrawl({ site: 'ex.com', maxPages: 0 }, false), /maxPages/);
+  assert.throws(() => validateCrawl({ site: 'ex.com', maxPages: 1001 }, false), /maxPages/);
+  assert.throws(() => validateCrawl({ site: 'scoop.md' }, false), /cannot be crawled/);
+  assert.throws(() => validateCrawl({ site: '10.0.0.1' }, false), /not allowed/);
+  assert.throws(() => validateCrawl({ site: 'ex.com', startUrl: 'http://ex.com/' }, false), /https/);
+});
+
+// --- browser results are untrusted
+
+test('browserPages: keeps same-site, robots-allowed, bounded, unique pages within budget', () => {
+  const body = 'Readable docs text. '.repeat(10);
+  const raw = JSON.stringify({
+    pages: [
+      { url: 'https://ex.com/#/a', title: ' A\n', markdown: body },
+      { url: 'https://evil.com/x', title: 'X', markdown: body },
+      { url: 'https://ex.com/private/p', title: 'P', markdown: body },
+      { url: 'javascript:alert(1)', title: 'J', markdown: body },
+      { url: 'https://ex.com/#/a', title: 'dup', markdown: body },
+      { url: 'https://ex.com/short', title: 'S', markdown: 'tiny' },
+      { url: 'https://ex.com/big', title: 7, markdown: 'y'.repeat(400_000) },
+      { url: 'https://ex.com/c', title: 'C', markdown: body },
+      'not an object',
+    ],
+  });
+  const robots = parseRobots('User-agent: *\nDisallow: /private');
+  const pages = browserPages(raw, 'ex.com', robots, 10);
+  assert.deepEqual(pages.map((p) => [p.url, p.title, p.kind]), [
+    ['https://ex.com/#/a', 'A', 'browser'],
+    ['https://ex.com/big', null, 'browser'],
+    ['https://ex.com/c', 'C', 'browser'],
+  ]);
+  assert.equal(pages[1].markdown?.length, 300_000);
+  assert.equal(browserPages(raw, 'ex.com', robots, 1).length, 1);
+  assert.deepEqual(browserPages('not json', 'ex.com', robots, 10), []);
+  assert.deepEqual(browserPages('{"pages":5}', 'ex.com', robots, 10), []);
+});
+
+// --- E2B over REST
+
+function e2bFake({ runStatus = 202, states = ['running', 'finished'] } = {}) {
+  const calls: { method: string; url: string; headers: Record<string, string>; body: string | null }[] = [];
+  let polls = 0;
+  const impl = async (url: string, init: RequestInit) => {
+    calls.push({ method: init.method ?? 'GET', url, headers: (init.headers ?? {}) as Record<string, string>, body: (init.body as string) ?? null });
+    if (url === 'https://api.e2b.app/v2/sandboxes') return Response.json({ sandboxID: 'sbx1', domain: 'e2b.app', trafficAccessToken: 'traffic' }, { status: 201 });
+    if (url === 'https://8080-sbx1.e2b.app/run') return new Response('{}', { status: runStatus });
+    if (url === 'https://8080-sbx1.e2b.app/status') return Response.json({ state: states[Math.min(polls++, states.length - 1)], pages: 1, error: null, uploaded: false });
+    if (url === 'https://8080-sbx1.e2b.app/result') return Response.json({ site: 'ex.com', pages: [{ url: 'https://ex.com/', title: 'Ex', markdown: '# Ex' }] });
+    if (url === 'https://api.e2b.app/sandboxes/sbx1') return new Response(null, { status: 204 });
+    return new Response('nope', { status: 404 });
+  };
+  return { impl, calls };
+}
+
+test('E2BCrawler: creates a private sandbox, starts the job with a token, polls, reads, always kills', async () => {
+  const { impl, calls } = e2bFake();
+  const crawler = new E2BCrawler({ apiKey: 'key', templateId: 'tpl', fetchImpl: impl, sleep: async () => {} });
+  const job = { site: 'ex.com', startUrls: ['https://ex.com/'], budget: { maxPages: 5, maxMinutes: 2 }, uploadUrl: null };
+  const result = await runCrawl(crawler, job, { pollMs: 0, sleep: async () => {} });
+  assert.equal(result.pages.length, 1);
+  const create = calls[0];
+  assert.equal(create.headers['x-api-key'], 'key');
+  const body = JSON.parse(create.body!);
+  assert.deepEqual([body.templateID, body.timeout, body.network], ['tpl', 300, { allowPublicTraffic: false }]);
+  const run = calls[1];
+  assert.equal(run.headers['e2b-traffic-access-token'], 'traffic');
+  const sent = JSON.parse(run.body!);
+  assert.match(sent.token, /^[0-9a-f]{64}$/);
+  assert.equal(run.headers.authorization, `Bearer ${sent.token}`);
+  assert.deepEqual(sent.job, job);
+  assert.ok(!JSON.stringify(sent).includes('key'), 'the API key never reaches the sandbox');
+  assert.deepEqual(calls.at(-1)!.method + ' ' + calls.at(-1)!.url, 'DELETE https://api.e2b.app/sandboxes/sbx1');
+});
+
+test('E2BCrawler: a sandbox that refuses the job is killed', async () => {
+  const { impl, calls } = e2bFake({ runStatus: 400 });
+  const crawler = new E2BCrawler({ apiKey: 'key', templateId: 'tpl', fetchImpl: impl, sleep: async () => {} });
+  await assert.rejects(crawler.start({ site: 'ex.com', startUrls: ['https://ex.com/'], budget: { maxPages: 5, maxMinutes: 2 }, uploadUrl: null }), /did not accept/);
+  assert.equal(calls.filter((c) => c.method === 'DELETE').length, 1);
 });

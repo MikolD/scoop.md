@@ -12,7 +12,7 @@ export function ulid(now = Date.now()): string {
   return time + tail;
 }
 
-export const newId = (prefix: 'sk' | 'rp', now = Date.now()) => `${prefix}_${ulid(now)}`;
+export const newId = (prefix: 'sk' | 'rp' | 'cr', now = Date.now()) => `${prefix}_${ulid(now)}`;
 
 export async function sha256Hex(s: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
