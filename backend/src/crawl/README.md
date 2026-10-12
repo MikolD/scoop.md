@@ -16,6 +16,7 @@ site.ts      discoverSite(): the deterministic discovery pass and fetch plan;
              fetchPlanned(): fetch a batch of Markdown sources
 changes.ts   new / changed / unchanged by content hash; R2 key pages/<sha256>.md
 presign.ts   SigV4 query presigning for R2's S3 API (optional upload of the browser result)
+skip.ts      skip list: generated indexes, search/404, tag/category pages, old changelog archives
 runner.ts    BrowserCrawler interface (start / poll / result / stop) + runCrawl()
 e2b.ts       BrowserCrawler on E2B over REST (no SDK)
 result.ts    re-validates the browser crawler's (untrusted) output
@@ -30,7 +31,7 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
 
 1. `robots` — fetch robots.txt. 4xx: no rules. 5xx/unreachable: stay away
    (status `blocked`).
-2. `discover` — llms.txt / llms-full.txt under the start path, `/docs`,
+2. `discover` (plan written to `crawl-results/<runId>/plan.json`) — llms.txt / llms-full.txt under the start path, `/docs`,
    `/documentation` and the root; sitemaps from robots.txt or `/sitemap.xml`
    (indexes followed, up to 8 files); `.md` twins for 10 sampled pages
    (`<path>.md`, then `<path>/index.md`); OpenAPI links seen along the way.
@@ -43,14 +44,19 @@ consumer stub is `../index/consumer.ts`; the browser crawler itself is
    page that converts to too little text, is `needs_browser`.
 3. `profile` — upsert `site_profiles`.
 4. `pages-N` — 10 sources per step, conditional GETs; new/changed content goes
-   to R2 (`SKILLS`, `pages/<sha256>.md`) once per hash and onto `index-pages`
-   as `{ site, url, contentHash }`; unchanged pages only refresh `fetched_at`.
-5. Browser sites only: `browser-start` (create sandbox, start the job),
+   to R2 (`SKILLS`, `pages/<sha256>.md`) once per hash and is flagged
+   `index_pending`; unchanged pages only refresh `fetched_at`. `index-N` then
+   sends the flagged pages to `index-pages` as `{ site, url, contentHash }`
+   and clears the flags (an outbox: a retry resends, nothing is lost).
+5. Browser sites only: `browser-start` (kill sandboxes left by an earlier
+   attempt, create one tagged with the run ID, start the job),
    `browser-wait-N`/`browser-poll-N` every 20 s, `browser-collect` (read the
-   result from the sandbox's job server, streamed with a 20 MB cap, unless an
-   optional presigned upload already delivered it; keep only validated pages
-   in the `CRAWL` bucket; kill the sandbox; record seconds and cost),
-   `browser-pages-N` (stored like step 4, source kind `browser`),
-   `browser-cleanup`.
-6. `finish` — run `complete`; on any error, `fail` kills the sandbox and marks
-   the run and profile `failed`.
+   result from the sandbox's job server, application/json only, at most
+   25 MB, unless an optional presigned upload already delivered it; validate
+   once and store one batch object per page step; kill the sandbox; record
+   seconds and cost), `browser-pages-N` + `index-browser-N` (as step 4,
+   source kind `browser`).
+6. `index-final`, `cleanup` (delete `crawl-results/<runId>/`), `finish` — run
+   `complete`, profile `ready`/`empty`/`blocked`. On any error, `fail` kills
+   every sandbox tagged with the run, marks the run and profile `failed` and
+   deletes the run's files.

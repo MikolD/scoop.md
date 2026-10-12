@@ -8,14 +8,16 @@ Workflow when discovery marks a site `needs_browser`.
   content to Markdown with `vendor/extract.js` (the extension's extractor, run
   inside the page), follows same-site links under the docs root breadth-first,
   stops at `maxPages` or `maxMinutes`. Honours robots.txt (`vendor/robots.ts`,
-  the backend's parser), waits at least 1 s between page loads, blocks requests
-  to private/local hosts, images, media and fonts. Deterministic; `choose` is
+  the backend's parser) and the skip list (`vendor/skip.ts`), waits at least
+  1 s between page loads, allows only ports 80/443, blocks images, media,
+  fonts and private/local hosts (as literals, and by resolving each name). Deterministic; `choose` is
   the hook for an agentic mode later.
 - `server.js` — the template's start command (port 8080): `POST /run`,
   `GET /status`, `GET /result`, `GET /health`. See the header comment.
 - `lib.js` — pure helpers (tested from the repo's `test/crawler.test.js`).
-- `vendor/` — copies of `extension/lib/extract.js` and
-  `backend/src/crawl/robots.ts`. Refresh with `npm run sync`; a test fails when
+- `vendor/` — copies of `extension/lib/extract.js`,
+  `backend/src/crawl/robots.ts`, `backend/src/crawl/skip.ts` and
+  `backend/src/lib/urls.ts`. Refresh with `npm run sync`; a test fails when
   they drift.
 
 The sandbox holds no credentials at all. The backend reads the result from

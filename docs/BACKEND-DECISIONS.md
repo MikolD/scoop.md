@@ -239,6 +239,22 @@ listening on `::` for that port.
   llms.txt, then twins of sitemap pages; deduplicated by source URL; cut at the
   page budget (default 500, max 1000). `pages.url` is the HTML page when we
   derived the twin, else the Markdown URL itself.
+- **llms-full.txt** is recorded in the profile but not fetched or indexed when
+  the site's pages are available as Markdown (twins, or Markdown links in
+  llms.txt): it repeats them, and outranked them in search. It is the content
+  only when nothing finer exists.
+- **Skip list** (`src/crawl/skip.ts`, copied to the crawler), simple URL
+  patterns with any file extension: Sphinx generated indexes (`genindex`,
+  `py-modindex`, `modindex`), `search` pages, `404`/`not-found` pages,
+  `tag`/`tags`/`category`/`categories` listings, and changelog archives split
+  by year or version (`/changelog/2023`, `/release-notes/v1.9`, `/releases/…`,
+  `/history/…`) except the newest per section. `/changelog` itself stays.
+  Skipped pages are counted in `crawl_runs.pages_skipped`, along with
+  robots-disallowed sources, redirects off the site and URLs over 1,024
+  characters.
+- **URL length:** 1,024 characters everywhere the crawler fetches, stores or
+  queues a URL (plan, sitemap entries, llms.txt links, browser results, the
+  crawl request's `startUrl`).
 - **Server-rendered sites without Markdown** (path `html`) are converted in the
   Worker: `extension/lib/extract.js` runs over linkedom (`src/crawl/html.ts`),
   imported directly with a small `extract.d.ts` beside it, so crawled pages
@@ -269,6 +285,13 @@ listening on `::` for that port.
   `https://scoop.md/bot` doesn't exist yet; it should describe the bot.
 - **Caps:** 2 MB per Markdown source (bigger ones count as failed), 10 MB per
   sitemap (after gunzip), 5,000 sitemap URLs kept, 8 sitemap files.
+  `sitemap_urls_count` counts the entries parsed, which stops at the 5,000 kept.
+- **Timeouts are per hop and start after the politeness wait**, inside the
+  limiter, which also covers the body read: a 10 s Crawl-delay must not eat a
+  request's 15 s budget.
+- **Sitemap parsing is linear:** each `<url>` block is sliced and searched on
+  its own (an entry without `<lastmod>` never scans the rest of the file), and
+  parsing stops at the number of URLs still wanted.
 
 ### Storage
 
@@ -298,16 +321,39 @@ listening on `::` for that port.
 - 10 pages per step (well under the Free plan's 50 subrequests per invocation,
   counting the fetch, R2 head/put and D1 calls). Network steps retry twice,
   D1-only steps three times.
-- Failures anywhere run a `fail` step (kill the sandbox if one is up, mark run
-  and profile `failed`) and rethrow, so the Workflow instance shows `errored`
-  too.
+- **Small step outputs.** The fetch plan (up to 1,000 URLs) is written to
+  `crawl-results/<runId>/plan.json` in the `CRAWL` bucket; `discover` returns
+  only its size. Each `pages-N` step reads its own slice.
+- **Index outbox.** `record()` writes a page row with `index_pending = 1` in
+  the same D1 batch as its new `content_hash`. After each page step an
+  `index-N` step sends the site's pending rows in batches of 100 and clears
+  each flag only if the hash is unchanged (`WHERE url = ? AND content_hash =
+  ?`); `index-final` runs before `finish`. A step that dies after recording,
+  or between sending and clearing, leaves the flags set and the next flush
+  resends them; resends are harmless because the consumer is idempotent per
+  (url, contentHash).
+- **One crawl per site at a time.** `POST /v1/admin/crawl` inserts the run
+  only if the site has no queued or running run started in the last 6 hours
+  (one `INSERT … SELECT … WHERE NOT EXISTS`, so concurrent requests can't both
+  win), else 409 `conflict`. After 6 hours a stuck run (its Workflow died) no
+  longer blocks. If creating the Workflow instance throws, the run is marked
+  `failed`.
+- **Profile status** is `crawling` from `start` until `finish`, which sets
+  `ready`, `empty` or `blocked` (`failed` on error); whether the site needed a
+  browser is the separate `needs_browser` flag. `GET
+  /v1/sites/:site/profile` answers 404 unless the status is final and doesn't
+  expose the run ID.
+- Failures anywhere run a `fail` step (kill every sandbox tagged with the run,
+  mark run and profile `failed`, delete the run's working files) and rethrow,
+  so the Workflow instance shows `errored` too. Successful runs delete
+  `crawl-results/<runId>/` in a `cleanup` step.
 - `GET /v1/admin/crawl/:runId` returns the D1 run row (the durable record), the
   Workflow status when the instance is still retained, and up to 10 pages the
   run stored.
 
 ### Browser crawls (E2B)
 
-- **Interface:** `BrowserCrawler { start, poll, result, stop }` plus
+- **Interface:** `BrowserCrawler { start, poll, result, stop, stopTagged }` plus
   `runCrawl()` for callers that can wait. A Workflow can't hold one call open
   across `step.sleep`, so the interface is split rather than a single
   `runCrawl(site, budget)`.
@@ -315,32 +361,57 @@ listening on `::` for that port.
   (`crawler/server.js`, port 8080) captured running in the snapshot, so the
   Worker needs only `POST /v2/sandboxes`, `DELETE /sandboxes/{id}` and plain
   HTTPS to `https://8080-<id>.<domain>`. Sandboxes are created with
-  `network.allowPublicTraffic: false`: every call carries E2B's
+  `secure: true` (accepted by the live v2 API; every v2 sandbox is secured
+  anyway) and `network.allowPublicTraffic: false`: every call carries E2B's
   `e2b-traffic-access-token`, plus a random per-job bearer token so pages
   rendered inside the sandbox can't drive the job server via localhost. The
   `browser-start` step output (which holds both tokens) is marked
   `sensitive: 'output'`.
+- **Tagged sandboxes.** Each sandbox's metadata carries `runId`.
+  `browser-start` first kills any sandbox with its run's tag (left by an
+  earlier attempt of the same step that died before returning its handle),
+  and `fail` kills every tagged sandbox, so no handle is needed to clean up.
+  The tag is re-checked client-side after `GET /v2/sandboxes?metadata=…`.
+  `start()` is bounded well inside its 3-minute step: create (30 s) plus at
+  most four 10 s `/run` attempts 2 s apart.
 - **Result collection:** the Worker reads `GET /result` from the sandbox's job
-  server in every environment (traffic token + job token, streamed with a
-  20 MB cap and a 2-minute timeout), keeps only the validated pages at
-  `crawl-results/<runId>.json` in the `CRAWL` bucket, and kills the sandbox in
-  the same step. So the sandbox holds no credentials at all. A presigned SigV4
-  `PUT` (`content-type` signed, crawl + 10 minutes) is used instead only when an
-  R2 API token is configured (`R2_ACCESS_KEY_ID` etc.); R2 presigned URLs
-  can't be single-use, so the key is unique per run and deleted after
-  ingestion.
+  server in every environment (traffic token + job token). It must be
+  `application/json`, is read with the same capped reader as page fetches (at
+  most 25 MB; the crawler caps itself at 20 MB) under a 60 s timeout (25 MB at a
+  pessimistic 1 MB/s through E2B's proxy, plus margin). It is validated once,
+  stored as one object per page step (`crawl-results/<runId>/batch-N.json`),
+  and the sandbox is killed in the same step. So the sandbox holds no
+  credentials at all. A presigned SigV4 `PUT` (`content-type` signed, crawl +
+  10 minutes, to `crawl-results/<runId>/upload.json`) is used instead only
+  when an R2 API token is configured (`R2_ACCESS_KEY_ID` etc.). R2 presigned
+  URLs can be used any number of times until they expire, so the key is unique
+  per run and the object is deleted once read.
+- **Auth failures** (401/403 from E2B's API or proxy) make `poll` throw instead
+  of reporting the sandbox as still running.
+- **Endpoints verified against the live API** (2026-10-12, real key):
+  `POST /v2/sandboxes` with `secure: true` and metadata → 201;
+  `GET /v2/sandboxes?metadata=runId%3D…&state=running,paused` filters by tag;
+  `GET /sandboxes/{id}` 200, 404 after kill; `DELETE` 204 then 404; the job
+  port without the traffic token → 403; a bad API key → 401.
 - **Presigning by hand** (Web Crypto, ~80 lines) rather than `aws4fetch`: no new
   dependency, portable, and pinned by the AWS SigV4 test vector in the tests.
 - **Untrusted output:** pages are re-checked in the Worker (`result.ts`): same
-  site, http(s), robots-allowed, <= 300,000 chars, unique, within budget. The
-  crawler also blocks private/local hosts, images, media and fonts, and caps the
-  result at 20 MB.
+  site, http(s), robots-allowed, not on the skip list, URL <= 1,024 chars in
+  the indexer's canonical form (`normalizePageUrl`), <= 300,000 chars, unique,
+  within budget. The crawler also blocks images, media and fonts, caps the
+  result at 20 MB, allows only ports 80 and 443, and blocks private/local
+  hosts both as literals and by resolving each hostname once per crawl
+  (`dns.lookup`, all addresses must be public). Chromium resolves names
+  itself, and `--host-resolver-rules` can only map names, not filter by the
+  resolved IP, so a DNS answer that changes between our lookup and
+  Chromium's (rebinding) is not covered; the sandbox holds no credentials and
+  its job server needs a bearer token, which bounds what that could reach.
 - **Limits:** sandbox timeout = crawl minutes + 3 (max 60, the Hobby plan's
   continuous-runtime cap); `maxMinutes` defaults to 10 and is capped at 50.
   Polled every 20 s. Template: 2 vCPU, 2 GiB, `mcr.microsoft.com/playwright:v1.64.0-noble`.
 - **Cost** recorded per run: sandbox seconds × (2 × $0.000014 + 2 × $0.0000045)
   = $0.000037/s, E2B's published per-second prices on 2026-10-12.
-- **Shared code** (`extract.js`, `robots.ts`) is copied into `crawler/vendor/`
+- **Shared code** (`extract.js`, `robots.ts`, `skip.ts`, `urls.ts`) is copied into `crawler/vendor/`
   because the template build only sees `crawler/`; a root test fails if the
   copies drift. Node in the Playwright image runs `robots.ts` directly (type
   stripping).
