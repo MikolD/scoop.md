@@ -240,18 +240,28 @@ async function composePage({ site, scoop, sections, relatedLinks = [] }) {
   const llms = llmsSec && verifyLlms(llmsSec.content) ? { url: llmsSec.url } : null;
   const llmsFull = llms && fullSec && (fullSec.content == null || /^\s*#/.test(fullSec.content)) ? { url: fullSec.url } : null;
   const pages = sections.filter((s) => s.kind !== 'llms' && s.kind !== 'llms-full');
-  const live = await withLiveLinks({ sections: pages, relatedLinks, instructions: siteInstructions() }, {
+  // Link addresses leave the device only for public pages: to the library
+  // (sharing on) and as HEAD requests to the page's own site and its sources.
+  const pagePublic = Boolean(siteInfo?.pagePublic);
+  const docs = verdict.state !== 'no';
+  const live = await withLiveLinks({ sections: pages, relatedLinks, instructions: docs ? siteInstructions() : [] }, {
     library,
-    useBackend: Boolean(settings.share && siteInfo?.libraryUp && !current.private),
+    useBackend: Boolean(settings.share && siteInfo?.libraryUp && pagePublic),
+    direct: pagePublic,
+    pageUrl: scoop?.pageUrl ?? tab.url,
+    sourceUrls: sections.map((s) => s.url),
   });
   const title = scoop?.title || tab.title || '';
-  const text = buildPagePackage({ site, title, pageUrl: scoop?.pageUrl ?? tab.url, devDocs: verdict.state !== 'no', llms, llmsFull, instructions: live.instructions, sections: live.sections, relatedLinks: live.relatedLinks });
+  const text = buildPagePackage({ site, title, pageUrl: scoop?.pageUrl ?? tab.url, devDocs: docs, llms, llmsFull, instructions: live.instructions, sections: live.sections, relatedLinks: live.relatedLinks });
   showPageMeta({ llms: llms?.url, instructions: live.instructions });
   return text;
 }
 
 // "This page": the llms.txt line and the instructions list (3, then "Show all").
 function showPageMeta({ llms = null, instructions = [] } = {}) {
+  const web = (url) => /^https?:\/\//i.test(url ?? '');
+  if (!web(llms)) llms = null;
+  instructions = instructions.map((i) => (web(i.url) ? i : { ...i, url: null }));
   $('page-meta').hidden = !llms && !instructions.length;
   $('llms-line').hidden = !llms;
   if (llms) {
@@ -349,7 +359,8 @@ async function deliverIndexed(scoop, { fresh = false } = {}) {
   }
   if (!res.ok || typeof res.data !== 'string' || !res.data.trim()) return false;
   $('rebuild').hidden = false;
-  showPageMeta(packageMeta(res.data));
+  const meta = packageMeta(res.data);
+  showPageMeta(verdict.state === 'no' ? { llms: meta.llms } : meta);
   await deliver({ text: res.data, scoop, indexed: true, summary: `${kb(res.data)} · ${tokenEstimate(res.data)} · from the ${site} docs index` });
   return true;
 }

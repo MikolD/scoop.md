@@ -10,6 +10,7 @@
 
 import { siteKey } from './discover.js';
 import { isPrivateHost } from './hosts.js';
+import { live, loadPending } from './crawl.js';
 
 export const SITES_KEY = 'sitesIndex';
 export const SITES_ALARM = 'sites-index';
@@ -73,7 +74,10 @@ const DEFAULT_TITLE = 'Scoop to agent';
 
 export async function setTabBadge(chromeApi, tab, state) {
   if (!tab?.id || tab.id < 0) return;
-  const { text, title } = badgeFor(tab.url ?? '', state);
+  // The crawl state is read again here: the popup may have changed it (a ✓
+  // picked up) since the caller read it.
+  const pending = live(await loadPending(chromeApi));
+  const { text, title } = badgeFor(tab.url ?? '', { ...state, pending });
   try {
     await chromeApi.action.setBadgeBackgroundColor({ tabId: tab.id, color: BADGE_COLOR });
     await chromeApi.action.setBadgeText({ tabId: tab.id, text });

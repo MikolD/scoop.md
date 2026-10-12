@@ -10,6 +10,7 @@ import { createTelemetry, FLUSH_ALARM, getInstallId, HOURLY_ALARM, QUEUE_KEY, RE
 import { createLibrary, libraryUrl } from './lib/library.js';
 import { CRAWL_ALARM, PENDING_KEY, live, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
 import { countShown, loadSites, refreshSites, setTabBadge, SITES_ALARM, SITES_PERIOD_MINUTES, takeShownCount } from './lib/badge.js';
+import { siteKey } from './lib/discover.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
 const BROWSER_KEY = 'telemetryBrowserVersion';
@@ -124,11 +125,19 @@ chrome.storage.onChanged.addListener((changes, area) => {
 });
 
 // The badge follows the tab: on switching tabs and when a page finishes loading.
+// A page count is counted as shown once per tab per site, not on every load.
+const countedSite = new Map();
 async function badgeTab(tab) {
   const [{ sites }, pending] = await Promise.all([loadSites(chrome), loadPending(chrome)]);
   const text = await setTabBadge(chrome, tab, { sites, pending: live(pending) });
-  if (text && /^\d/.test(text)) await countShown(chrome);
+  let site = null;
+  try { site = siteKey(tab.url); } catch {}
+  if (!text || !/^\d/.test(text)) return countedSite.delete(tab.id);
+  if (countedSite.get(tab.id) === site) return;
+  countedSite.set(tab.id, site);
+  await countShown(chrome);
 }
+chrome.tabs.onRemoved?.addListener((tabId) => countedSite.delete(tabId));
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
   chrome.tabs.get(tabId).then(badgeTab).catch(() => {});

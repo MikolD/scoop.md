@@ -100,5 +100,8 @@ test('the link checks are disclosed on the privacy page and in STORE.md', () => 
   const privacy = readFileSync(new URL('../site/src/pages/privacy.astro', import.meta.url), 'utf8');
   const store = readFileSync(ext('STORE.md'), 'utf8');
   for (const doc of [privacy, store]) assert.match(doc, /links\/check/);
-  assert.match(privacy, /When sharing is on, their addresses/);
+  assert.match(privacy, /When sharing is on, their\s+addresses/);
+  assert.match(privacy, /no link address is sent or requested/);
+  assert.match(store, /For a page that isn't public, no link address is sent or requested\./);
+  assert.match(store, /this stays on the device and is never sent/);
 });

@@ -1,14 +1,16 @@
 // No dead links in what the agent gets. Before a package built in the
 // extension is copied, every http(s) URL in it (Markdown links, autolinks and
 // bare URLs outside code, and the related links) is checked: first with the
-// library (POST /v1/links/check, when it may be asked), then directly from
-// here with HEAD (GET when HEAD isn't implemented), without cookies. Only a
+// library (POST /v1/links/check, for public pages only), then directly from
+// here with HEAD, without cookies: only for public pages, only https, never
+// private hosts, and only on the page's own registrable domain or a host the
+// package's sources already came from (no requests to arbitrary sites). Only a
 // confirmed URL stays a link: [text](url) otherwise keeps its text, and a bare
 // URL or autolink is never removed, just kept as code (`url`) so it isn't
 // linked. Related links keep only confirmed ones. The whole check takes at
 // most LINK_BUDGET_MS, inside the popup's loader.
 
-import { isPrivateHost } from './hosts.js';
+import { isPrivateHost, registrableDomain } from './hosts.js';
 
 export const LINK_BUDGET_MS = 2_500;
 export const BACKEND_TIMEOUT_MS = 2_000;
@@ -181,25 +183,35 @@ export function unlink(text, ok) {
 const hostOf = (url) => { try { return new URL(url).hostname; } catch { return ''; } };
 
 // 'exists', 'dead' or 'unknown' (a timeout, 429 or 5xx). A network error
-// (DNS, refused) is dead.
+// (DNS, refused) is dead. HEAD only: a server that refuses it (403, 405) still
+// knows the address.
 async function direct(url, fetchImpl, signal) {
-  const init = { credentials: 'omit', cache: 'no-store', redirect: 'follow', signal };
   try {
-    let res = await fetchImpl(url, { ...init, method: 'HEAD' });
-    // A server that doesn't implement HEAD: ask again with GET (the body is not read).
-    if (res.status === 501) {
-      res = await fetchImpl(url, { ...init, method: 'GET' });
-      res.body?.cancel?.().catch?.(() => {});
-    }
+    const res = await fetchImpl(url, { method: 'HEAD', credentials: 'omit', cache: 'no-store', redirect: 'follow', signal });
     return linkState(res.status);
   } catch {
     return signal.aborted ? 'unknown' : 'dead';
   }
 }
 
+// Which URLs may be checked directly: https, not a private host, and on the
+// page's registrable domain or one of the sources' hosts.
+export function directCheckable({ pageUrl = null, sourceUrls = [] } = {}) {
+  const page = registrableDomain(hostOf(pageUrl ?? ''));
+  const hosts = new Set(sourceUrls.map(hostOf).filter(Boolean));
+  return (url) => {
+    if (!/^https:\/\//i.test(url)) return false;
+    const host = hostOf(url);
+    if (!host || isPrivateHost(host)) return false;
+    return Boolean(page && registrableDomain(host) === page) || hosts.has(host);
+  };
+}
+
 // Returns the set of confirmed URLs. useBackend: the library may be asked
-// (it is reachable and sharing is on); private hosts never go to it.
-export async function checkLinks(urls, { library = null, useBackend = false, fetchImpl = (...a) => fetch(...a), budgetMs = LINK_BUDGET_MS, now = () => Date.now() } = {}) {
+// (a public page, sharing on, the library reachable); private hosts never go
+// to it. direct: the page is public, so its links may be checked from here,
+// within directCheckable({ pageUrl, sourceUrls }).
+export async function checkLinks(urls, { library = null, useBackend = false, direct: directOn = false, pageUrl = null, sourceUrls = [], fetchImpl = (...a) => fetch(...a), budgetMs = LINK_BUDGET_MS, now = () => Date.now() } = {}) {
   const ok = new Set();
   if (!urls.length) return ok;
   const deadline = now() + budgetMs;
@@ -217,7 +229,8 @@ export async function checkLinks(urls, { library = null, useBackend = false, fet
   }
   // Direct checks, 8 at a time, until the budget runs out. Dead, unknown or
   // unchecked = not confirmed.
-  const queue = unknown.slice(0, MAX_DIRECT);
+  const allowed = directCheckable({ pageUrl, sourceUrls });
+  const queue = directOn ? unknown.filter(allowed).slice(0, MAX_DIRECT) : [];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), Math.max(0, deadline - now()));
   async function worker() {
