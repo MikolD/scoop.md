@@ -359,7 +359,7 @@ const tev = (name, props = {}, seq = 1) => ({ name, ts: Date.now(), seq, props }
 test('events: a valid batch is accepted with 202; unknown events and private hosts are dropped', async () => {
   const r = await call('POST', '/v1/events', {
     install: null,
-    body: telemetry([tev('popup_open'), tev('scoop_start', { site: 'docs.stripe.com' }, 2), tev('scoop_start', { site: 'localhost' }, 3), tev('no_such_event', {}, 4)]),
+    body: telemetry([tev('popup_open'), tev('rebuild', { site: 'docs.stripe.com' }, 2), tev('rebuild', { site: 'localhost' }, 3), tev('no_such_event', {}, 4)]),
   });
   assert.equal(r.status, 202, JSON.stringify(r.json));
   assert.deepEqual(r.json, { accepted: 2, dropped: 2 });

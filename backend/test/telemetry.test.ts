@@ -714,3 +714,42 @@ test('scoop_start is accepted with no properties (the extension names no site on
   const b = validateEvents(envelope([ev('scoop_start'), ev('scoop_start', { site: 'react.dev', path: '/learn' }, 2)]), T);
   assert.deepEqual(b.events.map((e) => [e.name, e.site, e.path]), [['scoop_start', null, null], ['scoop_start', null, null]]);
 });
+
+test('lifecycle events stop too at 3× the daily ceiling; each cap logs telemetry_cap_hit once per day', async () => {
+  const { quota, logCapHits } = await import('../src/telemetry/consumer.ts');
+  const state = { counts: new Map<string, number>([['2026-10-12|all_events|', 15]]), ipInstalls: new Map<string, Set<string>>() };
+  const kept = quota([row({ name: 'install' }), row({ name: 'popup_open' })], state, { dailyMax: 5, apiDailyMax: 3 });
+  assert.equal(kept.rows.length, 0);
+  assert.deepEqual([...kept.caps].sort(), ['2026-10-12|lifecycle_max']);
+
+  const s = setup({ TELEMETRY_DAILY_MAX: '1' } as Partial<Env>);
+  const lines: string[] = [];
+  const log = console.log;
+  console.log = (l: string) => { lines.push(String(l)); };
+  try {
+    await post(s.env, envelope([ev('popup_open', {}, 1), ev('popup_open', {}, 2)]));
+    await consume(s);
+    await post(s.env, envelope([ev('popup_open', {}, 3)]));
+    await consume(s);
+    assert.equal(await logCapHits(s.env.TELEMETRY_DB, new Set(['2026-10-12|daily_max']), { dailyMax: 1, apiDailyMax: 1 }), 0, 'already logged today');
+  } finally {
+    console.log = log;
+  }
+  const hits = lines.filter((l) => l.includes('telemetry_cap_hit')).map((l) => JSON.parse(l));
+  assert.equal(hits.length, 1);
+  assert.deepEqual([hits[0].event, hits[0].day, hits[0].cap], ['telemetry_cap_hit', '2026-10-12', 'daily_max']);
+});
+
+test('API row IDs carry the hour, not the exact request time', async () => {
+  const s = setup();
+  await recordApiUsage(s.env, new Request('https://api.scoop.md/v1/sites'), '/v1/sites', { status: 200, latencyMs: 1, usage: {} }, NOW);
+  const id = s.sent[0].rows[0].id;
+  const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+  const ms = [...id.slice(4, 14)].reduce((n, c) => n * 32 + CROCKFORD.indexOf(c), 0);
+  assert.equal(new Date(ms).toISOString(), '2026-10-12T10:00:00.000Z');
+});
+
+test('error text loses IPv4 and IPv6 literals on the server', () => {
+  const b = validateEvents(envelope([ev('error', { where: 'x', code: 'E', message: 'from 203.0.113.7 via 2001:db8::1 at 10:30:00' })]), T);
+  assert.equal(b.events[0].props.message, 'from <ip> via <ip> at 10:30:00');
+});

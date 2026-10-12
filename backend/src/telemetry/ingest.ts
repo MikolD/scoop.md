@@ -274,7 +274,8 @@ export async function recordApiUsage(
   const hour = new Date(Math.floor(now.getTime() / 3_600_000) * 3_600_000);
   const at = hour.toISOString();
   const row: TelemetryRow = {
-    id: `api_${ulid(now.getTime())}`,
+    // Time part from the hour too, so the ID doesn't carry the exact request time.
+    id: `api_${ulid(hour.getTime())}`,
     source: 'api',
     name,
     ts: at,

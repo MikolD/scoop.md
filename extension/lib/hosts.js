@@ -15,7 +15,8 @@ export function isPrivateHost(hostname) {
   }
   // Reserved, special-use and common intranet suffixes (RFC 2606, 6761, 6762, 7686, 8375).
   return !h.includes('.') ||
-    /\.(localhost|local|internal|lan|home\.arpa|home|corp|intranet|private|test|example|invalid|onion|i2p)$/.test(h);
+    /(^|\.)home\.arpa$/.test(h) ||
+    /\.(localhost|local|internal|lan|home|corp|intranet|private|test|example|invalid|onion|i2p)$/.test(h);
 }
 
 // Second-level labels under which country-code TLDs register names (co.uk, com.au, …).
@@ -27,7 +28,8 @@ const CC_SLD = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac', 'ne', 'or
 // is dropped too. IP literals come back unchanged.
 export function registrableDomain(hostname) {
   const h = hostname.toLowerCase().replace(/\.$/, '');
-  if (/^[\d.]+$/.test(h) || h.includes(':')) return h;
+  // A private host (printer.home.arpa) stays whole, so it is still recognised as private and dropped.
+  if (/^[\d.]+$/.test(h) || h.includes(':') || isPrivateHost(h)) return h;
   const labels = h.split('.');
   if (labels.length <= 2) return h;
   const [sld, tld] = labels.slice(-2);

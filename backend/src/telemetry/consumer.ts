@@ -24,6 +24,7 @@ export const QUOTAS = {
   eventsPerIp: 20_000,
 };
 export const DEFAULT_DAILY_MAX = 2_000_000; // all events; above it, lifecycle events only
+export const LIFECYCLE_FACTOR = 3; // lifecycle events stop too at 3 × the daily ceiling
 export const DEFAULT_API_DAILY_MAX = 200_000; // API usage rows
 
 export const COLUMNS = [
@@ -98,16 +99,23 @@ export async function loadQuotaState(db: D1Database, rows: TelemetryRow[]): Prom
   return { counts, ipInstalls };
 }
 
+export type Cap = 'new_installs_per_ip' | 'events_per_install' | 'events_per_ip' | 'daily_max' | 'lifecycle_max' | 'api_daily_max';
+
 export interface Kept {
   rows: TelemetryRow[];
   deltas: Map<string, number>;
   newIpInstalls: [string, string, string][]; // day, ip_hash, install_id
   dropped: number;
+  caps: Set<string>; // `${day}|${cap}` for every cap that dropped an event
 }
 
 // Applies the quotas to one message's rows, in order, updating `state`.
 export function quota(rows: TelemetryRow[], state: QuotaState, limits: Limits): Kept {
-  const out: Kept = { rows: [], deltas: new Map(), newIpInstalls: [], dropped: 0 };
+  const out: Kept = { rows: [], deltas: new Map(), newIpInstalls: [], dropped: 0, caps: new Set() };
+  const drop = (day: string, cap: Cap) => {
+    out.dropped++;
+    out.caps.add(`${day}|${cap}`);
+  };
   const get = (key: string) => (state.counts.get(key) ?? 0);
   const bump = (key: string) => {
     state.counts.set(key, get(key) + 1);
@@ -116,19 +124,21 @@ export function quota(rows: TelemetryRow[], state: QuotaState, limits: Limits): 
   for (const r of rows) {
     const day = dayOf(r);
     if (r.source === 'api') {
-      if (get(k(day, 'api_rows', '')) >= limits.apiDailyMax) { out.dropped++; continue; }
+      if (get(k(day, 'api_rows', '')) >= limits.apiDailyMax) { drop(day, 'api_daily_max'); continue; }
       bump(k(day, 'api_rows', ''));
       out.rows.push(r);
       continue;
     }
-    if (get(k(day, 'all_events', '')) >= limits.dailyMax && !LIFECYCLE.has(r.name)) { out.dropped++; continue; }
-    if (r.install_id && get(k(day, 'install_events', r.install_id)) >= QUOTAS.eventsPerInstall) { out.dropped++; continue; }
-    if (r.ip_hash && get(k(day, 'ip_events', r.ip_hash)) >= QUOTAS.eventsPerIp) { out.dropped++; continue; }
+    const all = get(k(day, 'all_events', ''));
+    if (all >= limits.dailyMax * LIFECYCLE_FACTOR) { drop(day, 'lifecycle_max'); continue; }
+    if (all >= limits.dailyMax && !LIFECYCLE.has(r.name)) { drop(day, 'daily_max'); continue; }
+    if (r.install_id && get(k(day, 'install_events', r.install_id)) >= QUOTAS.eventsPerInstall) { drop(day, 'events_per_install'); continue; }
+    if (r.ip_hash && get(k(day, 'ip_events', r.ip_hash)) >= QUOTAS.eventsPerIp) { drop(day, 'events_per_ip'); continue; }
     if (r.ip_hash && r.install_id && r.source === 'extension') {
       const key = `${day}|${r.ip_hash}`;
       const seen = state.ipInstalls.get(key) ?? new Set<string>();
       if (!seen.has(r.install_id)) {
-        if (seen.size >= QUOTAS.newInstallsPerIp) { out.dropped++; continue; }
+        if (seen.size >= QUOTAS.newInstallsPerIp) { drop(day, 'new_installs_per_ip'); continue; }
         seen.add(r.install_id);
         state.ipInstalls.set(key, seen);
         out.newIpInstalls.push([day, r.ip_hash, r.install_id]);
@@ -239,6 +249,7 @@ export async function handleTelemetryBatch(batch: MessageBatch<unknown>, env: Pi
   if (!parsed.length) return;
 
   let dropped = 0;
+  const caps = new Set<string>();
   try {
     const deleted = await deletedOf(db, parsed.flatMap((p) => p.rows));
     for (const p of parsed) p.rows = p.rows.filter((r) => !r.install_id || !deleted.has(r.install_id));
@@ -247,6 +258,7 @@ export async function handleTelemetryBatch(batch: MessageBatch<unknown>, env: Pi
     for (const p of parsed) {
       p.kept = quota(p.rows, state, limits);
       dropped += p.kept.dropped;
+      for (const c of p.kept.caps) caps.add(c);
     }
     const all = parsed.flatMap((p) => p.kept!.rows);
     if (all.length) await writeArchive(env.TELEMETRY, all);
@@ -270,6 +282,28 @@ export async function handleTelemetryBatch(batch: MessageBatch<unknown>, env: Pi
     }
   }
   console.log(JSON.stringify({ queue, messages: parsed.length, events, overQuota: dropped }));
+  await logCapHits(db, caps, limitsOf(env));
+}
+
+// One structured `telemetry_cap_hit` line per cap per UTC day (recorded in
+// quota_counters as kind cap_logged, so other batches and isolates stay quiet).
+export async function logCapHits(db: D1Database, caps: Set<string>, limits: Limits): Promise<number> {
+  let logged = 0;
+  for (const c of caps) {
+    const [day, cap] = c.split('|');
+    try {
+      const first = await db
+        .prepare(`INSERT OR IGNORE INTO quota_counters (day, kind, subject, count) VALUES (?, 'cap_logged', ?, 1) RETURNING count`)
+        .bind(day, cap)
+        .first();
+      if (!first) continue;
+      console.log(JSON.stringify({ event: 'telemetry_cap_hit', day, cap, dailyMax: limits.dailyMax, apiDailyMax: limits.apiDailyMax, quotas: QUOTAS }));
+      logged++;
+    } catch (e) {
+      console.error(JSON.stringify({ event: 'telemetry_cap_hit', day, cap, error: e instanceof Error ? e.message : String(e) }));
+    }
+  }
+  return logged;
 }
 
 // Deletes in chunks of 5000 until a chunk comes back short (at most `rounds`).

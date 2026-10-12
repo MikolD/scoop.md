@@ -344,3 +344,19 @@ test('service worker: a synced opt-out landing after install drops the queue bef
     w.restore();
   }
 });
+
+test('slugs: readable ones are kept, word-plus-token ones redacted; IPs scrubbed; home.arpa stays private', async () => {
+  const { secretish, scrubText } = await import('../extension/lib/privacy.js');
+  const { registrableDomain, isPrivateHost } = await import('../extension/lib/hosts.js');
+  for (const s of ['getting-started-with-v2-api', '2024-01-15-release-notes', 'oauth2-client-credentials-flow', 'python3-asyncio-tutorial', 'es6-modules-in-node-v18']) {
+    assert.equal(secretish(s), false, s);
+  }
+  for (const s of ['reset-k8Jd2-Lq9z7-xPw3m-token', 'inv-7Gh2kLp9-q8Rt3vWx', 'share_Ab3dE9fG2hJ_k4LmN', 'team-acme-x7k2p9q4r8', 'x9-y8-z7-w6-v5-u4-tok']) {
+    assert.equal(secretish(s), true, s);
+  }
+  assert.equal(scrubText('from 203.0.113.7 and 2001:db8::1 and ::1; 2001:0db8:85a3:0000:0000:8a2e:0370:7334 at 10:30:00 in Foo::bar v1.2.3'),
+    'from <ip> and <ip> and <ip>; <ip> at 10:30:00 in Foo::bar v1.2.3');
+  assert.equal(registrableDomain('printer.home.arpa'), 'printer.home.arpa');
+  assert.ok(isPrivateHost('home.arpa') && isPrivateHost(registrableDomain('nas.home.arpa')));
+  assert.equal(registrableDomain('acme.atlassian.net'), 'atlassian.net');
+});
