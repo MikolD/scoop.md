@@ -1,78 +1,771 @@
 ---
-// The home page demo: a cursor opens the scoop.md popup and clicks Copy.
-// Built by scripts/make-hero-animation.py: a wide cut for larger screens
-// (public/hero-wide.json) and a taller one for phones (public/hero.json).
+// Pure CSS / vanilla-JS looping demo of the Quick Copy flow.
+// No Lottie dependency. Honors prefers-reduced-motion.
 ---
 
-<div class="hero-anim" role="img" aria-label="A cursor clicks the scoop.md icon in the browser toolbar, the popup opens, and the cursor clicks Copy for your agent."></div>
+<div
+  class="hero-stage"
+  role="img"
+  aria-label="A browser frame on a docs page, the scoop.md toolbar icon lights up, the popup opens showing the Quick Copy panel, the cursor clicks Copy, and a Markdown sheet flies to a coding agent."
+  aria-hidden="false"
+>
+  <!-- Browser chrome -->
+  <div class="browser">
+    <div class="browser-bar">
+      <div class="browser-dots" aria-hidden="true">
+        <span></span><span></span><span></span>
+      </div>
+      <div class="browser-url" aria-hidden="true">
+        <span class="url-lock">&#128274;</span>
+        docs.stripe.com
+      </div>
+      <!-- Toolbar area -->
+      <div class="toolbar" aria-hidden="true">
+        <div class="ext-icon">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+        </div>
+        <div class="scoop-icon">
+          <img src="/favicon.png" width="16" height="16" alt="" />
+          <span class="badge">✓</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Page content placeholder -->
+    <div class="page-content" aria-hidden="true">
+      <div class="page-sidebar">
+        <div class="sk sk-1"></div>
+        <div class="sk sk-2"></div>
+        <div class="sk sk-3"></div>
+        <div class="sk sk-4"></div>
+        <div class="sk sk-5"></div>
+        <div class="sk sk-6"></div>
+      </div>
+      <div class="page-body">
+        <div class="sk sk-h1"></div>
+        <div class="sk sk-p1"></div>
+        <div class="sk sk-p2"></div>
+        <div class="sk sk-p3"></div>
+        <div class="sk sk-code"></div>
+        <div class="sk sk-p4"></div>
+        <div class="sk sk-p5"></div>
+      </div>
+    </div>
+
+    <!-- The popup -->
+    <div class="popup" aria-hidden="true">
+      <div class="popup-bar">
+        <div class="popup-brand">
+          <img src="/favicon.png" width="18" height="18" alt="" />
+          <span>scoop.md</span>
+        </div>
+      </div>
+      <div class="popup-tabs">
+        <span class="ptab ptab-active">Quick Copy</span>
+        <span class="ptab">Overview</span>
+        <span class="ptab">Search</span>
+      </div>
+      <div class="popup-body">
+        <!-- Line 1: docs pill -->
+        <div class="qline qline-1">
+          <span class="chip chip-yes">
+            <span class="chip-dot">✓</span>
+            <span>Docs · docs.stripe.com</span>
+          </span>
+        </div>
+        <!-- Line 2: llms row -->
+        <div class="qline qline-2">
+          <span class="qmeta">llms.txt <span class="qok">✓</span></span>
+          <span class="qdot">·</span>
+          <span class="qmeta">llms-full.txt <span class="qno">✕</span></span>
+        </div>
+        <!-- Line 3: agent instructions -->
+        <div class="qline qline-3">
+          <span class="qmeta qexpand">▸ Agent instructions <span class="qbadge">8</span></span>
+        </div>
+        <!-- Line 4: token count -->
+        <div class="qline qline-4">
+          <span class="tokens-num">~4k</span>
+          <span class="qmeta qsz">tokens &nbsp; 15 KB</span>
+        </div>
+        <!-- Line 5: preview -->
+        <div class="qline qline-5">
+          <div class="preview-box">
+            <span class="preview-text"># Stripe Docs</span>
+          </div>
+        </div>
+        <!-- Copy button -->
+        <div class="qline qline-6">
+          <button class="copy-btn" tabindex="-1">
+            <span class="copy-label">Copy</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Markdown sheet flyout -->
+  <div class="md-sheet" aria-hidden="true">
+    <div class="md-sheet-inner">
+      <div class="md-line md-h"># Stripe Docs</div>
+      <div class="md-line md-p"></div>
+      <div class="md-line md-p md-p-short"></div>
+      <div class="md-line md-code"></div>
+    </div>
+  </div>
+
+  <!-- Agent chip destination -->
+  <div class="agent-chip" aria-hidden="true">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></svg>
+    <span class="agent-chip-label">Claude Code</span>
+    <span class="agent-pasted">pasted ✓</span>
+  </div>
+
+  <!-- Cursor -->
+  <div class="cursor" aria-hidden="true">
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+      <path d="M4 2L16 10L10 11L7 18L4 2Z" fill="var(--ink)" stroke="var(--paper)" stroke-width="1.5"/>
+    </svg>
+  </div>
+</div>
 
 <script>
-  import lottie, { type AnimationItem } from 'lottie-web/build/player/lottie_light';
+  const stage = document.querySelector<HTMLElement>('.hero-stage');
+  if (!stage) throw new Error('hero-stage not found');
 
-  const WIDE = '(min-width: 768px)'; // keep in sync with the CSS below
   const still = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-  for (const el of document.querySelectorAll<HTMLElement>('.hero-anim')) {
-    let anim: AnimationItem | null = null;
-    let visible = false;
+  if (still) {
+    // Show the "Copied" end-state without motion
+    stage.classList.add('state-copied');
+    stage.classList.add('state-badge');
+    stage.classList.add('state-popup-open');
+    stage.classList.add('state-lines-done');
+  } else {
+    // Drive the animation entirely with CSS classes + JS timing
+    const LOOP_MS = 8400;
 
-    const load = (wide: boolean) => {
-      anim?.destroy();
-      el.classList.remove('ready');
-      anim = lottie.loadAnimation({
-        container: el,
-        renderer: 'svg',
-        loop: true,
-        autoplay: false,
-        path: wide ? '/hero-wide.json' : '/hero.json',
-        rendererSettings: { preserveAspectRatio: 'xMidYMid meet' },
-      });
-      const current = anim;
-      current.addEventListener('DOMLoaded', () => {
-        el.classList.add('ready');
-        if (still) current.goToAndStop(120, true); // the "Copied" moment, without motion
-        else if (visible) current.play();
-      });
+    const frames: [number, string, boolean][] = [
+      // [delay ms, class to add, remove-at-loop-end]
+      [400,  'state-badge',       true],
+      [900,  'state-popup-open',  true],
+      [1200, 'state-line1',       true],
+      [1500, 'state-line2',       true],
+      [1800, 'state-line3',       true],
+      [2100, 'state-line4',       true],
+      [2500, 'state-line5',       true],
+      [3200, 'state-cursor-copy', true],
+      [3600, 'state-copied',      true],
+      [4300, 'state-flyout',      true],
+      [5200, 'state-pasted',      true],
+    ];
+
+    let timers: ReturnType<typeof setTimeout>[] = [];
+    let running = false;
+    let observer: IntersectionObserver;
+
+    const clearAll = () => {
+      timers.forEach(clearTimeout);
+      timers = [];
+      for (const [, cls] of frames) stage.classList.remove(cls);
+      stage.classList.remove('state-reset');
     };
 
-    const media = matchMedia(WIDE);
-    load(media.matches);
-    media.addEventListener('change', (e) => load(e.matches));
+    const runLoop = () => {
+      clearAll();
 
-    if (!still) {
-      // Only animate while it's on screen.
-      new IntersectionObserver(([entry]) => {
-        visible = entry.isIntersecting;
-        if (visible) anim?.play();
-        else anim?.pause();
-      }).observe(el);
-    }
+      for (const [delay, cls] of frames) {
+        timers.push(setTimeout(() => stage.classList.add(cls), delay));
+      }
+
+      // Fade out and reset
+      timers.push(setTimeout(() => {
+        stage.classList.add('state-reset');
+        timers.push(setTimeout(() => runLoop(), 700));
+      }, LOOP_MS - 700));
+    };
+
+    observer = new IntersectionObserver(([entry]) => {
+      if (entry.isIntersecting && !running) {
+        running = true;
+        runLoop();
+      } else if (!entry.isIntersecting && running) {
+        running = false;
+        clearAll();
+      }
+    });
+
+    observer.observe(stage);
   }
 </script>
 
 <style>
-  .hero-anim {
+  /* ── Container ── */
+  .hero-stage {
+    position: relative;
     width: 100%;
-    max-width: 760px;
-    aspect-ratio: 960 / 600;
-    opacity: 0;
-    transition: opacity 0.4s ease;
+    max-width: 860px;
+    margin: 2.5rem auto 0;
+    /* Enough height for the browser + chip below */
+    padding-bottom: 72px; /* make room for absolutely-positioned agent-chip */
+    user-select: none;
   }
 
-  @media (min-width: 768px) {
-    .hero-anim {
-      max-width: 1040px;
-      aspect-ratio: 1280 / 560;
+  /* ── Browser shell ── */
+  .browser {
+    position: relative;
+    width: 100%;
+    border: 1.5px solid var(--rule);
+    border-radius: 10px;
+    overflow: visible;
+    background: var(--sheet);
+    box-shadow: 0 4px 24px rgba(0,0,0,.08), 0 1px 4px rgba(0,0,0,.06);
+  }
+
+  .browser-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    height: 40px;
+    background: var(--paper);
+    border-bottom: 1px solid var(--rule);
+    border-radius: 10px 10px 0 0;
+  }
+
+  .browser-dots {
+    display: flex;
+    gap: 5px;
+    flex-shrink: 0;
+  }
+  .browser-dots span {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--rule);
+  }
+  .browser-dots span:nth-child(1) { background: #ff5f57; }
+  .browser-dots span:nth-child(2) { background: #febc2e; }
+  .browser-dots span:nth-child(3) { background: #28c840; }
+
+  .browser-url {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font: 500 11px/1 var(--font-mono);
+    color: var(--muted);
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 4px 10px;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+  }
+  .url-lock { font-size: 10px; }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+
+  .ext-icon {
+    width: 24px; height: 24px;
+    display: grid; place-items: center;
+    border-radius: 4px;
+    color: var(--muted);
+    opacity: .5;
+  }
+
+  .scoop-icon {
+    position: relative;
+    width: 24px; height: 24px;
+    display: grid; place-items: center;
+    border-radius: 4px;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+  }
+
+  /* Badge on toolbar icon */
+  .badge {
+    position: absolute;
+    bottom: -3px; right: -4px;
+    font-size: 8px; line-height: 1;
+    background: #2e7d32;
+    color: #fff;
+    border-radius: 99px;
+    padding: 1px 3px;
+    opacity: 0;
+    transform: scale(0.6);
+    transition: opacity .3s cubic-bezier(.2,.8,.2,1), transform .3s cubic-bezier(.2,.8,.2,1);
+  }
+
+  .hero-stage.state-badge .badge {
+    opacity: 1;
+    transform: scale(1);
+  }
+
+  /* Page skeleton */
+  .page-content {
+    display: flex;
+    gap: 0;
+    min-height: 240px;
+    padding: 0;
+  }
+
+  .page-sidebar {
+    width: 180px;
+    flex-shrink: 0;
+    padding: 16px 12px;
+    border-right: 1px solid var(--rule);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .page-body {
+    flex: 1;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+  }
+
+  .sk {
+    border-radius: 3px;
+    background: var(--rule);
+    height: 10px;
+  }
+
+  .page-sidebar .sk { height: 9px; }
+  .sk-1 { width: 70%; }
+  .sk-2 { width: 55%; }
+  .sk-3 { width: 80%; }
+  .sk-4 { width: 50%; }
+  .sk-5 { width: 65%; }
+  .sk-6 { width: 40%; }
+  .sk-h1 { height: 18px; width: 45%; }
+  .sk-p1 { width: 90%; }
+  .sk-p2 { width: 80%; }
+  .sk-p3 { width: 60%; }
+  .sk-code { height: 40px; background: color-mix(in srgb, var(--rule) 80%, var(--paper)); border-radius: 4px; width: 75%; }
+  .sk-p4 { width: 85%; }
+  .sk-p5 { width: 50%; }
+
+  /* ── Popup ── */
+  .popup {
+    position: absolute;
+    top: 32px;
+    right: -4px;
+    width: 280px;
+    background: #ffeee0; /* matches extension --bg */
+    border: 1px solid #f3dccb;
+    border-radius: 14px;
+    box-shadow: 0 8px 32px rgba(122,60,20,.18), 0 2px 8px rgba(0,0,0,.1);
+    transform-origin: top right;
+    transform: scale(0.85) translateY(-6px);
+    opacity: 0;
+    pointer-events: none;
+    transition: transform .35s cubic-bezier(.2,.8,.2,1), opacity .28s cubic-bezier(.2,.8,.2,1);
+    z-index: 10;
+    font-family: ui-rounded, -apple-system, system-ui, sans-serif;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .popup {
+      background: #1f1510;
+      border-color: #3d3631;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4);
+    }
+    :root:not([data-theme="light"]) .popup-bar {
+      background: #2b2623 !important;
+      border-color: #3d3631 !important;
+    }
+    :root:not([data-theme="light"]) .popup-tabs {
+      background: #3a2a20 !important;
+    }
+    :root:not([data-theme="light"]) .ptab-active {
+      background: #2b2623 !important;
+      color: #f5ece6 !important;
+    }
+    :root:not([data-theme="light"]) .ptab {
+      color: #b5a397 !important;
+    }
+    :root:not([data-theme="light"]) .copy-btn {
+      background: #c2410c !important;
+    }
+    :root:not([data-theme="light"]) .preview-box {
+      background: #231f1c !important;
+      border-color: #3d3631 !important;
+      color: #f5ece6 !important;
+    }
+    :root:not([data-theme="light"]) .tokens-num {
+      color: #f5ece6 !important;
+    }
+    :root:not([data-theme="light"]) .qmeta,
+    :root:not([data-theme="light"]) .qsz {
+      color: #b5a397 !important;
+    }
+    :root:not([data-theme="light"]) .popup-brand span {
+      color: #ff9a5c !important;
     }
   }
 
-  .hero-anim.ready {
+  .hero-stage.state-popup-open .popup {
+    transform: scale(1) translateY(0);
     opacity: 1;
   }
 
+  .popup-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 12px 8px;
+    background: #ffeee0;
+    border-radius: 14px 14px 0 0;
+  }
+
+  .popup-brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    color: #c2410c;
+    letter-spacing: -0.02em;
+  }
+  .popup-brand img { border-radius: 4px; }
+
+  .popup-tabs {
+    display: flex;
+    gap: 3px;
+    margin: 0 10px 8px;
+    padding: 3px;
+    background: #fff4ec;
+    border-radius: 10px;
+  }
+  .ptab {
+    flex: 1;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 5px 4px;
+    border-radius: 7px;
+    color: #7a5a44;
+    cursor: default;
+  }
+  .ptab-active {
+    background: #ffffff;
+    color: #2b1b10;
+    box-shadow: 0 1px 3px rgba(122,60,20,.12);
+  }
+
+  .popup-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 4px 12px 12px;
+    background: #ffffff;
+    border-radius: 0 0 14px 14px;
+    border-top: 1px solid #f3dccb;
+  }
+
+  /* ── Quick Copy lines ── */
+  .qline {
+    padding: 5px 0;
+    opacity: 0;
+    transform: translateY(5px);
+    /* transition used when class is added */
+    transition: opacity .3s cubic-bezier(.2,.8,.2,1), transform .3s cubic-bezier(.2,.8,.2,1);
+    font-size: 12px;
+    line-height: 1.4;
+  }
+
+  /* Each line becomes visible via state-lineN */
+  .hero-stage.state-line1 .qline-1,
+  .hero-stage.state-line2 .qline-2,
+  .hero-stage.state-line3 .qline-3,
+  .hero-stage.state-line4 .qline-4,
+  .hero-stage.state-line5 .qline-5,
+  .hero-stage.state-copied .qline-6 {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* Show Copy button early (before copied state) */
+  .hero-stage.state-line5 .qline-6 {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 10px 4px 6px;
+    border-radius: 999px;
+    font-size: 11.5px;
+    font-weight: 700;
+  }
+  .chip-yes {
+    background: #2e7d32;
+    color: #ffffff;
+  }
+  .chip-dot {
+    display: grid; place-items: center;
+    width: 15px; height: 15px;
+    border-radius: 50%;
+    background: rgba(255,255,255,.22);
+    font-size: 9px;
+    flex-shrink: 0;
+  }
+
+  .qmeta {
+    font-size: 11.5px;
+    color: #7a5a44;
+    font-weight: 500;
+  }
+  .qdot { color: #7a5a44; margin: 0 2px; }
+  .qok { color: #2e7d32; font-weight: 700; }
+  .qno { color: #666; }
+  .qexpand { cursor: default; }
+  .qbadge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 16px; height: 16px;
+    border-radius: 50%;
+    background: #fff4ec;
+    color: #c2410c;
+    font-size: 10px;
+    font-weight: 700;
+  }
+
+  .tokens-num {
+    font-size: 16px;
+    font-weight: 700;
+    color: #2b1b10;
+    margin-right: 4px;
+  }
+  .qsz { font-size: 11px; }
+
+  .preview-box {
+    width: 100%;
+    background: #fff8f3;
+    border: 1px solid #f3dccb;
+    border-radius: 8px;
+    padding: 7px 9px;
+    font-family: ui-monospace, monospace;
+    font-size: 10px;
+    color: #2b1b10;
+    white-space: pre;
+    overflow: hidden;
+    height: 48px;
+  }
+
+  .preview-text {
+    display: block;
+    opacity: 0;
+    animation: none;
+  }
+
+  .hero-stage.state-line5 .preview-text {
+    animation: typeIn 0.6s steps(14) .05s forwards;
+  }
+
+  @keyframes typeIn {
+    from { opacity: 1; width: 0; overflow: hidden; white-space: nowrap; }
+    to   { opacity: 1; width: 100%; overflow: hidden; white-space: nowrap; }
+  }
+
+  .copy-btn {
+    width: 100%;
+    padding: 10px;
+    border: none;
+    border-radius: 10px;
+    background: #c2410c;
+    color: #fff;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background .2s;
+  }
+
+  .hero-stage.state-copied .copy-btn {
+    background: #2e7d32;
+  }
+  .hero-stage.state-copied .copy-btn .copy-label::before {
+    content: 'Copied ✓';
+  }
+  .hero-stage:not(.state-copied) .copy-btn .copy-label::before {
+    content: 'Copy';
+  }
+
+  /* ── Cursor ── */
+  .cursor {
+    position: absolute;
+    /* start: near bottom-right of page (away from popup) */
+    top: 220px;
+    right: 60px;
+    pointer-events: none;
+    z-index: 20;
+    transition: top .5s cubic-bezier(.4,.0,.2,1), right .5s cubic-bezier(.4,.0,.2,1),
+                opacity .3s ease;
+    opacity: 0;
+  }
+
+  /* Cursor appears when popup opens */
+  .hero-stage.state-popup-open .cursor {
+    opacity: 1;
+  }
+
+  /* Cursor moves toward copy button */
+  .hero-stage.state-cursor-copy .cursor {
+    top: 368px;
+    right: 72px;
+  }
+
+  /* Cursor presses = slight shrink */
+  .hero-stage.state-copied .cursor {
+    top: 368px;
+    right: 72px;
+    transform: scale(.85);
+    transition: transform .1s ease, top .5s cubic-bezier(.4,.0,.2,1), right .5s cubic-bezier(.4,.0,.2,1);
+  }
+
+  /* ── Markdown sheet flyout ── */
+  .md-sheet {
+    position: absolute;
+    top: 260px;
+    right: 10px;
+    width: 140px;
+    background: var(--sheet);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 10px 12px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.1);
+    opacity: 0;
+    transform: scale(.7) translateY(10px);
+    pointer-events: none;
+    transition: opacity .3s cubic-bezier(.2,.8,.2,1), transform .4s cubic-bezier(.2,.8,.2,1);
+    z-index: 15;
+  }
+
+  .hero-stage.state-flyout .md-sheet {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+    animation: sheetFly .9s cubic-bezier(.2,.8,.2,1) .05s forwards;
+  }
+
+  @keyframes sheetFly {
+    0%   { opacity: 1; transform: scale(1) translate(0, 0); }
+    100% { opacity: 0; transform: scale(.75) translate(120px, 80px); }
+  }
+
+  .md-line {
+    height: 7px;
+    border-radius: 3px;
+    background: var(--rule);
+    margin-bottom: 5px;
+  }
+  .md-h { background: var(--ink); width: 70%; height: 8px; }
+  .md-p { width: 100%; }
+  .md-p-short { width: 60%; }
+  .md-code { width: 80%; background: color-mix(in srgb, var(--rule) 70%, var(--paper)); height: 16px; border-radius: 4px; }
+
+  /* ── Agent chip ── */
+  .agent-chip {
+    position: absolute;
+    bottom: -56px;
+    right: 16px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border: 1.5px solid var(--rule);
+    border-radius: 999px;
+    background: var(--sheet);
+    font: 500 12px/1 var(--font-body);
+    color: var(--ink-2);
+    box-shadow: 0 2px 8px rgba(0,0,0,.06);
+    transition: border-color .3s ease;
+  }
+
+  .agent-chip svg { color: var(--accent); flex-shrink: 0; }
+
+  .agent-pasted {
+    font-size: 11px;
+    font-weight: 700;
+    color: #2e7d32;
+    opacity: 0;
+    transform: translateX(-6px);
+    transition: opacity .3s ease .1s, transform .3s cubic-bezier(.2,.8,.2,1) .1s;
+  }
+
+  .hero-stage.state-pasted .agent-chip {
+    border-color: #2e7d32;
+  }
+
+  .hero-stage.state-pasted .agent-pasted {
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  /* ── Reset fade-out ── */
+  .hero-stage.state-reset .browser,
+  .hero-stage.state-reset .md-sheet,
+  .hero-stage.state-reset .agent-chip {
+    opacity: 0;
+    transition: opacity .5s ease;
+  }
+
+  .hero-stage.state-reset .popup {
+    opacity: 0;
+    transform: scale(0.9) translateY(-4px);
+    transition: opacity .4s ease, transform .4s ease;
+  }
+
+  /* Restore visibility after reset */
+  .hero-stage:not(.state-reset) .browser,
+  .hero-stage:not(.state-reset) .agent-chip {
+    opacity: 1;
+    transition: opacity .3s ease;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 600px) {
+    .page-sidebar { display: none; }
+    .popup { width: 240px; right: -2px; }
+    .browser-url { font-size: 9px; }
+    .md-sheet { display: none; }
+    .cursor { display: none; }
+    .agent-chip { right: 4px; }
+  }
+
+  /* ── Reduced motion: show final Copied state statically ── */
   @media (prefers-reduced-motion: reduce) {
-    .hero-anim {
-      transition: none;
+    .hero-stage * {
+      transition: none !important;
+      animation: none !important;
     }
+
+    .hero-stage.state-badge .badge,
+    .hero-stage .badge { opacity: 1; transform: scale(1); }
+
+    .hero-stage .popup {
+      transform: scale(1) translateY(0);
+      opacity: 1;
+    }
+
+    .hero-stage .qline { opacity: 1; transform: none; }
+    .hero-stage .copy-btn { background: #2e7d32; }
+    .hero-stage .copy-label::before { content: 'Copied ✓'; }
+    .hero-stage .preview-text { opacity: 1; }
+    .hero-stage .agent-pasted { opacity: 1; transform: none; }
+    .hero-stage .agent-chip { border-color: #2e7d32; }
+    .hero-stage .md-sheet { display: none; }
+    .hero-stage .cursor { display: none; }
   }
 </style>

@@ -13,24 +13,49 @@ const agents = [
   ['windsurf', 'Windsurf'],
   ['googlegemini', 'Gemini CLI'],
 ];
+
+const steps = [
+  { n: '01', label: 'Open a docs page' },
+  { n: '02', label: 'Click scoop.md' },
+  { n: '03', label: 'Paste into your agent' },
+];
 ---
 
 <Base>
   <section class="hero wrap" aria-labelledby="hero-title">
     <h1 id="hero-title">Scoop <span class="mark">any</span> doc.</h1>
-    <p class="lede">One click copies any docs page as Markdown for your coding agent.</p>
+    <p class="lede">One click on any docs page copies agent-ready Markdown.</p>
 
     <div class="cta">
       <a class="btn" href={CHROME_STORE_URL ?? GITHUB_URL} data-cta={CHROME_STORE_URL ? 'chrome_store' : 'github_coming_soon'}>
         {CHROME_STORE_URL ? 'Add to Chrome' : 'Coming soon to Chrome'} <span aria-hidden="true">→</span>
       </a>
-      <a class="quiet" href="/library" data-cta="library">Browse the library</a>
-      <a class="quiet" href={GITHUB_URL} data-cta="github">Open source on GitHub</a>
+      <div class="quiet-links">
+        <a class="quiet" href="/library" data-cta="library">Browse library</a>
+        <span class="quiet-sep" aria-hidden="true">·</span>
+        <a class="quiet" href={GITHUB_URL} data-cta="github">GitHub</a>
+      </div>
     </div>
 
     <HeroAnimation />
+  </section>
 
-    <p class="paste muted">Paste into</p>
+  <!-- How it works: three-step strip -->
+  <section class="steps-section wrap reveal-section" aria-labelledby="steps-title">
+    <p class="eyebrow" id="steps-title">## how it works</p>
+    <ol class="steps">
+      {steps.map(({ n, label }) => (
+        <li class="step">
+          <span class="step-n" aria-hidden="true">{n}</span>
+          <span class="step-label">{label}</span>
+        </li>
+      ))}
+    </ol>
+  </section>
+
+  <!-- Paste into -->
+  <section class="agents-section wrap reveal-section" aria-labelledby="agents-title">
+    <p class="eyebrow" id="agents-title">## paste into</p>
     <ul class="agents">
       {
         agents.map(([logo, name]) => (
@@ -44,13 +69,45 @@ const agents = [
   </section>
 </Base>
 
+<script>
+  // Scroll-reveal: sections below-the-fold enter with a subtle slide-up.
+  // Sections already in-viewport on first paint are made visible immediately.
+  const els = document.querySelectorAll<HTMLElement>('.reveal-section');
+  if (els.length) {
+    const vh = window.innerHeight;
+
+    const io = new IntersectionObserver(
+      (entries) => entries.forEach((e) => {
+        if (e.isIntersecting) {
+          (e.target as HTMLElement).classList.add('visible');
+          io.unobserve(e.target);
+        }
+      }),
+      { threshold: 0.08 }
+    );
+
+    els.forEach((el) => {
+      const rect = el.getBoundingClientRect();
+      if (rect.top < vh) {
+        // Already in viewport on load: show immediately, no transition
+        el.classList.add('visible');
+      } else {
+        // Below fold: enable hidden state + observe
+        el.setAttribute('data-reveal', 'true');
+        io.observe(el);
+      }
+    });
+  }
+</script>
+
 <style>
+  /* ── Hero ── */
   .hero {
     display: grid;
     justify-items: center;
     text-align: center;
     padding-top: clamp(4rem, 14vh, 9rem);
-    padding-bottom: clamp(4rem, 14vh, 9rem);
+    padding-bottom: clamp(2rem, 6vh, 4rem);
   }
 
   h1 {
@@ -77,22 +134,67 @@ const agents = [
     margin: 2.25rem 0 2.5rem;
   }
 
+  .quiet-links {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
   .quiet {
     color: var(--ink-2);
     font-weight: 500;
   }
 
-  .paste {
-    font-size: 0.8125rem;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    margin: 2.5rem 0 0.75rem;
+  .quiet-sep {
+    color: var(--muted);
+    font-size: 0.75rem;
+  }
+
+  /* ── Steps section ── */
+  .steps-section {
+    padding-top: clamp(2rem, 5vh, 4rem);
+    padding-bottom: clamp(2rem, 5vh, 4rem);
+    border-top: 1px solid var(--rule);
+  }
+
+  .steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .step {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex: 1;
+    min-width: 160px;
+  }
+
+  .step-n {
+    font: 600 0.78rem/1 var(--font-mono);
+    color: var(--accent);
+    flex-shrink: 0;
+  }
+
+  .step-label {
+    font: 500 1rem/1.3 var(--font-body);
+    color: var(--ink);
+  }
+
+  /* ── Agents section ── */
+  .agents-section {
+    padding-top: clamp(2rem, 5vh, 4rem);
+    padding-bottom: clamp(3rem, 8vh, 6rem);
+    border-top: 1px solid var(--rule);
   }
 
   .agents {
     display: flex;
     flex-wrap: wrap;
-    justify-content: center;
     gap: 0.5rem;
     max-width: 52rem;
     margin: 0;
@@ -120,5 +222,26 @@ const agents = [
     background: currentColor;
     -webkit-mask: var(--logo) center / contain no-repeat;
     mask: var(--logo) center / contain no-repeat;
+  }
+
+  /* ── Scroll-reveal entrance ── */
+  /* Only applies once JS marks the section with data-reveal */
+  .reveal-section[data-reveal] {
+    opacity: 0;
+    transform: translateY(22px);
+    transition: opacity .6s cubic-bezier(.2,.8,.2,1), transform .6s cubic-bezier(.2,.8,.2,1);
+  }
+
+  .reveal-section[data-reveal].visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .reveal-section[data-reveal] {
+      opacity: 1;
+      transform: none;
+      transition: none;
+    }
   }
 </style>
