@@ -62,13 +62,42 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   guard: fetching them would send an `Authorization` header (§10).
 - **Hostnames with a trailing dot** (`localhost.`) are treated as the same host
   by the SSRF guard.
-- **Kept from the reference where the spec is silent:** `title` truncated to 300
-  characters; related-link `text` truncated to 120 (not rejected); a `page-html`
+- **Kept from the reference where the spec is silent:** a `page-html`
   source over 2 MB is `source_unreachable`; reports on unknown skills are 404
   and reports on removed skills are accepted; admin takedown of an unknown skill
   is 404, and of an already removed skill is 200; `/v1/sites/:site` is 404 only
   for sites never seen (a site whose skills were all taken down returns
   `best: null, recent: []`).
+- **Server-written skill text** (review finding M5 of the first backend
+  review, option (a); rules in BACKEND.md §6, "Server-written text"). The
+  skill `title`, section `label`s and related-link `text` were client-chosen
+  and unverified, yet reach agents as headings and lists, so they were a way
+  to put instructions in a skill that passed verification. Now:
+  - The fields are still accepted (older extensions send them) and dropped at
+    validation; `label` is no longer required.
+  - Labels use the extension's own wording (`This page: …`, `Site
+    documentation index (llms.txt)`, `Full documentation (llms-full.txt)`),
+    so packages read the same and the extension's `This page:` → `Another
+    page:` relabelling keeps working with no extension change.
+  - Page titles come from what verification already read: the verified
+    Markdown's first H1 (else first heading), or the fetched HTML's `<title>`
+    in `<head>` (else first `<h1>`), via the same entity-decoding `htmlToText`.
+    `<title>` is only looked for in `<head>` because inline SVG icons carry
+    `<title>` elements of their own. The scans are `indexOf` only, linear on
+    crafted input.
+  - Related-link text is the humanised last path segment rather than dropped:
+    the extension prints `[text](url)` and falls back to the bare URL, and a
+    readable name (`Get started`) is more useful to an agent than a URL list.
+    It is derived from the URL alone, so it can't carry anything the URL
+    doesn't.
+  - All three have `\p{Cc}`/`\p{Cf}` removed, whitespace collapsed and are
+    capped at 300 / 200 / 120 characters.
+  - Skills stored before this change keep their client-sent text; the
+    fingerprint (and so dedupe) doesn't involve any of these fields, so a new
+    share of the same sections returns the old skill unchanged. A one-off
+    rewrite of existing rows is possible if staging data matters: titles
+    and labels from the stored sections' Markdown H1s (the stored page-html
+    content is the page converted to Markdown), link text from the URLs.
 - **`/v1/sites` cursor** is the offset as a decimal string (opaque to clients,
   same as the reference). Fine at this scale; switch to a keyset cursor on
   `(last_worked_at, site)` if the list grows large.

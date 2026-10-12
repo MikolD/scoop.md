@@ -2,6 +2,8 @@
 // serves to an anonymous visitor. This is what keeps injected instructions and
 // private material out of the shared library.
 
+import { cleanText, markdownTitle, MAX_TITLE } from './skilltext.js';
+
 export const FETCH_CAP = 2_000_000;
 export const HTML_THRESHOLD = 0.85;
 const SHINGLE = 5;
@@ -280,6 +282,24 @@ export function shingleHashes(text, seed) {
   return out;
 }
 
+// The page's <title> (looked for in <head> only), else its first <h1>, as
+// plain text. indexOf scans only, so crafted input stays linear.
+export function htmlTitle(html) {
+  const lower = html.toLowerCase();
+  const head = lower.indexOf('</head');
+  for (const [tag, end] of [['title', head < 0 ? lower.length : head], ['h1', lower.length]]) {
+    let at = lower.indexOf(`<${tag}`);
+    while (at !== -1 && at < end && !/[\s>/]/.test(lower[at + tag.length + 1] ?? '')) at = lower.indexOf(`<${tag}`, at + 1);
+    if (at === -1 || at >= end) continue;
+    const open = lower.indexOf('>', at);
+    const close = open === -1 ? -1 : lower.indexOf(`</${tag}`, open);
+    if (close === -1) continue;
+    const text = cleanText(htmlToText(html.slice(open + 1, close)), MAX_TITLE);
+    if (text) return text;
+  }
+  return '';
+}
+
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown, pageHtml) {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -290,6 +310,8 @@ export function containment(sectionMarkdown, pageHtml) {
   return { ratio: hits / mine.length, count: mine.length };
 }
 
+// Resolves to the title read from the verified source (HTML <title>/<h1> for
+// page-html, the Markdown H1 for page-md, '' otherwise).
 export async function verifySection(section, site, index, opts = {}) {
   const where = `Section ${index + 1} (${section.url})`;
   if (siteOf(section.url) !== site) throw new VerifyError('site_mismatch', `${where} is not on ${site}`);
@@ -303,7 +325,7 @@ export async function verifySection(section, site, index, opts = {}) {
     if (ratio < needed) {
       throw new VerifyError('source_mismatch', `${where} matches ${Math.round(ratio * 100)}% of the live page; ${Math.round(needed * 100)}% required`);
     }
-    return;
+    return htmlTitle(src.text);
   }
 
   if (isHtml(src.contentType, src.text)) throw new VerifyError('source_unreachable', `${where} serves HTML, not a text file`);
@@ -311,9 +333,10 @@ export async function verifySection(section, site, index, opts = {}) {
   if (section.content === null) {
     if (section.kind !== 'llms-full') throw new VerifyError('invalid_request', `${where}: only llms-full sections may omit content`, 400);
     if (!src.over) throw new VerifyError('source_mismatch', `${where} is small enough to include; send its content`);
-    return;
+    return '';
   }
   if (src.over || normalizeText(src.text) !== normalizeText(section.content)) {
     throw new VerifyError('source_mismatch', `${where} does not match the live file`);
   }
+  return section.kind === 'page-md' ? markdownTitle(section.content) : '';
 }

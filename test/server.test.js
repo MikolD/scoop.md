@@ -92,3 +92,27 @@ test('ordered-list numbers are not words, and shingle hashes are seeded', () => 
   assert.deepEqual(shingleHashes(text, 3), shingleHashes(text, 3));
   assert.notDeepEqual(shingleHashes(text, 3), shingleHashes(text, 4));
 });
+
+test('reference server writes skill text the same way as the Worker', async () => {
+  const { withServerText, pathTitle, markdownTitle, cleanText } = await import('../server/skilltext.js');
+  const { htmlTitle } = await import('../server/verify.js');
+  assert.equal(htmlTitle('<html><head><title>Webhooks &amp; events</title></head><body><svg><title>x</title></svg></body></html>'), 'Webhooks & events');
+  assert.equal(htmlTitle('<html><head></head><body><svg><title>Logo</title></svg><h1>Real <code>one</code></h1></body></html>'), 'Real one');
+  assert.equal(markdownTitle('```\n# no\n```\n# Check **webhook** signatures'), 'Check webhook signatures');
+  assert.equal(pathTitle('https://developers.cloudflare.com/d1/get-started/index.md'), 'Get started');
+  assert.equal(pathTitle('https://ex.com/'), 'ex.com');
+  assert.equal(cleanText('Safe‮ title​', 100), 'Safe title');
+  const s = withServerText({
+    site: 'ex.com',
+    pageUrl: 'https://ex.com/docs/webhooks',
+    title: '',
+    sections: [
+      { kind: 'llms', label: '', url: 'https://ex.com/llms.txt', content: 'x', bytes: null },
+      { kind: 'page-md', label: '', url: 'https://ex.com/docs/webhooks.md', content: '# W', bytes: null },
+    ],
+    relatedLinks: [{ url: 'https://ex.com/docs/auth-keys', text: '' }],
+  }, ['', 'Receive webhooks']);
+  assert.equal(s.title, 'Receive webhooks');
+  assert.deepEqual(s.sections.map((x) => x.label), ['Site documentation index (llms.txt)', 'This page: Receive webhooks']);
+  assert.deepEqual(s.relatedLinks, [{ url: 'https://ex.com/docs/auth-keys', text: 'Auth keys' }]);
+});

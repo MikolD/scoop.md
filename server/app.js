@@ -4,6 +4,7 @@
 import { createServer } from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 import { VerifyError, normalizeSite, siteOf, assertFetchable, verifySection } from './verify.js';
+import { withServerText } from './skilltext.js';
 import { summary, publicSkill } from './store.js';
 
 const MAX_BODY = 6_000_000;
@@ -65,7 +66,8 @@ function validateSkill(body, allowLocalhost) {
   const pageUrl = str(body.pageUrl, 'pageUrl', 2048);
   assertFetchable(pageUrl, { allowLocalhost });
   if (siteOf(pageUrl) !== site) throw fail('site_mismatch', `pageUrl is not on ${site}`);
-  const title = body.title === undefined ? '' : String(body.title).slice(0, 300);
+  // title, section labels and related-link text are accepted for compatibility
+  // and discarded: the server writes its own after verification (skilltext.js).
 
   if (!Array.isArray(body.sections) || body.sections.length < 1 || body.sections.length > 6) throw bad('sections must have 1–6 items');
   const sections = body.sections.map((s, i) => {
@@ -76,7 +78,7 @@ function validateSkill(body, allowLocalhost) {
     if (content !== null && typeof content !== 'string') throw bad(`sections[${i}].content must be a string or null`);
     if (content !== null && content.length > MAX_SECTION) throw fail('too_large', `sections[${i}].content is over ${MAX_SECTION} characters`, 413);
     if (content === null && !(Number.isInteger(s.bytes) && s.bytes > 0)) throw bad(`sections[${i}].bytes is required when content is null`);
-    return { kind: s.kind, label: str(s.label, `sections[${i}].label`, 200), url, content, bytes: content === null ? s.bytes : null };
+    return { kind: s.kind, label: '', url, content, bytes: content === null ? s.bytes : null };
   });
 
   const links = body.relatedLinks ?? [];
@@ -87,10 +89,10 @@ function validateSkill(body, allowLocalhost) {
     try { u = new URL(url); } catch { throw bad(`relatedLinks[${i}].url is not a URL`); }
     if (!/^https?:$/.test(u.protocol)) throw bad(`relatedLinks[${i}].url must be http(s)`);
     if (siteOf(url) !== site) throw fail('site_mismatch', `relatedLinks[${i}] is not on ${site}`);
-    return { url, text: String(l.text ?? '').slice(0, 120) };
+    return { url, text: '' };
   });
 
-  return { site, pageUrl, title, sections, relatedLinks };
+  return { site, pageUrl, title: '', sections, relatedLinks };
 }
 
 function adminOk(req, token) {
@@ -126,8 +128,8 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
       if (req.method === 'POST' && path === '/v1/skills') {
         const install = installId(req);
         const skill = validateSkill(await readJson(req), allowLocalhost);
-        await Promise.all(skill.sections.map((s, i) => verifySection(s, skill.site, i, { fetchImpl, allowLocalhost })));
-        const { skill: saved, duplicate } = await store.add({ ...skill, installId: install });
+        const titles = await Promise.all(skill.sections.map((s, i) => verifySection(s, skill.site, i, { fetchImpl, allowLocalhost })));
+        const { skill: saved, duplicate } = await store.add({ ...withServerText(skill, titles), installId: install });
         return send(req, res, duplicate ? 200 : 201, { id: saved.id, status: 'verified', duplicate });
       }
 

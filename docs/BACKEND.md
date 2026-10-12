@@ -46,7 +46,7 @@ Check Cloudflare's current documentation for exact `wrangler` config syntax (D1,
 | Field | Type | Rules |
 |---|---|---|
 | `kind` | enum | `page-md` (the page's Markdown twin), `llms` (llms.txt), `llms-full` (llms-full.txt), `page-html` (extracted from the page's HTML by the extension) |
-| `label` | string | 1–200 chars. Shown to the agent as the section heading. |
+| `label` | string | Shown to the agent as the section heading. **Written by the server** (§6, "Server-written text"); a label in the request is accepted for compatibility and ignored. At most 200 chars. |
 | `url` | string | Absolute `https://` URL (or `http://` only when `ALLOW_LOCALHOST=1`). Hostname must equal the skill's `site` after the same normalisation. |
 | `content` | string or null | The text. `null` only for `llms-full` sections too large to download (> 2,000,000 bytes); then `bytes` says how large (a lower bound is fine). |
 | `bytes` | integer or null | Required when `content` is null, otherwise null. |
@@ -57,7 +57,7 @@ Check Cloudflare's current documentation for exact `wrangler` config syntax (D1,
 { "url": "https://tailwindcss.com/docs/editor-setup", "text": "Editor setup" }
 ```
 
-Same host as the skill's site, `http(s)` only, `text` ≤ 120 chars, at most 100 per skill.
+Same host as the skill's site, `http(s)` only, at most 100 per skill. `text` is **written by the server** from the URL's last path segment (§6); text in the request is ignored. At most 120 chars.
 
 ### Skill (as returned by the API)
 
@@ -138,9 +138,11 @@ Request:
 }
 ```
 
+`title`, each section's `label` and each related link's `text` may be sent but are ignored: the server writes them (§6, "Server-written text").
+
 Behaviour:
 1. Validate shape and limits (§8). `pageUrl` host must equal `site`.
-2. **Verify every section against its live source** (§6). All sections must pass, or reject the whole skill.
+2. **Verify every section against its live source** (§6). All sections must pass, or reject the whole skill. Then replace the title, labels and link text with server-written ones (§6).
 3. **Deduplicate**: compute a fingerprint = SHA-256 of the canonical JSON of `[{kind, url, sha256(content)}]` in order. If a non-removed skill with the same site and fingerprint exists, return it with `200 { "id": "...", "status": "verified", "duplicate": true }` instead of creating another.
 4. Store metadata in D1 and `{ sections, relatedLinks }` in R2 at `skills/<id>.json`.
 5. Respond `201 { "id": "...", "status": "verified", "duplicate": false }`.
@@ -196,6 +198,20 @@ For each section, fetch `url` with no cookies or auth headers, following at most
 Anything else → `422 source_mismatch` naming the failing section. Unreachable, non-2xx or timeout → `422 source_unreachable`.
 
 The 85% threshold allows for the extension's HTML-to-Markdown conversion differing slightly from yours. Fixtures in the contract tests pin this down.
+
+### Server-written text
+
+Verification proves the section *content*, but a skill also carries text the client could choose freely: the skill `title`, each section `label` and each related link's `text`. All three reach agents (as the package's headings, Sources list and related-pages list), so the server never stores the client's. After verification it writes them:
+
+| Field | Server-written value |
+|---|---|
+| Section `label`, `page-md` / `page-html` | `This page: <title>`, where `<title>` is the first Markdown H1 of the verified content (else its first heading) for `page-md`, and the fetched page's `<title>` (from `<head>`), else its first `<h1>`, for `page-html`. If neither has one, the humanised last path segment of the section URL (below). |
+| Section `label`, `llms` | `Site documentation index (llms.txt)` |
+| Section `label`, `llms-full` | `Full documentation (llms-full.txt)` |
+| Skill `title` | The title of the first `page-md` or `page-html` section that has one, else the humanised last path segment of `pageUrl`. |
+| Related link `text` | The humanised last path segment of the link's URL: percent-decoded, a trailing `.md`/`.mdx`/`.html`/`.txt` dropped, an `index` segment replaced by the one before it, `-`, `_` and `+` turned into spaces, first letter capitalised (`/d1/get-started/index.md` → `Get started`); the hostname for the site root. |
+
+Every value has control and format characters (Unicode `Cc`, `Cf`: zero-width, bidi overrides) replaced by spaces, whitespace collapsed to single spaces, and is cut to 300 (title), 200 (label) or 120 (link text) characters. The `This page: ` prefix is what the extension uses to relabel a shared skill's page as `Another page: ` when the user is on a different page.
 
 ### Fetch safety (SSRF)
 

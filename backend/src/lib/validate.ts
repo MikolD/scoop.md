@@ -35,7 +35,8 @@ export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill 
   const pageUrl = str(body.pageUrl, 'pageUrl', 2048);
   assertFetchable(pageUrl, { allowLocalhost });
   if (siteOf(pageUrl) !== site) throw new ApiError('site_mismatch', `pageUrl is not on ${site}`);
-  const title = body.title === undefined || body.title === null ? '' : String(body.title).slice(0, 300);
+  // title, section labels and related-link text are accepted for compatibility
+  // and discarded: the server writes its own after verification (skilltext.ts).
 
   if (!Array.isArray(body.sections) || body.sections.length < 1 || body.sections.length > MAX_SECTIONS) {
     throw bad(`sections must have 1–${MAX_SECTIONS} items`);
@@ -53,7 +54,7 @@ export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill 
       if (kind !== 'llms-full') throw bad(`sections[${i}]: only llms-full sections may omit content`);
       if (!(Number.isInteger(s.bytes) && (s.bytes as number) > 0)) throw bad(`sections[${i}].bytes is required when content is null`);
     }
-    return { kind, label: str(s.label, `sections[${i}].label`, 200), url, content, bytes: content === null ? (s.bytes as number) : null };
+    return { kind, label: '', url, content, bytes: content === null ? (s.bytes as number) : null };
   });
 
   const links = body.relatedLinks ?? [];
@@ -64,10 +65,10 @@ export function validateSkill(body: unknown, allowLocalhost: boolean): NewSkill 
     try { u = new URL(url); } catch { throw bad(`relatedLinks[${i}].url is not a URL`); }
     if (!/^https?:$/.test(u.protocol)) throw bad(`relatedLinks[${i}].url must be http(s)`);
     if (siteOf(url) !== site) throw new ApiError('site_mismatch', `relatedLinks[${i}] is not on ${site}`);
-    return { url, text: String((l as Json).text ?? '').slice(0, 120) };
+    return { url, text: '' };
   });
 
-  return { site, pageUrl, title, sections, relatedLinks };
+  return { site, pageUrl, title: '', sections, relatedLinks };
 }
 
 export function validateFeedback(body: unknown): boolean {

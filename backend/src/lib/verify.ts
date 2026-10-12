@@ -5,6 +5,7 @@
 
 import { decodeHTML } from 'entities/decode';
 import { ApiError } from './errors.ts';
+import { cleanText, markdownTitle, MAX_TITLE } from './skilltext.ts';
 import { assertFetchable, normalizeSite, siteOf } from './ssrf.ts';
 import type { Section } from './types.ts';
 
@@ -239,6 +240,25 @@ export function shingleHashes(text: string, seed: number): number[] {
   return out;
 }
 
+// The page's <title>, else its first <h1>, as plain text. indexOf scans only,
+// so a crafted 2 MB page stays linear. <title> is looked for in <head> alone,
+// since SVG icons in the body carry <title> elements of their own.
+export function htmlTitle(html: string): string {
+  const lower = html.toLowerCase();
+  const head = lower.indexOf('</head');
+  for (const [tag, end] of [['title', head < 0 ? lower.length : head], ['h1', lower.length]] as const) {
+    let at = lower.indexOf(`<${tag}`);
+    while (at !== -1 && at < end && !/[\s>/]/.test(lower[at + tag.length + 1] ?? '')) at = lower.indexOf(`<${tag}`, at + 1);
+    if (at === -1 || at >= end) continue;
+    const open = lower.indexOf('>', at);
+    const close = open === -1 ? -1 : lower.indexOf(`</${tag}`, open);
+    if (close === -1) continue;
+    const text = cleanText(htmlToText(html.slice(open + 1, close)), MAX_TITLE);
+    if (text) return text;
+  }
+  return '';
+}
+
 // Share of the section's 5-word shingles that also occur in the page.
 export function containment(sectionMarkdown: string, pageHtml: string): { ratio: number; count: number } {
   const seed = crypto.getRandomValues(new Uint32Array(1))[0];
@@ -249,7 +269,10 @@ export function containment(sectionMarkdown: string, pageHtml: string): { ratio:
   return { ratio: hits / mine.length, count: mine.length };
 }
 
-export async function verifySection(section: Section, site: string, index: number, opts: VerifyOptions = {}): Promise<void> {
+// Resolves to the title read from the verified source (the HTML <title>/<h1>
+// for page-html, the Markdown H1 for page-md, '' otherwise), which the server
+// uses instead of any client-sent label (skilltext.ts).
+export async function verifySection(section: Section, site: string, index: number, opts: VerifyOptions = {}): Promise<string> {
   const where = `Section ${index + 1} (${section.url})`;
   if (siteOf(section.url) !== site) throw new ApiError('site_mismatch', `${where} is not on ${site}`);
   const src = await fetchSource(section.url, site, opts);
@@ -262,7 +285,7 @@ export async function verifySection(section: Section, site: string, index: numbe
     if (ratio < needed) {
       throw new ApiError('source_mismatch', `${where} matches ${Math.round(ratio * 100)}% of the live page; ${Math.round(needed * 100)}% required`);
     }
-    return;
+    return htmlTitle(src.text);
   }
 
   if (isHtml(src.contentType, src.text)) throw new ApiError('source_unreachable', `${where} serves HTML, not a text file`);
@@ -270,19 +293,25 @@ export async function verifySection(section: Section, site: string, index: numbe
   if (section.content === null) {
     if (section.kind !== 'llms-full') throw new ApiError('invalid_request', `${where}: only llms-full sections may omit content`, 400);
     if (!src.over) throw new ApiError('source_mismatch', `${where} is small enough to include; send its content`);
-    return;
+    return '';
   }
   if (src.over || normalizeText(src.text) !== normalizeText(section.content)) {
     throw new ApiError('source_mismatch', `${where} does not match the live file`);
   }
+  return section.kind === 'page-md' ? markdownTitle(section.content) : '';
 }
 
 // At most 6 sections per request (validation enforces the count). Text sections
 // are verified concurrently; page-html sections one at a time, since each holds
-// a whole page and its shingle set in memory.
-export async function verifyAll(sections: Section[], site: string, opts: VerifyOptions = {}): Promise<void> {
+// a whole page and its shingle set in memory. Resolves to each section's title.
+export async function verifyAll(sections: Section[], site: string, opts: VerifyOptions = {}): Promise<string[]> {
+  const titles: string[] = sections.map(() => '');
   const htmlOneByOne = async () => {
-    for (const [i, s] of sections.entries()) if (s.kind === 'page-html') await verifySection(s, site, i, opts);
+    for (const [i, s] of sections.entries()) if (s.kind === 'page-html') titles[i] = await verifySection(s, site, i, opts);
   };
-  await Promise.all([...sections.map((s, i) => (s.kind === 'page-html' ? null : verifySection(s, site, i, opts))), htmlOneByOne()]);
+  await Promise.all([
+    ...sections.map(async (s, i) => { if (s.kind !== 'page-html') titles[i] = await verifySection(s, site, i, opts); }),
+    htmlOneByOne(),
+  ]);
+  return titles;
 }

@@ -99,7 +99,10 @@ test('first scoop copies, shares a verified page-html section, and takes a vote'
 test('next scoop on the site uses the shared skill with the current page first', async () => {
   const { $, clipboard } = await openPopup(`${docsUrl}/docs/other`);
   assert.match($('summary').textContent, /KB · shared, worked for 1 person$/);
-  assert.ok(clipboard.text.indexOf('Get started with Gadgets') < clipboard.text.indexOf('Get started with Widgets'));
+  // Compare the page bodies: the Sources list now names the shared page by its
+  // server-written label ("Another page: Get started with Widgets").
+  assert.ok(clipboard.text.indexOf('# Get started with Gadgets') < clipboard.text.indexOf('# Get started with Widgets'));
+  assert.match(clipboard.text, /^- Another page: Get started with Widgets: /m);
   assert.equal($('rebuild').hidden, false);
   assert.equal($('intro').hidden, true, 'intro only shows until dismissed');
 

@@ -15,6 +15,7 @@ import { newId, safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
+import { withServerText } from '../lib/skilltext.ts';
 import { fetchSource, verifyAll } from '../lib/verify.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
@@ -213,8 +214,9 @@ const routes: Route[] = [
         { bucket: 'share:install', subject: install, limit: LIMITS.shareInstall },
         { bucket: 'share:ip', subject: ipSubject(ip), limit: LIMITS.shareIp },
       ]);
-      await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
-      const { id, duplicate } = await store.add(skill, install);
+      const titles = await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
+      // Labels, title and link text are written by the server, never taken from the client.
+      const { id, duplicate } = await store.add(withServerText(skill, titles), install);
       return json(duplicate ? 200 : 201, { id, status: 'verified', duplicate });
     },
   },
