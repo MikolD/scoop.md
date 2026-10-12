@@ -64,10 +64,14 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
     const flush = (name: string) =>
       step.do(name, NET, () => store().flushIndex(p.site, (batch) => send(env, batch)));
 
+    // Set when the gate could not decide: the run fails, the site's status stays.
+    let undecided = false;
     try {
       await step.do('start', DB, async () => {
         await store().updateRun(p.runId, { status: 'running' });
         await store().beginCrawl(p.site);
+        // The last verdict no longer describes why this site is crawled.
+        if (p.force) await store().forceGate(p.runId, p.site);
       });
 
       const robots: RobotsFile = await step.do('robots', NET, () => fetchRobots(origin, { limiter: new HostLimiter(), allowLocalhost: local }));
@@ -88,7 +92,10 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
             throw e;
           }
         });
-        if ('undecided' in gate) throw new Error(`devtool gate: ${gate.undecided}`);
+        if ('undecided' in gate) {
+          undecided = true;
+          throw new Error(`devtool gate: ${gate.undecided}`);
+        }
         // Signal counts stay in the step output; the run and profile get the verdict.
         await step.do('gate-record', DB, () => store().recordGate(p.runId, p.site, { ...gate, signals: undefined }));
         if (gate.decision === 'reject') return { runId: p.runId, rejected: true, category: gate.category, reason: gate.reason };
@@ -232,7 +239,8 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
         // Every sandbox this run started, whether or not its handle survived.
         if (env.E2B_API_KEY) await e2b().stopTagged(p.runId).catch(() => {});
         await store().updateRun(p.runId, { status: 'failed', finished_at: new Date().toISOString(), error: message.slice(0, 500) });
-        await store().failCrawl(p.site);
+        if (undecided) await store().endCrawl(p.site);
+        else await store().failCrawl(p.site);
         await cleanup(env, p.runId).catch(() => {});
       });
       throw e;
@@ -249,7 +257,7 @@ function gateAi(env: Env, site: string) {
     apiKey,
     capReached: () => capsReached({ db, dailyCapUsd, totalCapUsd }, site, new Date()),
     addCost: (usd: number) => addCost(db, site, new Date(), usd),
-    signal: AbortSignal.timeout(60_000),
+    timeoutMs: 60_000,
   };
 }
 

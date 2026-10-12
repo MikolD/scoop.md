@@ -99,7 +99,7 @@ test('CrawlSite: a site the gate rejects ends the run before discovery; no page 
   assert.equal((await store.getProfile('amazon.com'))!.gate_category, 'ecommerce');
 });
 
-test('CrawlSite: force skips the gate; without an OpenRouter key an inconclusive gate fails the run with no verdict', async () => {
+test('CrawlSite: force skips the gate and marks the verdict forced; an undecided gate fails the run and leaves the status alone', async () => {
   const { d1 } = fakeD1();
   const { env: e } = env(d1);
   const store = new CrawlStore(d1, e.SKILLS);
@@ -117,6 +117,10 @@ test('CrawlSite: force skips the gate; without an OpenRouter key an inconclusive
   assert.equal(row.path, 'blocked');
   assert.equal(row.forced, 1);
   assert.equal(row.gate_decision, null);
+  const prof = (await store.getProfile('amazon.com'))!;
+  assert.equal(prof.gate_method, 'forced');
+  assert.equal(prof.gate_category, null);
+  assert.match(prof.gate_reason!, /forced by an admin \(cr_forced\)/);
 
   await store.createRun('cr_landing', 'flowly.example', 'https://flowly.example/');
   const landing = readFileSync(new URL('./fixtures/gate/marketing.html', import.meta.url), 'utf8');
@@ -127,5 +131,8 @@ test('CrawlSite: force skips the gate; without an OpenRouter key an inconclusive
   const failed = (await store.getRun('cr_landing'))!;
   assert.equal(failed.status, 'failed');
   assert.equal(failed.gate_decision, null);
-  assert.equal((await store.getProfile('flowly.example'))!.status, 'failed');
+  // Undecided is not a verdict: a new site stays 'new' (not public), and not crawling.
+  const flowly = (await store.getProfile('flowly.example'))!;
+  assert.equal(flowly.status, 'new');
+  assert.equal(flowly.crawl_state, 'idle');
 });

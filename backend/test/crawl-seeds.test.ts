@@ -25,6 +25,10 @@ test('crawl-seeds: argument parsing', () => {
   assert.equal(p.token, 'prod-secret');
   assert.deepEqual(p.urls, ['https://docs.example.com/guide/']);
   assert.equal(parseArgs(['--env', 'local', '--api', 'http://127.0.0.1:8797/', '--dry-run'], {}).api, 'http://127.0.0.1:8797');
+  // The token is only sent over HTTPS, except to a local dev server.
+  assert.throws(() => parseArgs(['--env', 'staging', '--api', 'http://api-staging.scoop.md'], TOKENS), /must be https/);
+  assert.equal(parseArgs(['--env', 'staging', '--api', 'https://staging.example.dev/'], TOKENS).api, 'https://staging.example.dev');
+  assert.throws(() => parseArgs(['--env', 'staging', '--api', 'nope'], TOKENS), /not a URL/);
 
   assert.throws(() => parseArgs([], TOKENS), /--env must be/);
   assert.throws(() => parseArgs(['--env', 'prod'], TOKENS), /--env must be/);
