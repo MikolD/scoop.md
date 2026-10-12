@@ -146,7 +146,7 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 /* Pin hint */
 .pin-hint .pin { width: 15px; height: 15px; flex: none; color: var(--brand); }
 
-/* Quick Start: one line per item */
+/* Quick Copy: one line per item */
 .verdict { display: grid; min-width: 0; }
 .chip { display: inline-flex; align-items: center; gap: 6px; justify-self: start; max-width: 100%; padding: 5px 12px 5px 8px; border-radius: 999px; background: var(--chip-wait); color: var(--chip-wait-on); font-size: var(--text); font-weight: var(--weight-bold); }
 .chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1429,7 +1429,7 @@ package surfaces it, from verified sources only.
 
 ## /v1/quick at the site level (`docs`)
 
-The Quick Start tab works from any page of a product, including its home
+The Quick Copy tab works from any page of a product, including its home
 page or pricing page, so /v1/quick also says where the site's docs are.
 Candidates are the usual docs homes (docs./developer./developers.<domain>,
 /docs, /developers, /developer, /api/docs), probed in parallel with their

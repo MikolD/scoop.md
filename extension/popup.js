@@ -301,7 +301,7 @@ function llmsFiles(sections = []) {
   return { llms, llmsFull };
 }
 
-// Quick Start, one line each: "llms.txt ✓ · llms-full.txt ✕" (names link
+// Quick Copy, one line each: "llms.txt ✓ · llms-full.txt ✕" (names link
 // when available) and "Agent instructions (n)", collapsed. Both stay hidden
 // when the site has no docs at all.
 function showPageMeta({ llms = null, llmsFull = null, instructions = [] } = {}) {

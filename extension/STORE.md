@@ -89,7 +89,7 @@ Note for the privacy policy: shared packages are public (anyone can fetch them f
 
 In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real extension and composed with the popup at the top right:
 
-Screenshots 1–3 predate 0.5.0 (the Quick Start tab, the docs pill and the ✓/! icon) and are to be retaken from the 0.5.0 build.
+Screenshots 1–3 predate 0.5.0 (the Quick Copy tab, the docs pill and the ✓/! icon) and are to be retaken from the 0.5.0 build.
 
 | File | Size | Shows |
 |---|---|---|

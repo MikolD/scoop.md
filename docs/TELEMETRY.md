@@ -40,7 +40,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `copy` | popup | `site`, `path`, `sizeBytes`, `trigger` (`auto` / `button`) |
 | `rebuild` | popup | `site`, `path` |
 | `copied_animation_shown` | popup | `reducedMotion` (the "copied to your clipboard" moment played; never for private hosts) |
-| `tab_switch` | popup | `tab` (`page` (the Quick Start tab) / `overview` / `search`) |
+| `tab_switch` | popup | `tab` (`page` (the Quick Copy tab) / `overview` / `search`) |
 | `search` | popup | `site`, `qLen` (length of the query, never its text), `results` |
 | `copy_overview` | popup | `site` |
 | `copy_search` | popup | `site`, `count` (results copied) |

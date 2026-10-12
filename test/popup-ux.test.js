@@ -998,7 +998,7 @@ test('the verdict pill: icon and text, filled colours from tokens, a spinner onl
   assert.match(css, /\.chip\[data-state="checking"\] \.chip-icon \{[^}]*animation: spin/);
 });
 
-test('Quick Start: "Agent instructions (5)", collapsed, sources checked; the copy lists them before the page', () => withMock({
+test('Quick Copy: "Agent instructions (5)", collapsed, sources checked; the copy lists them before the page', () => withMock({
   sites: { [SITE]: { status: 'not_devtool', agentInstructions: INSTRUCTIONS } },
 }, async () => {
   const p = await openPopup(PAGE);
@@ -1147,7 +1147,7 @@ test('the verdict: an "unknown" site status does not hide what /quick knows', ()
   assert.equal(p.$('devdocs').title, '', 'not a guess');
 }));
 
-// Quick Start: the four lines
+// Quick Copy: the four lines
 
 test('docs pill from /quick docs: the page is docs ("✓ Docs · site"), and a /docs root that holds the page', async () => {
   await withMock({ sites: { [SITE]: { docs: { found: true, root: `https://${SITE}/`, via: 'page', verdict: 'yes' } } } }, async () => {
@@ -1236,7 +1236,7 @@ test('Copy: tokens are the headline with the size beside; the button says "Copie
   await p.$('copy').onclick();
   assert.equal(p.$('copy-label').textContent, 'Copied ✓');
   assert.equal(p.$('preview').getAttribute('rows'), '4');
-  assert.equal(p.$('tab-page').textContent, 'Quick Start');
+  assert.equal(p.$('tab-page').textContent, 'Quick Copy');
 }));
 
 test('Overview: within 16k with tokens shown; a longer llms.txt is cut and offered whole ("Copy full llms.txt")', () => withMock({
