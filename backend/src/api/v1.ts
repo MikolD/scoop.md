@@ -16,7 +16,7 @@ import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { startCrawl } from '../crawl/start.ts';
 import { DEFAULT_REQUESTS_DAILY_MAX, ondemandShare, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
 import { e2bDailyCap } from '../crawl/e2b.ts';
-import { anchoredChunks } from '../search/anchor.ts';
+import { anchoredChunks, anchorLookup } from '../search/anchor.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { withServerText } from '../lib/skilltext.ts';
@@ -101,6 +101,21 @@ async function limitSearch(env: Env, ip: string): Promise<void> {
 }
 
 const MAX_QUERY = 200;
+// Anchored packages (?url=) kept in the Cache API per index version.
+const PACKAGE_CACHE_SECONDS = 600;
+
+// D1 occasionally answers "D1_ERROR: internal error" (seen on staging under
+// a slow /packages); one retry after a short pause covers it.
+async function retryD1<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if (!/D1_ERROR: internal error/i.test(e instanceof Error ? e.message : String(e))) throw e;
+    await new Promise((r) => setTimeout(r, 150));
+    return fn();
+  }
+}
+
 // GET /v1/sites/:site/status: the popup asks on every open, so a short cache.
 const CACHE_STATUS = 'public, max-age=15, s-maxage=15';
 
@@ -527,17 +542,31 @@ const routes: Route[] = [
         if (pageParam.length > 1024) throw bad('url is over 1024 characters');
         const pageUrl = normalizePageUrl(assertFetchable(pageParam, { allowLocalhost: allowLocalhost(env) }));
         if (siteOf(pageUrl) !== site) throw new ApiError('site_mismatch', `url is not on ${site}`, 400);
-        if (!(await siteTopics(env.DB, site)).pages) {
+        // One D1 round trip for the not_indexed check, the cache version and the anchor page.
+        const look = await retryD1(() => anchorLookup(env.DB, site, pageUrl));
+        if (!look.pages) {
           Object.assign(usage, { results: 0, hit: false });
+          // Never cached: the site may be indexed a moment from now.
           throw new ApiError('not_indexed', `${site} has no index yet`, 404);
         }
+        const headers = { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' };
+        // Cached per site, page, budget and index version (any page indexed changes it).
+        const cache = typeof caches === 'undefined' ? null : caches.default;
+        const key = new Request(
+          `https://package-cache.scoop.md/v1?site=${encodeURIComponent(site)}&url=${encodeURIComponent(pageUrl)}&budget=${budget}&v=${encodeURIComponent(look.version)}`,
+        );
+        const cached = await cache?.match(key).catch(() => undefined);
+        if (cached) {
+          Object.assign(usage, { hit: Boolean(look.anchor) });
+          return new Response(cached.body, { headers: { ...headers, 'x-scoop-cache': 'hit' } });
+        }
         await limitSearch(env, ip);
-        const anchored = await anchoredChunks(searchDeps(env), site, pageUrl);
+        const anchored = await retryD1(() => anchoredChunks(searchDeps(env), site, pageUrl, { anchor: look.anchor, pages: look.pages }));
         Object.assign(usage, { results: anchored?.chunks.length ?? 0, hit: Boolean(anchored?.anchored) });
         if (!anchored) throw notFound('Nothing indexed matches');
-        return new Response(buildIndexPackage({ site, label: anchored.label, chunks: anchored.chunks, budget }), {
-          headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
-        });
+        const body = buildIndexPackage({ site, label: anchored.label, chunks: anchored.chunks, budget });
+        await cache?.put(key, new Response(body, { headers: { 'content-type': headers['content-type'], 'cache-control': `public, max-age=${PACKAGE_CACHE_SECONDS}` } })).catch(() => {});
+        return new Response(body, { headers: { ...headers, 'x-scoop-cache': 'miss' } });
       }
       if (topic !== null) {
         if (url.searchParams.has('q')) throw bad('Pass q or topic, not both');

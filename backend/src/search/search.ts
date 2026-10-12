@@ -11,6 +11,9 @@ export interface SearchParams {
   site?: string;
   slot?: string;
   limit: number;
+  // Run full-text search first and skip the embedding and vector query when
+  // it already found this many candidates.
+  ftsEnough?: number;
 }
 
 export interface ChunkHit {
@@ -116,7 +119,14 @@ export async function search(deps: SearchDeps, p: SearchParams): Promise<ChunkHi
   // queries themselves and again on the fused hits; a site-scoped search
   // includes them.
   const unapproved = p.site ? new Set<string>() : await unapprovedSites(deps.db);
-  const [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p, [...unapproved])]);
+  let fts: Awaited<ReturnType<typeof ftsIds>>;
+  let vec: string[];
+  if (p.ftsEnough) {
+    fts = await ftsIds(deps.db, p);
+    vec = fts.ids.length >= p.ftsEnough ? [] : await vectorIds(deps, p, [...unapproved]);
+  } else {
+    [fts, vec] = await Promise.all([ftsIds(deps.db, p), vectorIds(deps, p, [...unapproved])]);
+  }
   const fused = rrf([fts.ids, vec]);
   // Every fused candidate is read: vectors can point at chunks deleted since or
   // carry stale metadata, and down-weighted sources must make room for others.

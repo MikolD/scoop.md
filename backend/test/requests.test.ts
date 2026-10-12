@@ -15,6 +15,8 @@ import type { CrawlRunRow } from '../src/db/crawl.ts';
 import { dailyCount } from '../src/db/ratelimit.ts';
 import { search } from '../src/search/search.ts';
 import { indexPage } from '../src/index/indexer.ts';
+import { handleIndexBatch, MAX_DELIVERIES } from '../src/index/consumer.ts';
+import { packBatches, workersAiEmbed, EMBED_DIMS } from '../src/index/embed.ts';
 import {
   LIMIT_BUCKETS, PUBLIC_REASONS, pruneCrawlRequests, REQUEST_RETENTION_DAYS, startAllWaiting, publicReason, requestIpSubject, requestView, scopeKey, startWaiting,
   COOLDOWN_DAYS, etaSeconds, REQUEST_LIMITS, REQUEST_MAX_MINUTES, REQUEST_MAX_PAGES, requestCrawl, siteStatus, startUrlFor, viewOf,
@@ -70,7 +72,7 @@ function run(over: Partial<CrawlRunRow> = {}): CrawlRunRow {
     id: 'cr_X', site: 'ex.com', start_url: 'https://ex.com/', started_at: T0.toISOString(), finished_at: null, status: 'running', path: null,
     pages_new: 0, pages_changed: 0, pages_unchanged: 0, pages_failed: 0, pages_skipped: 0, browser_seconds: 0, cost_usd: 0, error: null,
     forced: 0, gate_decision: null, gate_category: null, gate_method: null, gate_reason: null, gate_cost_usd: 0,
-    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, requested: 1, ...over,
+    classify_cost_usd: 0, embed_cost_usd: 0, pages_indexed: 0, costs_tracked: 1, phase: null, requested: 1, pages_index_failed: 0, index_progress_at: null, ...over,
   };
 }
 const REQ = { id: 'rq_X', site: 'ex.com', state: 'started' as const, reason: null, created_at: T0.toISOString() };
@@ -924,4 +926,143 @@ test('LOWs: counts are given back when the Workflow cannot be created; "rate" al
   assert.equal(publicReason('accurate rates table missing'), PUBLIC_REASONS.failed);
   assert.equal(publicReason('upstream rate-limited us (429)'), PUBLIC_REASONS.busy);
   assert.equal(publicReason('rate_limit exceeded'), PUBLIC_REASONS.busy);
+});
+
+// ---- Live staging fixes (1-3) ----------------------------------------------------
+
+test('1: embeddings fit Workers AI: batches bounded by size, and a batch refused as "3030: input too big" is split until it fits', async () => {
+  // The staging page: 27 chunks of dense rule codes in one call was refused every time.
+  const texts = Array.from({ length: 27 }, (_, i) => `YTT${i} `.repeat(900)); // ~5.4 KB each
+  assert.ok(packBatches(texts).every((b) => b.reduce((n, t) => n + t.length, 0) <= 16_000 || b.length === 1));
+  const calls: number[] = [];
+  const ai = {
+    run: async (_m: string, input: { documents: string[] }) => {
+      const total = input.documents.reduce((n, t) => n + t.length, 0);
+      calls.push(input.documents.length);
+      if (total > 6_000) throw new Error('3030: input too big');
+      return { data: input.documents.map(() => Array(EMBED_DIMS).fill(0.5)) };
+    },
+  } as unknown as Ai;
+  const out = await workersAiEmbed(ai)(texts, 'document');
+  assert.equal(out.length, 27);
+  assert.ok(calls.includes(1));
+  // A single input too big on its own is halved until it fits.
+  const one = await workersAiEmbed(ai)(['x'.repeat(20_000)], 'document');
+  assert.equal(one.length, 1);
+  // Other errors are not swallowed.
+  const broken = { run: async () => { throw new Error('5000: model unavailable'); } } as unknown as Ai;
+  await assert.rejects(workersAiEmbed(broken)(['a'], 'document'), /model unavailable/);
+});
+
+test('1: a page that is skipped, fails permanently, or dead-letters is recorded, and the request completes', async () => {
+  const { d, raw, store } = deps();
+  const r = await ask({ ...d, now: new Date() }, 'https://outcome.example.dev/a');
+  const runId = (raw.prepare('SELECT run_id FROM crawl_requests WHERE id = ?').get(r.body.id) as { run_id: string }).run_id;
+  await store.updateRun(runId, { status: 'complete', phase: 'done', finished_at: new Date().toISOString(), pages_new: 3, path: 'markdown' });
+  const page = (url: string, hash: string) =>
+    raw.prepare(`INSERT INTO pages (url, site, source_url, source_kind, content_hash, bytes, fetched_at, changed_at, run_id) VALUES (?, 'outcome.example.dev', ?, 'page-md', ?, 1, 'x', 'x', ?)`).run(url, url, hash, runId);
+  page('https://outcome.example.dev/missing', 'a'.repeat(64)); // no R2 object: permanent failure
+  page('https://outcome.example.dev/flaky', 'b'.repeat(64));
+  // Index deps whose embedding always fails transiently, and an empty bucket.
+  const idx = {
+    db: d.db, bucket: fakeR2().r2, vectors: { upsert: async () => {}, deleteByIds: async () => {}, getByIds: async () => [] },
+    embed: async () => { throw new Error('5000: busy'); }, classify: null, dailyCapUsd: 2, totalCapUsd: 10,
+  } as never;
+  const acked: string[] = [];
+  const retried: number[] = [];
+  const message = (body: object, attempts: number) => ({ body, attempts, ack: () => acked.push(JSON.stringify(body)), retry: () => retried.push(attempts) });
+  const batch = (msgs: ReturnType<typeof message>[]) => ({ queue: 'index-pages-test', messages: msgs }) as never;
+  // A permanent error (no stored Markdown): failed, acked.
+  await handleIndexBatch(batch([message({ site: 'outcome.example.dev', url: 'https://outcome.example.dev/missing', contentHash: 'a'.repeat(64), runId }, 1)]), idx);
+  // A page whose row is gone: skipped, acked.
+  await handleIndexBatch(batch([message({ site: 'outcome.example.dev', url: 'https://outcome.example.dev/gone', contentHash: 'c'.repeat(64), runId }, 1)]), idx);
+  let run = (await store.getRun(runId))!;
+  assert.deepEqual([run.pages_indexed, run.pages_index_failed], [0, 2]);
+  assert.equal(viewOf({ ...REQ, created_at: new Date().toISOString() }, run).state, 'indexing'); // one page still to go
+  // A transient failure: retried, not recorded, until the last delivery before the dead-letter queue.
+  const flaky = { site: 'outcome.example.dev', url: 'https://outcome.example.dev/flaky', contentHash: 'b'.repeat(64), runId };
+  (idx as { bucket: R2Bucket }).bucket = { get: async () => ({ text: async () => '# Flaky\n\ntext text text' }) } as never;
+  await handleIndexBatch(batch([message(flaky, 1)]), idx);
+  assert.equal((await store.getRun(runId))!.pages_index_failed, 2);
+  await handleIndexBatch(batch([message(flaky, MAX_DELIVERIES)]), idx);
+  run = (await store.getRun(runId))!;
+  assert.deepEqual([run.pages_indexed, run.pages_index_failed], [0, 3]);
+  assert.deepEqual(retried, [1, MAX_DELIVERIES]); // still handed to the dead-letter queue
+  const view = viewOf({ ...REQ, created_at: new Date().toISOString() }, run);
+  assert.deepEqual([view.state, view.pagesIndexed, view.pagesFound], ['complete', 3, 3]);
+});
+
+test('1: with no outcome recorded, a request completes 5 minutes after the last index progress, not 30', () => {
+  const finished = T0.toISOString();
+  const base = { status: 'complete', phase: 'done', finished_at: finished, pages_new: 10, pages_indexed: 9 };
+  assert.equal(viewOf(REQ, run(base), new Date(T0.getTime() + 4 * 60_000)).state, 'indexing');
+  assert.equal(viewOf(REQ, run(base), new Date(T0.getTime() + 6 * 60_000)).state, 'complete');
+  // Progress after the crawl ended restarts the 5 minutes.
+  const progressed = run({ ...base, index_progress_at: new Date(T0.getTime() + 4 * 60_000).toISOString() });
+  assert.equal(viewOf(REQ, progressed, new Date(T0.getTime() + 6 * 60_000)).state, 'indexing');
+  assert.equal(viewOf(REQ, progressed, new Date(T0.getTime() + 10 * 60_000)).state, 'complete');
+});
+
+test('2/3: anchored packages: not_indexed is never cached; served from D1 when vectors fail; FTS alone skips the embedding; cached per index version', async () => {
+  let embeds = 0;
+  const { env: e, raw } = env({
+    AI: { run: async () => { embeds++; return { data: [Array(EMBED_DIMS).fill(0.1)] }; } } as never,
+    VECTORS: { query: async () => { throw new Error('vectors not ready'); } } as never,
+  });
+  const path = `/v1/packages?site=docs.example.dev&url=${encodeURIComponent('https://docs.example.dev/webhooks')}`;
+  const none = await call(e, 'GET', path);
+  assert.deepEqual([none.status, none.json.error.code, none.headers.get('cache-control')], [404, 'not_indexed', 'no-store']);
+
+  seedIndex(raw);
+  // The vector side throws: the package still comes from D1 (anchor chunks + FTS).
+  const ok = await call(e, 'GET', path);
+  assert.equal(ok.status, 200);
+  assert.match(ok.json, /Receive events at your endpoint/);
+  assert.match(ok.json, /Rotate a signing secret/);
+  // A small site (3 pages) with FTS hits: the query isn't embedded at all.
+  assert.equal(embeds, 0);
+
+  // A large site: the vector side is used unless FTS finds 12 related chunks.
+  const page = raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, model, cost_usd, indexed_at) VALUES (?, 'docs.example.dev', 'h', 'Other', 'guide', 'm', 0, '2026-10-12')`);
+  for (let i = 0; i < 40; i++) page.run(`https://docs.example.dev/other${i}`);
+  assert.equal((await call(e, 'GET', path)).status, 200);
+  assert.equal(embeds, 1); // too few FTS hits on a large site: embedded (vectors failed, D1 still answers)
+  const chunk = raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES (?, ?, 'docs.example.dev', 0, 'Webhooks', 'Webhooks', 'webhooks verify signatures receive events')`);
+  for (let i = 0; i < 20; i++) chunk.run(`x${i}`, `https://docs.example.dev/more${i}`);
+  embeds = 0;
+  assert.equal((await call(e, 'GET', path)).status, 200);
+  assert.equal(embeds, 0); // enough FTS hits
+
+  // Cache API (stubbed): a second request for the same index version is a hit; a new page indexed makes a new version.
+  const store = new Map<string, Response>();
+  (globalThis as { caches?: unknown }).caches = {
+    default: {
+      match: async (k: Request) => store.get(k.url)?.clone(),
+      put: async (k: Request, r: Response) => { store.set(k.url, r); },
+    },
+  };
+  try {
+    const first = await call(e, 'GET', path);
+    assert.equal(first.headers.get('x-scoop-cache'), 'miss');
+    const second = await call(e, 'GET', path);
+    assert.equal(second.headers.get('x-scoop-cache'), 'hit');
+    assert.equal(second.json, first.json);
+    raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, model, cost_usd, indexed_at) VALUES ('https://docs.example.dev/new', 'docs.example.dev', 'h', 'New', 'guide', 'm', 0, '2026-10-13')`).run();
+    assert.equal((await call(e, 'GET', path)).headers.get('x-scoop-cache'), 'miss');
+  } finally {
+    delete (globalThis as { caches?: unknown }).caches;
+  }
+});
+
+test('2: a transient D1 internal error on /packages is retried once', async () => {
+  const { env: e, raw } = env();
+  seedIndex(raw);
+  const realBatch = e.DB.batch.bind(e.DB);
+  let failures = 1;
+  (e.DB as { batch: typeof realBatch }).batch = (async (stmts: never) => {
+    if (failures-- > 0) throw new Error('D1_ERROR: internal error; reference = test');
+    return realBatch(stmts);
+  }) as never;
+  const r = await call(e, 'GET', `/v1/packages?site=docs.example.dev&url=${encodeURIComponent('https://docs.example.dev/webhooks')}`);
+  assert.equal(r.status, 200);
 });

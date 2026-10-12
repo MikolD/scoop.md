@@ -37,19 +37,36 @@ export interface Anchor {
   chunks: PackageChunk[];
 }
 
-export async function findAnchor(db: D1Database, site: string, pageUrl: string): Promise<Anchor | null> {
+// One D1 round trip: the site's index version (indexed page count and last
+// index time, for cache keys and the not_indexed check) and the chunks of the
+// first candidate URL that is indexed.
+export async function anchorLookup(db: D1Database, site: string, pageUrl: string): Promise<{ pages: number; version: string; anchor: Anchor | null }> {
   const candidates = anchorCandidates(pageUrl);
-  const { results } = await db
-    .prepare(`SELECT url, title FROM page_index WHERE site = ? AND url IN (${candidates.map(() => '?').join(', ')})`)
-    .bind(site, ...candidates)
-    .all<{ url: string; title: string }>();
-  const hit = candidates.map((c) => results.find((r) => r.url === c)).find(Boolean);
-  if (!hit) return null;
-  const { results: chunks } = await db
-    .prepare('SELECT url, title, ord, heading_path, text FROM chunks WHERE url = ? ORDER BY ord')
-    .bind(hit.url)
-    .all<PackageChunk>();
-  return chunks.length ? { url: hit.url, title: hit.title || chunks[0].title, chunks } : null;
+  const [ver, rows] = await db.batch([
+    db.prepare('SELECT COUNT(*) AS n, MAX(indexed_at) AS v FROM page_index WHERE site = ?').bind(site),
+    db
+      .prepare(
+        `SELECT pi.url AS url, pi.title AS page_title, c.title AS title, c.ord AS ord, c.heading_path AS heading_path, c.text AS text
+         FROM page_index pi JOIN chunks c ON c.url = pi.url
+         WHERE pi.site = ? AND pi.url IN (${candidates.map(() => '?').join(', ')}) ORDER BY c.ord`,
+      )
+      .bind(site, ...candidates),
+  ]);
+  const v = ver.results[0] as { n: number; v: string | null } | undefined;
+  const found = rows.results as (PackageChunk & { page_title: string })[];
+  const url = candidates.find((c) => found.some((r) => r.url === c));
+  const chunks = url ? found.filter((r) => r.url === url) : [];
+  return {
+    pages: Number(v?.n ?? 0),
+    version: `${v?.n ?? 0}:${v?.v ?? ''}`,
+    anchor: url && chunks.length
+      ? { url, title: chunks[0].page_title || chunks[0].title, chunks: chunks.map(({ url: u, title, ord, heading_path, text }) => ({ url: u, title, ord, heading_path, text })) }
+      : null,
+  };
+}
+
+export async function findAnchor(db: D1Database, site: string, pageUrl: string): Promise<Anchor | null> {
+  return (await anchorLookup(db, site, pageUrl)).anchor;
 }
 
 // The search for related pages: the title, then the page's own headings
@@ -75,12 +92,29 @@ export function pathQuery(pageUrl: string): string {
   return (path.match(/[\p{L}\p{N}]+/gu) ?? []).join(' ').slice(0, MAX_QUERY);
 }
 
+// When full-text search alone finds this many related chunks, the query isn't
+// embedded and Vectorize isn't asked (both slow: on staging the vector side
+// cost a 4-page site 3-6 s per package, and new vectors may not be queryable
+// yet). On a small site (SMALL_SITE_PAGES indexed pages or fewer) any FTS hit
+// is enough: vectors add little over full-text search across a few pages.
+export const FTS_ENOUGH = 12;
+export const SMALL_SITE_PAGES = 30;
+
 // The page's chunks first, then related chunks from other pages of the site.
-// `label` names the package. Null when nothing matches.
-export async function anchoredChunks(deps: SearchDeps, site: string, pageUrl: string): Promise<{ label: string; anchored: boolean; chunks: PackageChunk[] } | null> {
-  const anchor = await findAnchor(deps.db, site, pageUrl);
+// `label` names the package. Null when nothing matches. `anchor` skips the
+// lookup when the caller already did it (anchorLookup). Works from D1 alone:
+// the anchor comes from chunks, related chunks from FTS when the vector side
+// has nothing yet.
+export async function anchoredChunks(
+  deps: SearchDeps,
+  site: string,
+  pageUrl: string,
+  known?: { anchor: Anchor | null; pages?: number },
+): Promise<{ label: string; anchored: boolean; chunks: PackageChunk[] } | null> {
+  const anchor = known ? known.anchor : await findAnchor(deps.db, site, pageUrl);
   const q = anchor ? anchorQuery(anchor) : pathQuery(pageUrl);
-  const related = q ? (await search(deps, { q, site, limit: RELATED })).filter((h) => h.url !== anchor?.url) : [];
+  const ftsEnough = known?.pages !== undefined && known.pages <= SMALL_SITE_PAGES ? 1 : FTS_ENOUGH;
+  const related = q ? (await search(deps, { q, site, limit: RELATED, ftsEnough })).filter((h) => h.url !== anchor?.url) : [];
   const chunks = [...(anchor?.chunks ?? []), ...related];
   if (!chunks.length) return null;
   return { label: anchor ? anchor.title : q, anchored: Boolean(anchor), chunks };

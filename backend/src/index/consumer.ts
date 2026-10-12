@@ -5,7 +5,7 @@
 
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
-import { indexPage, PermanentError, RECLASSIFY_RUN } from './indexer.ts';
+import { indexPage, PermanentError, RECLASSIFY_RUN, recordIndexOutcome } from './indexer.ts';
 import type { IndexDeps, IndexMessage } from './indexer.ts';
 
 const HEX64 = /^[0-9a-f]{64}$/;
@@ -29,6 +29,10 @@ export function parseMessage(body: unknown): IndexMessage {
   return { site, url, contentHash: b.contentHash, ...(runId ? { runId } : {}) };
 }
 
+// Deliveries before a message goes to the dead-letter queue: max_retries
+// (wrangler.jsonc, index-pages consumers) + 1.
+export const MAX_DELIVERIES = 7;
+
 // 30 s, 60 s, 2 min, … capped at an hour. `attempts` starts at 1.
 export const backoffSeconds = (attempts: number) => Math.min(3600, 30 * 2 ** Math.max(0, attempts - 1));
 
@@ -39,18 +43,25 @@ export async function handleIndexBatch(batch: MessageBatch<unknown>, deps: Index
 }
 
 async function handleMessage(queue: string, msg: Message<unknown>, deps: IndexDeps): Promise<void> {
+  let parsed: IndexMessage | null = null;
   try {
-    const outcome = await indexPage(deps, parseMessage(msg.body), { attempt: msg.attempts });
+    parsed = parseMessage(msg.body);
+    const outcome = await indexPage(deps, parsed, { attempt: msg.attempts });
     const { topicPath: _, ...fields } = outcome as { topicPath?: string[] };
     console.log(JSON.stringify({ queue, ...fields }));
     msg.ack();
   } catch (e) {
     const error = e instanceof Error ? e.message : String(e);
+    // A page that will never be indexed is recorded as failed, so its crawl's
+    // requests can complete: a permanent error, or the last delivery before
+    // the dead-letter queue (which still gets the message, for inspection).
+    const final = e instanceof PermanentError || msg.attempts >= MAX_DELIVERIES;
+    if (final && parsed) await recordIndexOutcome(deps.db, parsed, 'failed').catch(() => {});
     if (e instanceof PermanentError) {
       console.error(JSON.stringify({ queue, status: 'dropped', error }));
       msg.ack();
     } else {
-      console.error(JSON.stringify({ queue, status: 'retry', attempts: msg.attempts, error }));
+      console.error(JSON.stringify({ queue, status: final ? 'dead_letter' : 'retry', attempts: msg.attempts, error }));
       msg.retry({ delaySeconds: backoffSeconds(msg.attempts) });
     }
   }

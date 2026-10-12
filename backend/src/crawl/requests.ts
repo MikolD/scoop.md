@@ -42,7 +42,10 @@ export const PUBLIC_REASONS = {
 export const LIMIT_BUCKETS = { install: 'crawlreq:install', ip: 'crawlreq:ip', global: 'crawlreq:all' } as const;
 // A finished run whose pages haven't all been indexed after this long (a
 // message went to the dead-letter queue) is reported complete anyway.
-const INDEXING_GRACE_MS = 30 * 60_000;
+// (A page whose indexing was skipped or failed for good counts as done; this
+// only covers what wasn't recorded at all.) Measured from the crawl's end or
+// its last index progress, whichever is later.
+const INDEXING_GRACE_MS = 5 * 60_000;
 
 export type RequestState = 'queued' | 'running' | 'indexing' | 'complete' | 'rejected' | 'failed';
 export type Phase = 'gate' | 'discover' | 'fetch' | 'browser' | 'index' | 'done';
@@ -123,7 +126,8 @@ export function viewOf(req: Pick<RequestRow, 'id' | 'site' | 'state' | 'reason' 
     const found = run ? run.pages_new + run.pages_changed + run.pages_unchanged : 0;
     const stored = run ? run.pages_new + run.pages_changed : 0;
     // Unchanged pages were indexed by an earlier crawl.
-    const indexed = run ? Math.min(found, run.pages_indexed + run.pages_unchanged) : 0;
+    // Pages that reached an outcome: indexed, or skipped/failed for good.
+    const indexed = run ? Math.min(found, run.pages_indexed + run.pages_index_failed + run.pages_unchanged) : 0;
     return {
       id: req.id,
       site: req.site,
@@ -133,7 +137,7 @@ export function viewOf(req: Pick<RequestRow, 'id' | 'site' | 'state' | 'reason' 
       pagesIndexed: state === 'complete' ? found : indexed,
       path: run?.path ?? null,
       reason: null,
-      etaSeconds: etaSeconds(state, phase, found, stored, run ? run.pages_indexed : 0),
+      etaSeconds: etaSeconds(state, phase, found, stored, run ? run.pages_indexed + run.pages_index_failed : 0),
       ...extra,
     };
   };
@@ -158,7 +162,8 @@ export function viewOf(req: Pick<RequestRow, 'id' | 'site' | 'state' | 'reason' 
       // complete: indexing until every stored page is indexed (or the grace period passed).
       const stored = run.pages_new + run.pages_changed;
       const finished = Date.parse(run.finished_at ?? run.started_at);
-      const waiting = Boolean(run.costs_tracked) && run.pages_indexed < stored && now.getTime() - finished < INDEXING_GRACE_MS;
+      const progress = Math.max(finished, run.index_progress_at ? Date.parse(run.index_progress_at) : 0);
+      const waiting = Boolean(run.costs_tracked) && run.pages_indexed + run.pages_index_failed < stored && now.getTime() - progress < INDEXING_GRACE_MS;
       return waiting ? view('indexing', 'index') : view('complete', 'done');
     }
   }

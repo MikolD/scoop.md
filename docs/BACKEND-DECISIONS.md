@@ -1142,3 +1142,56 @@ BACKEND.md §5 "Crawl requests".
   `#` standing apart at the end, and the same markers leading the text
   (VuePress). A `#` attached to a word (`C#`, `F#`) is kept. A scan, not a
   regex, since heading text comes from the site.
+
+## On-demand crawls: live staging fixes
+
+Found by the extension's real run against staging (2026-10-12).
+
+- **A request stuck at "indexing 100/101"** (docs.astral.sh). The missing
+  page, `ruff/default-rules/` (55.8 KB, 27 chunks of rule codes), was sent to
+  Workers AI in one embedding call and refused with `3030: input too big` on
+  every delivery (14:01–14:10 UTC); after `max_retries` it went to the
+  dead-letter queue, and nothing recorded it, so the run's indexed count
+  never reached its stored count. Dense text tokenises far above the
+  chars / 4 estimate. Fixes:
+  - embedding calls carry at most 16,000 characters (and 32 inputs); a call
+    refused as too big is split in half, and a single input halved, until it
+    fits (`src/index/embed.ts`);
+  - every terminal non-indexing outcome is recorded on the run
+    (migration 0010): `skipped` (site rejected, page row gone) and `failed`
+    (a permanent error, or the last delivery, `MAX_DELIVERIES` = max_retries
+    + 1 = 7, before the dead-letter queue, which still receives the
+    message). `crawl_runs.pages_index_failed` counts them and
+    `index_progress_at` records the last outcome; a request is complete when
+    indexed + skipped/failed reach the pages stored, so within a minute of
+    the last real index;
+  - the escape hatch for anything unrecorded is now 5 minutes after the
+    crawl ended or its last index progress, not 30.
+- **"/packages 404 for hono.dev right after complete"**. Staging's Workers
+  Logs (every request that day up to 14:14 UTC) show no 404 from
+  `/v1/packages`; the request completed at 14:02:05 (its 4 pages indexed
+  14:01:54–14:02:05), and the only failure is a **500 at 14:05:12**,
+  `D1_ERROR: internal error`, after 3.45 s, followed by 200s from 14:05:18.
+  Errors were already `cache-control: no-store`, so nothing was cached.
+  Fixes: a transient `D1_ERROR: internal error` is retried once; the anchor
+  lookup and the index-version check are one D1 batch (fewer round trips to
+  fail); `not_indexed` is explicitly never cached (tested); and the package
+  works from D1 alone when the vector side fails or has nothing yet (anchor
+  chunks from `chunks`, related chunks from FTS; tested with a failing
+  Vectorize).
+- **`/packages` latency (~2.3 s on staging)**. The cost was sequential D1
+  round trips (index check, anchor page, its chunks), embedding the query
+  through Workers AI, then FTS and Vectorize, then reading the chunks.
+  Now: one batch for the index check, version and anchor chunks; full-text
+  search first, with the embedding and vector query skipped when FTS finds
+  at least 12 related chunks, or any at all on a site of 30 indexed pages
+  or fewer (measured on staging before the change: docs.astral.sh 0.4 s
+  warm, hono.dev with 4 pages 3.0-6.6 s every time, all of it the vector
+  side, since FTS could never reach 12); and the finished package cached in the Cache
+  API for 10 minutes keyed by site, normalised page URL, budget and index
+  version (`COUNT(*)` and `MAX(indexed_at)` of the site's page_index, so any
+  newly indexed page changes the key). The search rate limit applies only on
+  a cache miss.
+- **Status semantics**: `indexed: true` / `ready` while the request is still
+  `indexing` is intended (the extension uses the pages already indexed);
+  `crawling: true` until the request is complete says more are coming.

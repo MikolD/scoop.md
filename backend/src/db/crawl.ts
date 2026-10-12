@@ -69,6 +69,10 @@ export interface CrawlRunRow {
   pages_indexed: number;
   costs_tracked: number; // 0: from before migration 0007, indexing costs unknown
   requested: number; // 1: started by a crawl request (migrations/0009_requested_sites.sql)
+  // Indexing outcomes (migrations/0010_index_outcomes.sql): pages skipped or
+  // failed for good, and when any page last reached an outcome.
+  pages_index_failed: number;
+  index_progress_at: string | null;
   // Where the Workflow is (migrations/0008_crawl_requests.sql): gate | discover | fetch | browser | done.
   phase: string | null;
 }

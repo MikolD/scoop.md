@@ -135,25 +135,51 @@ export function runCostStmts(db: D1Database, msg: IndexMessage, c: { classifyUsd
   const run = msg.runId === RECLASSIFY_RUN ? `${RECLASSIFY_RUN}:${capDay(now)}` : (msg.runId ?? MANUAL_RUN);
   const stmts = [
     db.prepare(
-      `INSERT INTO index_run_costs (run_id, url, content_hash, site, classify_cost_usd, embed_tokens, embed_cost_usd, indexed, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+      `INSERT INTO index_run_costs (run_id, url, content_hash, site, classify_cost_usd, embed_tokens, embed_cost_usd, indexed, outcome, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'indexed', ?)
        ON CONFLICT (run_id, url, content_hash) DO UPDATE SET
          classify_cost_usd = classify_cost_usd + excluded.classify_cost_usd, embed_tokens = embed_tokens + excluded.embed_tokens,
-         embed_cost_usd = embed_cost_usd + excluded.embed_cost_usd, indexed = 1, updated_at = excluded.updated_at`,
+         embed_cost_usd = embed_cost_usd + excluded.embed_cost_usd, indexed = 1, outcome = 'indexed', updated_at = excluded.updated_at`,
     ).bind(run, msg.url, msg.contentHash, msg.site, c.classifyUsd, c.embedTokens, embedCostUsd(c.embedTokens), now.toISOString()),
   ];
-  if (run.startsWith('cr_')) {
-    stmts.push(
-      db.prepare(
-        `UPDATE crawl_runs SET
-           classify_cost_usd = (SELECT COALESCE(SUM(classify_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
-           embed_cost_usd = (SELECT COALESCE(SUM(embed_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
-           pages_indexed = (SELECT COUNT(*) FROM index_run_costs WHERE run_id = ?1 AND indexed = 1)
-         WHERE id = ?1`,
-      ).bind(run),
-    );
-  }
+  if (run.startsWith('cr_')) stmts.push(runRecount(db, run, now));
   return stmts;
+}
+
+// A crawl run's indexing totals, recomputed from index_run_costs: costs, pages
+// indexed, pages whose indexing was skipped or failed for good, and when any
+// page last reached an outcome (migrations/0010_index_outcomes.sql).
+function runRecount(db: D1Database, run: string, now: Date): D1PreparedStatement {
+  return db
+    .prepare(
+      `UPDATE crawl_runs SET
+         classify_cost_usd = (SELECT COALESCE(SUM(classify_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
+         embed_cost_usd = (SELECT COALESCE(SUM(embed_cost_usd), 0) FROM index_run_costs WHERE run_id = ?1),
+         pages_indexed = (SELECT COUNT(*) FROM index_run_costs WHERE run_id = ?1 AND indexed = 1),
+         pages_index_failed = (SELECT COUNT(*) FROM index_run_costs WHERE run_id = ?1 AND indexed = 0 AND outcome IN ('skipped', 'failed')),
+         index_progress_at = ?2
+       WHERE id = ?1`,
+    )
+    .bind(run, now.toISOString());
+}
+
+// Records that a crawl page's indexing ended without indexing it: 'skipped'
+// (nothing to index any more) or 'failed' (a permanent error, or the last
+// delivery before the dead-letter queue). Counts as done for the run's crawl
+// requests; a later success for the same content turns it back to 'indexed'.
+// Only crawl runs (runId cr_…) are tracked.
+export async function recordIndexOutcome(db: D1Database, msg: IndexMessage, outcome: 'skipped' | 'failed', now = new Date()): Promise<void> {
+  if (!msg.runId?.startsWith('cr_')) return;
+  await db.batch([
+    db
+      .prepare(
+        `INSERT INTO index_run_costs (run_id, url, content_hash, site, indexed, outcome, updated_at) VALUES (?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT (run_id, url, content_hash) DO UPDATE SET
+           outcome = CASE WHEN indexed = 1 THEN outcome ELSE excluded.outcome END, updated_at = excluded.updated_at`,
+      )
+      .bind(msg.runId, msg.url, msg.contentHash, msg.site, outcome, now.toISOString()),
+    runRecount(db, msg.runId, now),
+  ]);
 }
 
 const embedTokens = (texts: string[]) => texts.reduce((n, t) => n + estimateTokens(t), 0);
@@ -206,9 +232,12 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage, { attempt = 
     )
     .bind(site, url, contentHash)
     .first<{ status: string | null; stored: number | null }>();
-  if (gone?.status === 'not_devtool') return { status: 'skipped', reason: 'not_devtool' };
+  const skip = gone?.status === 'not_devtool' ? 'not_devtool' : msg.runId?.startsWith('cr_') && !gone?.stored ? 'no_page' : null;
   // Only crawl messages have a pages row; manual and reclassify ones don't need one.
-  if (msg.runId?.startsWith('cr_') && !gone?.stored) return { status: 'skipped', reason: 'no_page' };
+  if (skip) {
+    await recordIndexOutcome(db, msg, 'skipped', now);
+    return { status: 'skipped', reason: skip };
+  }
 
   const existing = await db
     .prepare('SELECT content_hash, model, topic, attempts FROM page_index WHERE url = ?')
