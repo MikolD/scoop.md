@@ -12,6 +12,7 @@ import { ALL_SITES, classifyKey, indexPage, MAX_ATTEMPTS, pageKey, spentToday, U
 import { batchSize, MAX_BATCH, MIN_BATCH, reclassify } from '../src/index/reclassify.ts';
 import type { IndexDeps } from '../src/index/indexer.ts';
 import { sha256Hex } from '../src/lib/ids.ts';
+import { normalizePageUrl, pageHash } from '../src/lib/urls.ts';
 import { buildIndexPackage, fenced, safeUrl } from '../src/search/package.ts';
 import type { PackageChunk } from '../src/search/package.ts';
 import { siteTopics, topicChunks } from '../src/search/queries.ts';
@@ -763,6 +764,12 @@ test('consumer acks indexed and invalid messages, retries failures with backoff'
   assert.equal(route('https://docsify.js.org/#/cdn'), 'https://docsify.js.org/#/cdn');
   assert.equal(route('https://docsify.js.org/#/cdn?id=latest'), 'https://docsify.js.org/#/cdn');
   assert.equal(route('https://docsify.js.org/#intro'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#/cdn#heading'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#/guide/'), 'https://docsify.js.org/#/guide');
+  assert.equal(route('https://docsify.js.org/#/'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#/?id=x'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#//'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#'), 'https://docsify.js.org/');
 });
 
 test('topic prefixes with non-BMP characters match (SQLite counts characters, not UTF-16 units)', async () => {
@@ -803,4 +810,13 @@ test('query embeddings are cached by normalised text; documents are never cached
   // A broken cache only costs a call.
   const broken = cachedQueryEmbed(async (t) => t.map(() => [1]), { match: async () => { throw new Error('x'); }, put: async () => { throw new Error('y'); } } as unknown as Cache);
   assert.deepEqual(await broken(['q'], 'query'), [[1]]);
+});
+
+test('one URL normaliser for queue messages and the admin route', () => {
+  assert.equal(pageHash('#/a/b/?x=1#y'), '#/a/b');
+  assert.equal(pageHash('#intro'), '');
+  assert.equal(pageHash(''), '');
+  // The admin route calls the same function on its parsed URL.
+  assert.equal(normalizePageUrl(new URL('https://Docs.Example.com/x.md#/route/')), 'https://docs.example.com/x.md#/route');
+  assert.equal(normalizePageUrl(new URL('https://docs.example.com/x.md#section')), 'https://docs.example.com/x.md');
 });

@@ -11,6 +11,7 @@ import { indexPage, pageKey } from '../index/indexer.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
+import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { fetchSource, verifyAll } from '../lib/verify.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
@@ -320,8 +321,7 @@ const routes: Route[] = [
       const body = (await readJson(c.req)) as { url?: unknown; queue?: unknown };
       if (typeof body.url !== 'string') throw bad('url is required');
       const target = assertFetchable(body.url, { allowLocalhost: allowLocalhost(c.env) });
-      target.hash = '';
-      const pageUrl = target.href;
+      const pageUrl = normalizePageUrl(target);
       const site = siteOf(pageUrl);
       const fetched = await fetchSource(pageUrl, site, { allowLocalhost: allowLocalhost(c.env) });
       if (fetched.over) throw new ApiError('too_large', 'Page is over 2 MB', 413);
