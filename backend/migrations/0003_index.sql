@@ -16,9 +16,12 @@ CREATE TABLE page_index (
   entities      TEXT NOT NULL DEFAULT '[]', -- JSON array of {kind, name}
   model         TEXT NOT NULL,              -- 'none' when the daily cost cap skipped classification
   cost_usd      REAL NOT NULL DEFAULT 0,
+  attempts      INTEGER NOT NULL DEFAULT 0, -- FAILED classifications of this content; the daily job stops at 3
   indexed_at    TEXT NOT NULL
 );
 CREATE INDEX page_index_site_topic ON page_index (site, topic);
+-- The daily reclassify job: model IN ('none', 'failed'), oldest first.
+CREATE INDEX page_index_model ON page_index (model, indexed_at);
 
 -- Heading-aware Markdown chunks. rowid is the FTS5 content rowid; id is the
 -- Vectorize vector ID.

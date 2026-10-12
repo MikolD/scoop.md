@@ -1,6 +1,7 @@
-// Query embeddings cached in the Cache API for 10 minutes, keyed by the
-// normalised query plus the request's site and slot, so repeated or flooded
-// searches don't each cost a Workers AI call.
+// Query embeddings cached in the Cache API for 10 minutes, keyed by the model
+// and the normalised query, so repeated or flooded searches don't each cost a
+// Workers AI call. The vector depends only on the text, so searches with
+// different site or slot filters share one entry.
 
 import { sha256Hex } from '../lib/ids.ts';
 import { EMBED_MODEL } from '../index/embed.ts';
@@ -10,12 +11,12 @@ export const QUERY_EMBED_TTL = 600;
 
 export const normalizeQuery = (q: string) => q.toLowerCase().replace(/\s+/g, ' ').trim();
 
-export function cachedQueryEmbed(embed: Embed, cache: Pick<Cache, 'match' | 'put'> | undefined, scope: { site?: string; slot?: string } = {}): Embed {
+export function cachedQueryEmbed(embed: Embed, cache: Pick<Cache, 'match' | 'put'> | undefined): Embed {
   return async (texts, mode) => {
     if (mode !== 'query' || texts.length !== 1 || !cache) return embed(texts, mode);
     const q = normalizeQuery(texts[0]);
     // A synthetic URL: the cache only stores GET requests keyed by URL.
-    const key = new Request(`https://query-embeddings.scoop.md/${encodeURIComponent(EMBED_MODEL)}/${await sha256Hex(JSON.stringify([q, scope.site ?? '', scope.slot ?? '']))}`);
+    const key = new Request(`https://query-embeddings.scoop.md/${encodeURIComponent(EMBED_MODEL)}/${await sha256Hex(q)}`);
     try {
       const hit = await cache.match(key);
       if (hit) return [(await hit.json()) as number[]];

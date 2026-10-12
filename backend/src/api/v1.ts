@@ -13,6 +13,7 @@ import { indexPage, pageKey } from '../index/indexer.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { newId, safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
+import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { fetchSource, verifyAll } from '../lib/verify.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
@@ -71,10 +72,10 @@ async function loadLive(store: Store, row: SkillRow) {
   throw new Error(`R2 object missing for ${row.id}`);
 }
 
-const searchDeps = (env: Env, scope: { site?: string; slot?: string }): SearchDeps => ({
+const searchDeps = (env: Env): SearchDeps => ({
   db: env.DB,
   vectors: env.VECTORS,
-  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default, scope),
+  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default),
 });
 
 // Queries that embed text get a stricter per-IP limit than other reads.
@@ -344,7 +345,7 @@ const routes: Route[] = [
       const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
       const slot = slotParam(url);
       const limit = intParam(url, 'limit', 10, 1, 50);
-      const hits = await search(searchDeps(env, { site, slot }), { q, site, slot, limit });
+      const hits = await search(searchDeps(env), { q, site, slot, limit });
       return json(
         200,
         {
@@ -388,7 +389,7 @@ const routes: Route[] = [
       } else {
         label = queryParam(url);
         await limitSearch(env, ip);
-        chunks = await search(searchDeps(env, { site }), { q: label, site, limit: 40 });
+        chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
       }
       if (!chunks.length) throw notFound('Nothing indexed matches');
       return new Response(buildIndexPackage({ site, label, chunks, budget }), {
@@ -407,8 +408,7 @@ const routes: Route[] = [
       const body = (await readJson(c.req)) as { url?: unknown; queue?: unknown };
       if (typeof body.url !== 'string') throw bad('url is required');
       const target = assertFetchable(body.url, { allowLocalhost: allowLocalhost(c.env) });
-      target.hash = '';
-      const pageUrl = target.href;
+      const pageUrl = normalizePageUrl(target);
       const site = siteOf(pageUrl);
       const fetched = await fetchSource(pageUrl, site, { allowLocalhost: allowLocalhost(c.env) });
       if (fetched.over) throw new ApiError('too_large', 'Page is over 2 MB', 413);

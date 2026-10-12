@@ -5,13 +5,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { chunkMarkdown, estimateTokens, pageTitle } from '../src/index/chunk.ts';
-import { classifyPage, estimateCost, MAX_INPUT, parseClassification, stripFences, userMessage } from '../src/index/classify.ts';
+import { ClassifyUnavailable, classifyPage, estimateCost, MAX_INPUT, parseClassification, stripFences, userMessage } from '../src/index/classify.ts';
 import type { Classified, PageInput } from '../src/index/classify.ts';
 import { backoffSeconds, handleIndexBatch, parseMessage } from '../src/index/consumer.ts';
-import { ALL_SITES, classifyKey, indexPage, pageKey, spentToday, UNCLASSIFIED } from '../src/index/indexer.ts';
-import { reclassify } from '../src/index/reclassify.ts';
+import { ALL_SITES, classifyKey, indexPage, MAX_ATTEMPTS, pageKey, spentToday, UNAVAILABLE_FALLBACK_ATTEMPT, UNCLASSIFIED } from '../src/index/indexer.ts';
+import { batchSize, MAX_BATCH, MIN_BATCH, reclassify } from '../src/index/reclassify.ts';
 import type { IndexDeps } from '../src/index/indexer.ts';
 import { sha256Hex } from '../src/lib/ids.ts';
+import { normalizePageUrl, pageHash } from '../src/lib/urls.ts';
 import { buildIndexPackage, fenced, safeUrl } from '../src/search/package.ts';
 import type { PackageChunk } from '../src/search/package.ts';
 import { siteTopics, topicChunks } from '../src/search/queries.ts';
@@ -178,17 +179,42 @@ test('classifyPage falls back on invalid JSON and on HTTP errors, summing cost',
 test('calls without usage (timeouts, dropped connections, cut-off bodies) are charged an estimate', async (t) => {
   t.mock.method(console, 'warn', () => {});
   const timeout = async () => { throw new DOMException('The operation timed out.', 'TimeoutError'); };
-  const r = await classifyPage(page, { apiKey: 'k', fetchImpl: timeout });
-  assert.equal(r.model, 'failed');
+  // Only transient failures: thrown so the queue retries, carrying the estimated cost.
+  const err = await classifyPage(page, { apiKey: 'k', fetchImpl: timeout }).then(() => null, (e) => e);
+  assert.ok(err instanceof ClassifyUnavailable);
   const expected = ['qwen/qwen3.7-flash', 'openai/gpt-6-luna'].map((m) => estimateCost(m, 0)).reduce((a, b) => a + b);
-  assert.ok(r.costUsd > expected, 'prompt and max_tokens both priced');
+  assert.ok(err.costUsd > expected, 'prompt and max_tokens both priced');
   // Output dominates: 8000 tokens at twice the listed price.
   assert.ok(estimateCost('openai/gpt-6-luna', 0) >= 8000 * 0.5e-6);
   assert.ok(estimateCost('some/unknown-model', 4000) > estimateCost('qwen/qwen3.7-flash', 4000));
 
+  // A 200 cut off mid-body is charged the estimate; an error body is not billed.
   const cut = openRouter([() => new Response('{"choices": [', { status: 200 }), () => Response.json({ error: { message: 'bad gateway' } }, { status: 502 })]);
-  const r2 = await classifyPage(page, { apiKey: 'k', fetchImpl: cut.impl });
-  assert.ok(r2.costUsd > 0);
+  const cutErr = await classifyPage(page, { apiKey: 'k', fetchImpl: cut.impl }).then(() => null, (e) => e);
+  assert.ok(cutErr instanceof ClassifyUnavailable);
+  assert.ok(Math.abs(cutErr.costUsd - estimateCost('qwen/qwen3.7-flash', JSON.stringify(cut.calls[0].body.messages).length)) < 0.0002);
+
+  const limited = openRouter([
+    () => Response.json({ error: { message: 'rate limited' } }, { status: 429 }),
+    () => Response.json({ error: { message: 'no credits' } }, { status: 402 }),
+  ]);
+  const limitedErr = await classifyPage(page, { apiKey: 'k', fetchImpl: limited.impl }).then(() => null, (e) => e);
+  assert.ok(limitedErr instanceof ClassifyUnavailable);
+  assert.equal(limitedErr.costUsd, 0, '4xx/429 with an error body are not charged');
+
+  // An unreadable 5xx (gateway timeout page) may have been billed.
+  const gateway = openRouter([() => new Response('<html>524</html>', { status: 524 }), () => new Response('<html>502</html>', { status: 502 })]);
+  assert.ok((await classifyPage(page, { apiKey: 'k', fetchImpl: gateway.impl }).then(() => null, (e) => e)).costUsd > 0);
+
+  // One model's output failed validation, the other was unavailable: FAILED, not thrown.
+  const mixed = openRouter([completion('nope', 0.0001), () => Response.json({ error: { message: 'down' } }, { status: 503 })]);
+  const m = await classifyPage(page, { apiKey: 'k', fetchImpl: mixed.impl });
+  assert.equal(m.model, 'failed');
+  assert.equal(m.costUsd, 0.0001);
+
+  // A 200 with no content (reasoning used up max_tokens) is the model's failure.
+  const empty = openRouter([completion(null as unknown as string, 0.0003), completion(null as unknown as string, 0.0004)]);
+  assert.equal((await classifyPage(page, { apiKey: 'k', fetchImpl: empty.impl })).model, 'failed');
 
   const reported = openRouter([completion(JSON.stringify(valid), 0)]);
   assert.equal((await classifyPage(page, { apiKey: 'k', fetchImpl: reported.impl })).costUsd, 0, 'a reported zero is trusted');
@@ -316,7 +342,10 @@ function fakeVectors() {
         ids.forEach((id) => store.delete(id));
         return { mutationId: 'm' };
       },
-    } as unknown as Pick<Vectorize, 'upsert' | 'deleteByIds'>,
+      async getByIds(ids: string[]) {
+        return ids.filter((id) => store.has(id)).map((id) => ({ id, ...store.get(id)! }));
+      },
+    } as unknown as Pick<Vectorize, 'upsert' | 'deleteByIds' | 'getByIds'>,
   };
 }
 
@@ -326,11 +355,12 @@ async function setup(classifications: Classified[] = [], cap = 2) {
   const vec = fakeVectors();
   let n = 0;
   const classified: PageInput[] = [];
+  const embedded: string[] = [];
   const deps: IndexDeps = {
     db: d1,
     bucket: r2,
     vectors: vec.vectors,
-    embed: async (texts) => texts.map((t) => [t.length, 1]),
+    embed: async (texts) => { embedded.push(...texts); return texts.map((t) => [t.length, 1]); },
     classify: async (p) => {
       classified.push(p);
       const c = classifications[n++];
@@ -346,7 +376,7 @@ async function setup(classifications: Classified[] = [], cap = 2) {
     objects.set(pageKey(contentHash), md);
     return { site: new URL(url).hostname, url, contentHash };
   };
-  return { deps, raw, vec, put, classified, d1, objects };
+  return { deps, raw, vec, put, classified, d1, objects, embedded };
 }
 
 const cls = (slot: NonNullable<Classified['classification']>['slot'], topic: string[], costUsd = 0.0005, name = 'stripe.webhooks.constructEvent'): Classified => ({
@@ -452,10 +482,12 @@ test('when every model fails the page is indexed as failed, its cost counted, an
   assert.equal(await spentToday(d1, 'ex.com', new Date('2026-10-12T10:00:00Z')), 0.0007);
   assert.ok(!objects.has(classifyKey(msg.contentHash)));
   assert.equal((await search({ db: d1 }, { q: 'body', limit: 5 })).length, 1);
-  // Not "unchanged": the same message classifies it next time.
+  assert.equal((raw.prepare('SELECT attempts FROM page_index').get() as { attempts: number }).attempts, 1);
+  // Not "unchanged": the same message classifies it next time, without re-chunking.
   const again = await indexPage(deps, msg);
-  assert.ok(again.status === 'indexed' && again.model === 'qwen/qwen3.7-flash');
-  assert.equal((raw.prepare('SELECT model FROM page_index').get() as { model: string }).model, 'qwen/qwen3.7-flash');
+  assert.ok(again.status === 'reclassified' && again.model === 'qwen/qwen3.7-flash');
+  const row = raw.prepare('SELECT model, attempts FROM page_index').get() as { model: string; attempts: number };
+  assert.deepEqual({ ...row }, { model: 'qwen/qwen3.7-flash', attempts: 0 });
 });
 
 test('without an API key pages are indexed unclassified, not retried', async () => {
@@ -488,6 +520,165 @@ test('classification runs after embedding and is cached, so a retry pays once', 
   assert.equal(await spentToday(d1, 'ex.com', new Date('2026-10-12T10:00:00Z')), 0.0009);
 });
 
+test('an unavailable classifier throws for the queue to retry, after recording its cost', async () => {
+  const { deps, put, d1, raw } = await setup();
+  deps.classify = async () => { throw new ClassifyUnavailable('down', 0.0004); };
+  await assert.rejects(indexPage(deps, await put('https://ex.com/1', '# One')), ClassifyUnavailable);
+  assert.equal(await spentToday(d1, 'ex.com', new Date('2026-10-12T10:00:00Z')), 0.0004);
+  assert.equal((raw.prepare('SELECT COUNT(*) AS n FROM page_index').get() as { n: number }).n, 0, 'nothing written');
+});
+
+test('late in its retries, a new page is indexed unclassified when the classifier stays down', async () => {
+  const { deps, raw, put, d1 } = await setup();
+  deps.classify = async () => { throw new ClassifyUnavailable('down', 0.0002); };
+  const msg = await put('https://ex.com/1', '# One\n\nsearchable anyway');
+  for (let attempt = 1; attempt < UNAVAILABLE_FALLBACK_ATTEMPT; attempt++) {
+    await assert.rejects(indexPage(deps, msg, { attempt }), ClassifyUnavailable);
+  }
+  const out = await indexPage(deps, msg, { attempt: UNAVAILABLE_FALLBACK_ATTEMPT });
+  assert.ok(out.status === 'indexed' && out.model === UNCLASSIFIED && !out.capped);
+  assert.equal((raw.prepare('SELECT model, attempts FROM page_index').get() as { model: string }).model, UNCLASSIFIED);
+  assert.equal((await search({ db: d1 }, { q: 'searchable', limit: 5 })).length, 1);
+  // Every attempt's cost was recorded.
+  assert.ok(Math.abs((await spentToday(d1, 'ex.com', new Date('2026-10-12T10:00:00Z'))) - 0.0002 * UNAVAILABLE_FALLBACK_ATTEMPT) < 1e-12);
+  // A reclassify message still throws for the queue to retry.
+  await assert.rejects(indexPage(deps, msg, { attempt: 6 }), ClassifyUnavailable);
+});
+
+test('the consumer passes the delivery count, so a late outage still acks the page', async () => {
+  const { deps, put } = await setup();
+  deps.classify = async () => { throw new ClassifyUnavailable('down', 0); };
+  const msg = await put('https://ex.com/1', '# One');
+  const { batch, acked, retried } = fakeBatch([msg]);
+  (batch.messages[0] as { attempts: number }).attempts = UNAVAILABLE_FALLBACK_ATTEMPT;
+  const log = console.log;
+  console.log = () => {};
+  try { await handleIndexBatch(batch, deps); } finally { console.log = log; }
+  assert.deepEqual(acked, [0]);
+  assert.deepEqual(retried, []);
+});
+
+test('a cached classification is applied on a reclassify message even when capped', async () => {
+  const { deps, put, classified, objects } = await setup([], 0.001);
+  const msg = await put('https://ex.com/1', '# One\n\nUse retryEvent.');
+  deps.classify = null;
+  await indexPage(deps, msg);
+  // A classification paid for earlier (say, before a D1 failure) sits in the cache.
+  objects.set(classifyKey(msg.contentHash), JSON.stringify(cls('guide', ['a', 'b'], 0.0005, 'retryEvent')));
+  deps.dailyCapUsd = 0;
+  deps.totalCapUsd = 0;
+  const out = await indexPage(deps, msg);
+  assert.ok(out.status === 'reclassified' && out.slot === 'guide');
+  assert.equal(classified.length, 0);
+});
+
+test('a reclassify message checks the caps first and only updates classification data', async () => {
+  const { deps, raw, put, d1, vec, objects, embedded, classified } = await setup([cls('webhooks-events', ['webhooks', 'signatures'], 0.0006)], 0.001);
+  // Indexed unclassified because the site was over its cap.
+  raw.exec("INSERT INTO index_costs (site, day, cost_usd) VALUES ('docs.stripe.com', '2026-10-12', 0.002)");
+  const msg = await put('https://docs.stripe.com/webhooks', STRIPE);
+  const first = await indexPage(deps, msg);
+  assert.ok(first.status === 'indexed' && first.capped);
+  const ids = [...vec.store.keys()];
+  assert.ok(ids.every((id) => vec.store.get(id)!.metadata.slot === 'other'));
+  const embeddedBefore = embedded.length;
+
+  // Still capped: unchanged, and the page isn't even read.
+  objects.delete(pageKey(msg.contentHash));
+  assert.deepEqual(await indexPage(deps, msg), { status: 'unchanged' });
+  assert.equal(classified.length, 0);
+
+  // Next day: classified; vectors keep their values and get the new slot.
+  await put('https://docs.stripe.com/webhooks', STRIPE);
+  deps.now = () => new Date('2026-10-13T05:00:00Z');
+  const chunksBefore = raw.prepare('SELECT id, text FROM chunks ORDER BY ord').all();
+  const out = await indexPage(deps, msg);
+  assert.ok(out.status === 'reclassified' && out.slot === 'webhooks-events');
+  assert.equal(embedded.length, embeddedBefore, 'nothing re-embedded');
+  assert.deepEqual([...vec.store.keys()].sort(), ids.sort());
+  assert.ok(ids.every((id) => vec.store.get(id)!.metadata.slot === 'webhooks-events'));
+  assert.deepEqual(raw.prepare('SELECT id, text FROM chunks ORDER BY ord').all(), chunksBefore, 'chunks untouched');
+  assert.deepEqual(raw.prepare('SELECT name FROM entities').all().map((r) => r.name), ['stripe.webhooks.constructEvent']);
+  assert.deepEqual((await siteTopics(d1, 'docs.stripe.com')).rows.map((r) => `${r.path}:${r.count}`).sort(), ['webhooks/signatures:1', 'webhooks:1']);
+  assert.deepEqual(await indexPage(deps, msg), { status: 'unchanged' });
+});
+
+test('reclassifying re-embeds only vectors missing from the index', async () => {
+  const { deps, put, vec, embedded } = await setup([{ classification: null, model: 'failed', costUsd: 0.0001 }, cls('guide', ['a', 'b'])]);
+  const msg = await put('https://ex.com/1', '# One\n\n' + Array.from({ length: 6 }, (_, i) => `## S${i}\n\n${words(300)}`).join('\n\n'));
+  await indexPage(deps, msg);
+  const ids = [...vec.store.keys()];
+  assert.ok(ids.length > 1);
+  vec.store.delete(ids[0]);
+  const before = embedded.length;
+  await indexPage(deps, msg);
+  assert.equal(embedded.length, before + 1);
+  assert.equal(vec.store.size, ids.length);
+  assert.equal(vec.store.get(ids[0])!.metadata.slot, 'guide');
+});
+
+test('failed reclassifications count attempts; the daily job stops after three', async () => {
+  const failed = { classification: null, model: 'failed', costUsd: 0.0001 };
+  const { deps, raw, put, d1 } = await setup([failed, failed, failed, cls('guide', ['a', 'b'])]);
+  const msg = await put('https://ex.com/1', '# One');
+  for (let i = 1; i <= MAX_ATTEMPTS; i++) {
+    await indexPage(deps, msg);
+    assert.equal((raw.prepare('SELECT attempts FROM page_index').get() as { attempts: number }).attempts, i);
+  }
+  const sent: unknown[] = [];
+  const queue = { sendBatch: async (m: unknown[]) => { sent.push(...m); } } as unknown as Queue<never>;
+  assert.equal(await reclassify(d1, queue, { totalCapUsd: 10, dailyCapUsd: 100, now: new Date('2026-10-12T10:00:00Z') }), 0);
+  // New content starts over.
+  await indexPage(deps, await put('https://ex.com/1', '# One, edited'));
+  assert.equal((raw.prepare('SELECT attempts FROM page_index').get() as { attempts: number }).attempts, 0);
+});
+
+test('the reclassify job caps each site at what its own daily budget pays for', async () => {
+  const { raw, d1 } = await setup();
+  const insert = raw.prepare("INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES (?, ?, 'h', 'other', ?, ?, ?)");
+  insert.run('https://paid.dev/x', 'paid.dev', 'qwen/qwen3.7-flash', 0.01, '2026-09-01');
+  // big.dev has 300 old pages waiting; small.dev has 5 newer ones.
+  for (let i = 0; i < 300; i++) insert.run(`https://big.dev/${i}`, 'big.dev', 'none', 0, `2026-10-01T00:${String(Math.floor(i / 60)).padStart(2, '0')}:${String(i % 60).padStart(2, '0')}`);
+  for (let i = 0; i < 5; i++) insert.run(`https://small.dev/${i}`, 'small.dev', 'failed', 0, `2026-10-05T00:00:0${i}`);
+  const sent: { body: { site: string } }[] = [];
+  const queue = { sendBatch: async (m: { body: { site: string } }[]) => { sent.push(...m); } } as unknown as Queue<never>;
+  // $10 total at $0.01 a page = 1000; $0.5 per site = 50 per site.
+  const n = await reclassify(d1, queue, { totalCapUsd: 10, dailyCapUsd: 0.5, now: new Date('2026-10-12T10:00:00Z') });
+  assert.equal(n, 55);
+  assert.equal(sent.filter((m) => m.body.site === 'big.dev').length, 50);
+  assert.equal(sent.filter((m) => m.body.site === 'small.dev').length, 5);
+});
+
+test('the reclassify batch is the remaining daily budget over the average page cost, clamped', async () => {
+  const { raw, d1 } = await setup();
+  const now = new Date('2026-10-12T10:00:00Z');
+  const insert = raw.prepare("INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES (?, 'ex.com', 'h', 'guide', ?, ?, '2026-10-01')");
+  insert.run('https://ex.com/a', 'qwen/qwen3.7-flash', 0.001);
+  insert.run('https://ex.com/b', 'qwen/qwen3.7-flash', 0.003);
+  insert.run('https://ex.com/c', 'failed', 0.5);
+  assert.equal(await batchSize(d1, 1, now), 500); // $1 / $0.002
+  raw.exec("INSERT INTO index_costs (site, day, cost_usd) VALUES ('*', '2026-10-12', 0.95)");
+  assert.equal(await batchSize(d1, 1, now), MIN_BATCH); // $0.05 / $0.002 = 25
+  assert.equal(await batchSize(d1, 100, now), MAX_BATCH);
+  assert.equal(await batchSize(d1, 0, now), MIN_BATCH);
+  raw.exec('DELETE FROM page_index');
+  assert.ok((await batchSize(d1, 10, now)) < 10 / 0.001, 'falls back to the estimate');
+});
+
+test('topic recounts and topic packages use index range scans', async () => {
+  const { raw } = await setup();
+  const recount = raw.prepare(`EXPLAIN QUERY PLAN SELECT
+    (SELECT COUNT(*) FROM page_index WHERE site = ?1 AND topic = ?2)
+    + (SELECT COUNT(*) FROM page_index WHERE site = ?1 AND topic >= ?2 || '/' AND topic < ?2 || '0')`).all('ex.com', 'a').map((r) => String(r.detail));
+  assert.ok(recount.some((d) => /USING COVERING INDEX page_index_site_topic \(site=\? AND topic=\?\)/.test(d)), recount.join('\n'));
+  assert.ok(recount.some((d) => /USING COVERING INDEX page_index_site_topic \(site=\? AND topic>\? AND topic<\?\)/.test(d)), recount.join('\n'));
+  assert.ok(!recount.some((d) => /SCAN page_index/.test(d)));
+  const select = 'SELECT pi.topic AS topic, c.url AS url FROM page_index pi JOIN chunks c ON c.url = pi.url';
+  const pkg = raw.prepare(`EXPLAIN QUERY PLAN ${select} WHERE pi.site = ?1 AND pi.topic = ?2 UNION ALL ${select} WHERE pi.site = ?1 AND pi.topic >= ?2 || '/' AND pi.topic < ?2 || '0' ORDER BY topic, url`).all('ex.com', 'a').map((r) => String(r.detail));
+  assert.ok(pkg.some((d) => /page_index_site_topic \(site=\? AND topic>\? AND topic<\?\)/.test(d)), pkg.join('\n'));
+  assert.ok(!pkg.some((d) => /SCAN pi\b/.test(d)), pkg.join('\n'));
+});
+
 test('the account-wide daily cap stops classification on every site', async () => {
   const { deps, put, d1, classified } = await setup([cls('guide', ['a', 'b'], 0.004), cls('guide', ['a', 'b'], 0.004)]);
   deps.totalCapUsd = 0.005;
@@ -518,10 +709,16 @@ test('reclassify re-enqueues a bounded batch of unclassified and failed pages, o
   for (let i = 0; i < 150; i++) insert.run(`https://ex.com/${i}`, String(i % 10).repeat(64), i % 2 ? 'none' : 'failed', `2026-10-${String(1 + (i % 9)).padStart(2, '0')}T00:00:${String(i % 60).padStart(2, '0')}`);
   const sent: { body: { url: string } }[][] = [];
   const queue = { sendBatch: async (msgs: { body: { url: string } }[]) => { sent.push(msgs); } } as unknown as Queue<never>;
-  assert.equal(await reclassify(d1, queue, 120), 120);
+  // $1 left at $0.02 a page: 50 (the minimum).
+  raw.exec("INSERT INTO page_index (url, site, content_hash, slot, model, cost_usd, indexed_at) VALUES ('https://ex.com/paid', 'ex.com', 'h', 'guide', 'qwen/qwen3.7-flash', 0.02, '2026-10-01')");
+  assert.equal(await reclassify(d1, queue, { totalCapUsd: 1, dailyCapUsd: 100, now: new Date('2026-10-12T10:00:00Z') }), 50);
+  assert.deepEqual(sent.map((b) => b.length), [50]);
+  sent.length = 0;
+  // $2.40 left: 120.
+  assert.equal(await reclassify(d1, queue, { totalCapUsd: 2.4, dailyCapUsd: 100, now: new Date('2026-10-12T10:00:00Z') }), 120);
   assert.deepEqual(sent.map((b) => b.length), [100, 20]);
   const urls = sent.flat().map((m) => m.body.url);
-  assert.ok(!urls.includes('https://ex.com/ok'));
+  assert.ok(!urls.includes('https://ex.com/ok') && !urls.includes('https://ex.com/paid'));
   assert.equal(new Set(urls).size, 120);
 });
 
@@ -562,6 +759,17 @@ test('consumer acks indexed and invalid messages, retries failures with backoff'
   // URLs are normalised: fragment dropped, host lowercased, path percent-encoded.
   assert.equal(parseMessage({ site: 'ex.com', url: 'HTTPS://EX.com/a b#frag', contentHash: 'b'.repeat(64) }).url, 'https://ex.com/a%20b');
   assert.throws(() => parseMessage({ site: 'ex.com', url: 'ftp://ex.com/a', contentHash: 'b'.repeat(64) }), /http/);
+  // Client-side routes are pages of their own; anchors aren't.
+  const route = (url: string) => parseMessage({ site: 'docsify.js.org', url, contentHash: 'b'.repeat(64) }).url;
+  assert.equal(route('https://docsify.js.org/#/cdn'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#/cdn?id=latest'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#intro'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#/cdn#heading'), 'https://docsify.js.org/#/cdn');
+  assert.equal(route('https://docsify.js.org/#/guide/'), 'https://docsify.js.org/#/guide');
+  assert.equal(route('https://docsify.js.org/#/'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#/?id=x'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#//'), 'https://docsify.js.org/');
+  assert.equal(route('https://docsify.js.org/#'), 'https://docsify.js.org/');
 });
 
 test('topic prefixes with non-BMP characters match (SQLite counts characters, not UTF-16 units)', async () => {
@@ -597,12 +805,18 @@ test('query embeddings are cached by normalised text; documents are never cached
   await embed(['a', 'b'], 'document');
   assert.equal(calls.length, 3);
   assert.equal(normalizeQuery(' A\tB '), 'a b');
-  // site and slot are part of the key.
-  const scoped = cachedQueryEmbed(async (texts) => { calls.push(texts); return texts.map(() => [0]); }, cache, { site: 'ex.com', slot: 'guide' });
-  await scoped(['verify webhook signature'], 'query');
-  await scoped(['Verify webhook signature'], 'query');
-  assert.equal(calls.length, 4);
+  // The key is the text alone: the vector doesn't depend on site or slot filters.
+  assert.equal(store.size, 1);
   // A broken cache only costs a call.
   const broken = cachedQueryEmbed(async (t) => t.map(() => [1]), { match: async () => { throw new Error('x'); }, put: async () => { throw new Error('y'); } } as unknown as Cache);
   assert.deepEqual(await broken(['q'], 'query'), [[1]]);
+});
+
+test('one URL normaliser for queue messages and the admin route', () => {
+  assert.equal(pageHash('#/a/b/?x=1#y'), '#/a/b');
+  assert.equal(pageHash('#intro'), '');
+  assert.equal(pageHash(''), '');
+  // The admin route calls the same function on its parsed URL.
+  assert.equal(normalizePageUrl(new URL('https://Docs.Example.com/x.md#/route/')), 'https://docs.example.com/x.md#/route');
+  assert.equal(normalizePageUrl(new URL('https://docs.example.com/x.md#section')), 'https://docs.example.com/x.md');
 });

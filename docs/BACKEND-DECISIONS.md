@@ -380,7 +380,12 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   topic counts. Classification comes after embedding so that a failure there
   costs nothing. The consumer never reads the crawler's `pages` table; the
   message and R2 are the whole contract. The message URL is normalised (parsed,
-  fragment dropped, `href`), so one page has one spelling.
+  `href`), so one page has one spelling; `src/lib/urls.ts` does it for both
+  queue messages and `POST /v1/admin/index`. Plain anchors (`#intro`) are
+  dropped; a client-side route (`#/cdn`, as on docsify sites, one page per
+  route) is kept, cut at a `?` or a second `#`, with trailing slashes trimmed;
+  the bare root route `#/` is dropped. The crawler sends URLs already in this
+  form.
 - **Classification cache:** a successful result is stored at
   `classify/<contentHash>.json` in R2 before anything else is written, and
   read back first on every attempt, so a retry after a Vectorize or D1 failure
@@ -398,29 +403,57 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   to the dead-letter queue `index-pages-dlq-<env>` (nothing consumes it; it's
   for inspection). Bad messages (missing fields, non-http(s) URL, URL not on
   `site`, non-hex hash) and a missing R2 object are acked and logged instead:
-  retrying can't fix them. Classification failures are not retried (see
-  below), so retries are only for Workers AI, Vectorize and D1 errors.
+  retrying can't fix them. A classifier that is unavailable (every model
+  failed transiently: timeout, dropped connection, 429, 5xx or another HTTP
+  error) throws, so the message is retried with backoff; the R2 cache means
+  any part that succeeded isn't paid for again. From the 4th delivery of a
+  new page (about 3.5 minutes of backoff in) it is indexed unclassified
+  (`model` `none`) instead, so a long outage can't leave a first-seen page
+  unsearchable in the dead-letter queue, out of the daily job's reach. A
+  reclassify message keeps retrying: its page is already searchable. Output that fails validation
+  is not retried here (see "Unclassified pages").
 - **Cost caps:** `index_costs(site, day)` sums OpenRouter `usage.cost` per
   site per UTC day, failed attempts included, plus an account-wide row with
-  site `*`. When a response has no usage (timeout, dropped connection, cut-off
-  body, gateway error) the call is charged an estimate: prompt characters / 4
-  at the input price plus all 8,000 `max_tokens` at the output price, from a
-  per-model table at about twice OpenRouter's listed prices (unknown models
-  priced higher still). Once a site reaches `INDEX_DAILY_CAP_USD` (default $2)
+  site `*`. Reported `usage.cost` is used when present. Otherwise a call that
+  may have been billed (timeout, dropped connection, a 200 whose body broke
+  off, an unreadable 5xx such as a gateway timeout page) is charged an
+  estimate: prompt characters / 4 at the input price plus all 8,000
+  `max_tokens` at the output price, from a per-model table at about twice
+  OpenRouter's listed prices (unknown models priced higher still). HTTP
+  errors that come back with an OpenRouter error body (429, 4xx, most 5xx)
+  aren't billed and are charged nothing. Once a site reaches `INDEX_DAILY_CAP_USD` (default $2)
   or the account reaches `INDEX_DAILY_TOTAL_CAP_USD` (default $10), pages are
   still chunked, embedded and searchable but not classified: `slot` `other`,
   no topics or entities, `model` `none`. The check runs before each call, so
   up to 3 concurrent consumers can overshoot by one call each (about a tenth
   of a cent).
 - **Unclassified pages:** `model` is `none` (cap reached, or no
-  `OPENROUTER_API_KEY`: indexing works without the key) or `failed` (both
-  models failed, for any reason: invalid output, HTTP errors, timeouts). Such
-  rows don't count as indexed for the idempotency check, and a daily cron
-  (`17 4 * * *` UTC, after the caps reset) re-enqueues the 200 oldest of them
-  (`src/index/reclassify.ts`); the rest follow on later days. The cron does
-  nothing without the API key. Re-enqueued pages are re-embedded too (fractions
-  of a cent), because Vectorize can't update a vector's `slot` metadata without
-  its values.
+  `OPENROUTER_API_KEY`: indexing works without the key) or `failed` (no model
+  produced valid output and at least one answered with output that failed
+  validation; all-transient failures throw instead, see "Retries"). Such rows
+  don't count as indexed for the idempotency check.
+- **Reclassifying** (a message for content already indexed but unclassified):
+  a classification already in the R2 cache is free, so it is applied whatever
+  the caps say. Otherwise the caps are checked first, and if one is reached
+  the message is `unchanged` without reading anything else. Otherwise only the
+  classification-derived data changes: `page_index`, `entities`, topic counts
+  and each vector's `slot` metadata. Vectorize can't update metadata alone, so
+  vectors are read back with `getByIds` (20 at a time) and upserted with their
+  own values; only vectors missing from the index are embedded again, from the
+  chunk text in D1. Chunks and FTS rows are untouched.
+- **Attempts:** `page_index.attempts` counts `failed` results for the current
+  content (reset to 0 by a success or new content). After 3 the daily job
+  stops re-enqueuing the page; a content change starts over.
+- **Daily reclassify job** (cron `17 4 * * *` UTC, after the caps reset;
+  `src/index/reclassify.ts`): re-enqueues the oldest `none`/`failed` pages
+  with `attempts < 3` (index `page_index_model (model, indexed_at)`). The batch
+  is today's remaining account budget (`INDEX_DAILY_TOTAL_CAP_USD` minus spend)
+  divided by the average cost of the last 500 classified pages (or the
+  estimate for a 20,000-character page when there are none), clamped to
+  [50, 2000]. Each site gets at most `INDEX_DAILY_CAP_USD` / that average
+  pages (`ROW_NUMBER() OVER (PARTITION BY site ORDER BY indexed_at)`), so one
+  site with a large backlog, which its own cap would stop anyway, can't take
+  the whole batch from the others. The cron does nothing without the API key.
 - **Classifier output** is validated, not trusted: `slot` must be in the
   enum, `topic_path` needs 2-4 levels (normalised to lowercase slugs of
   letters, digits, `.`, `_`, `-`, so `/` can join them), summary required;
@@ -470,14 +503,16 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   re-checked against D1, since vector metadata can lag a re-index.
 - **Topics:** the `topics` table counts pages per topic prefix (`a`, `a/b`,
   `a/b/c`). Indexing a page recounts every prefix of its old and new paths
-  with `COUNT(*)` over `page_index`, in the same transaction after the
-  `page_index` upsert, and deletes zero rows; counts are never adjusted by ±1,
-  so concurrent consumers or a drifted row can't leave them wrong. `page_index.topic`
-  holds the joined path for prefix queries: `topic = ? OR topic LIKE ? ESCAPE
-  '\'`, with `%`, `_` and `\` escaped in the prefix (`_` is a valid topic
-  character). Not `substr`: SQLite counts characters and JS `length` counts
-  UTF-16 units, so a topic with a non-BMP letter would mismatch. LIKE ignores
-  ASCII case, which doesn't matter for lowercase topics.
+  from `page_index`, in the same transaction after the `page_index` write, and
+  deletes zero rows; counts are never adjusted by ±1, so concurrent consumers
+  or a drifted row can't leave them wrong. `page_index.topic` holds the joined
+  path. A prefix `p` is counted, and topic packages are read, as two index
+  range scans on `(site, topic)`: `topic = p`, and `topic >= p || '/' AND
+  topic < p || '0'`, which holds exactly the topics starting with `p/` (`0`
+  follows `/` in byte order). A unit test checks with `EXPLAIN QUERY PLAN`
+  that both use `page_index_site_topic` and nothing scans the table. (`LIKE`
+  can't use the index here and scanned the whole site; `substr` compared
+  SQLite's character count with JS's UTF-16 length.)
 - **Packages** (`GET /v1/packages`): `q` runs the hybrid search (top 40 chunks
   for the site); `topic` takes the chunks of every page under that topic.
   Pages are ordered by their best chunk, chunks within a page by document
@@ -494,15 +529,16 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   `text/markdown; charset=utf-8`, 404 when nothing matches.
 - **Public reads** (`/v1/search`, `/v1/sites/:site/topics`, `/v1/packages`) go
   through the read rate limiter and send `public, max-age=60, s-maxage=60`.
+  `q` is required and at most 200 characters, `limit` 1-50 (default 10), `slot`
+  must be in the enum, `site` must look like a hostname.
 - **Query embeddings:** every search (and `?q=` package) embeds the query, and
   a flood could use up the account's Workers AI rate limit, which indexing
   needs too. So `/v1/search` and `/v1/packages?q=` also go through
   `SEARCH_LIMITER` (60/min per IP, namespaces 4110-4112), and query vectors
   are cached in `caches.default` for 10 minutes keyed by the model and a
-  sha256 of the normalised query (lowercased, whitespace collapsed), `site`
-  and `slot`. A cache error only costs the embedding call.
-  `q` is required and at most 200 characters, `limit` 1-50 (default 10), `slot`
-  must be in the enum, `site` must look like a hostname.
+  sha256 of the normalised query (lowercased, whitespace collapsed). The
+  vector doesn't depend on `site` or `slot`, so they aren't in the key. A
+  cache error only costs the embedding call.
 - **`POST /v1/admin/index {url, queue?}`** fetches the page with the same
   anonymous, SSRF-checked fetch as verification, refuses HTML (send the `.md`
   URL; HTML-to-Markdown is the crawler's job), stores it at
