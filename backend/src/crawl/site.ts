@@ -16,10 +16,11 @@ import {
   sample,
   twinUrl,
   underRoot,
+  verifyLlms,
 } from './discover.ts';
 import type { TwinPattern } from './discover.ts';
 import { crawlFetch, HostLimiter, MAX_URL } from './polite.ts';
-import type { FetchImpl } from './polite.ts';
+import type { CrawlFetch, FetchImpl } from './polite.ts';
 import { ALLOW_ALL, DISALLOW_ALL, parseRobots } from './robots.ts';
 import type { Robots } from './robots.ts';
 import { parseSitemap } from './sitemap.ts';
@@ -60,6 +61,9 @@ export interface Discovery {
   llmsUrl: string | null;
   llmsFullUrl: string | null;
   llmsFullTooLarge: boolean;
+  // Fetched with a 200, plain text or Markdown, an H1 first and a link (verifyLlms).
+  llmsVerified: boolean;
+  llmsFullVerified: boolean;
   sitemapUrlsCount: number;
   twinRatio: number | null;
   twinPattern: TwinPattern | null;
@@ -85,6 +89,8 @@ export interface DiscoverOptions {
   // The page a crawl request came from: always planned, first (its Markdown
   // twin when it has one, else its HTML), and the browser crawl starts there.
   priorityUrl?: string;
+  // Told every fetch's redirect chain and outcome (link health, src/links/links.ts).
+  onFetch?: (chain: string[], result: CrawlFetch) => void;
 }
 
 export function robotsFrom(file: RobotsFile): Robots {
@@ -115,7 +121,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
   let requests = 0;
   const get = async (url: string, cap?: number) => {
     requests++;
-    return crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, allowed: robots.allowed });
+    return crawlFetch(url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap, allowed: robots.allowed, onFetch: o.onFetch });
   };
   const allowed = (url: string) => robots.allowed(pathOf(url));
   const sameSite = (url: string) => {
@@ -130,6 +136,8 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     llmsUrl: null,
     llmsFullUrl: null,
     llmsFullTooLarge: false,
+    llmsVerified: false,
+    llmsFullVerified: false,
     sitemapUrlsCount: 0,
     twinRatio: null,
     twinPattern: null,
@@ -155,13 +163,17 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
       // Recorded where it ended up: /docs/llms.txt often redirects to /llms.txt.
       if (r.ok && !r.notModified && !r.over && looksLikeText(r.contentType, r.text)) {
         out.llmsUrl = r.url;
+        out.llmsVerified = verifyLlms(r.contentType, r.text);
         links = llmsLinks(r.text, out.llmsUrl);
       }
     }
     if (!out.llmsFullUrl && allowed(`${base}/llms-full.txt`)) {
       // Only existence matters here; the page fetch reads it in full later.
       const r = await get(`${base}/llms-full.txt`, 64_000);
-      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text))) out.llmsFullUrl = r.url;
+      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text))) {
+        out.llmsFullUrl = r.url;
+        out.llmsFullVerified = verifyLlms(r.contentType, r.text);
+      }
     }
     if (out.llmsUrl && out.llmsFullUrl) break;
   }
@@ -388,6 +400,7 @@ export async function fetchPlanned(
         etag: before?.etag,
         lastModified: before?.last_modified,
         timeoutMs: o.timeoutMs,
+        onFetch: o.onFetch,
       });
       if (!r.ok) return r.skipped ? SKIP : null;
       if (r.notModified) return { ...p, title: null, markdown: null, etag: r.etag, lastModified: r.lastModified };

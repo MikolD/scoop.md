@@ -378,3 +378,27 @@ export async function siteApprovals(db: D1Database, sites: string[]): Promise<Ma
     .all<{ site: string; approved: number; status: string }>();
   return new Map(results.map((r) => [r.site, Boolean(r.approved)]));
 }
+
+// Bad link targets met in each site's pages (link_refs × link_status).
+export async function brokenLinkCounts(db: D1Database, sites: string[]): Promise<Map<string, number>> {
+  if (!sites.length) return new Map();
+  const { results } = await db
+    .prepare(
+      `SELECT r.site AS site, COUNT(*) AS n FROM link_refs r JOIN link_status s ON s.url = r.url
+       WHERE s.ok = 0 AND r.site IN (${sites.map(() => '?').join(', ')}) GROUP BY r.site`,
+    )
+    .bind(...sites)
+    .all<{ site: string; n: number }>();
+  return new Map(results.map((r) => [r.site, r.n]));
+}
+
+export async function brokenLinks(db: D1Database, site: string, limit = 500) {
+  const { results } = await db
+    .prepare(
+      `SELECT r.url AS url, r.page_url AS pageUrl, s.status AS status, s.final_url AS finalUrl, s.checked_at AS checkedAt, s.bad_checks AS badChecks
+       FROM link_refs r JOIN link_status s ON s.url = r.url WHERE r.site = ? AND s.ok = 0 ORDER BY s.checked_at DESC LIMIT ?`,
+    )
+    .bind(site, limit)
+    .all<{ url: string; pageUrl: string; status: number | null; finalUrl: string | null; checkedAt: string; badChecks: number }>();
+  return results;
+}

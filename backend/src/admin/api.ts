@@ -5,7 +5,7 @@
 import seedList from '../../seeds/devtools.json' with { type: 'json' };
 import { buildPackage, withCurrentPage } from '../../../extension/lib/package.js';
 import { json, readJson } from '../api/http.ts';
-import { profileJson, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
+import { profileJson, renderPackage, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
 import { viewOf } from '../crawl/requests.ts';
 import { runCosts } from '../db/crawl.ts';
 import { runPrefix } from '../crawl/collect.ts';
@@ -21,7 +21,7 @@ import { purgeSiteIndex } from '../index/purge.ts';
 import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { MAX_CRAWL_PAGES, validateCrawl } from '../lib/validate.ts';
-import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
+import { DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { search } from '../search/search.ts';
 import { topicTree } from '../search/topics.ts';
@@ -351,6 +351,7 @@ const routes: Route[] = [
     handler: async ({ env, url }) => {
       const p = page(url);
       const { rows, more } = await q.listSites(env.DB, { status: text(url, 'status', 20), q: text(url, 'q', 100)?.toLowerCase(), limit: p.limit, offset: p.offset });
+      const broken = await q.brokenLinkCounts(env.DB, rows.map((r) => r.site));
       return json(200, {
         sites: rows.map((r) => ({
           site: r.site,
@@ -364,6 +365,7 @@ const routes: Route[] = [
           gate: r.gate_method ? { category: r.gate_category, method: r.gate_method, reason: r.gate_reason } : null,
           source: r.source,
           approved: Boolean(r.approved),
+          brokenLinks: broken.get(r.site) ?? 0,
           lastCrawledAt: r.last_crawled_at,
           lastRun: r.last_run_id ? { id: r.last_run_id, status: r.last_run_status, startedAt: r.last_run_started_at } : null,
           updatedAt: r.updated_at,
@@ -377,14 +379,26 @@ const routes: Route[] = [
     pattern: /^\/api\/sites\/([^/]+)$/,
     handler: async ({ env, params }) => {
       const site = siteArg(params[0]);
-      const [profile, counts, topics, runs] = await Promise.all([
+      const [profile, counts, topics, runs, broken] = await Promise.all([
         crawlStore(env).getProfile(site),
         q.siteCounts(env.DB, site),
         siteTopics(env.DB, site),
         q.siteRuns(env.DB, site),
+        q.brokenLinkCounts(env.DB, [site]),
       ]);
       if (!profile && !counts.pages && !counts.indexed && !runs.length) throw notFound('Nothing known about this site');
-      return json(200, { site, profile: profile && profileFull(profile), counts, topics: topicTree(topics.rows), runs: runs.map(runJson) });
+      return json(200, {
+        site, profile: profile && profileFull(profile), counts: { ...counts, brokenLinks: broken.get(site) ?? 0 }, topics: topicTree(topics.rows), runs: runs.map(runJson),
+      });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/api\/sites\/([^/]+)\/broken-links$/,
+    // Links in the site's pages whose targets are bad (unlinked in everything served).
+    handler: async ({ env, params }) => {
+      const site = siteArg(params[0]);
+      return json(200, { site, links: await q.brokenLinks(env.DB, site) });
     },
   },
   {
@@ -538,7 +552,7 @@ const routes: Route[] = [
         chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
       }
       if (!chunks.length) throw notFound('Nothing indexed matches');
-      const markdown = buildIndexPackage({ site, label, chunks, budget });
+      const markdown = await renderPackage(env.DB, { site, label, chunks, budget });
       return json(200, { site, label, budget, chunks: chunks.length, markdown });
     },
   },

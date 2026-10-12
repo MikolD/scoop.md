@@ -636,6 +636,7 @@ async function sites(r) {
           { label: 'Pages', get: (s) => fmtInt(s.pages), cls: 'num' },
           { label: 'Indexed', get: (s) => fmtInt(s.indexed), cls: 'num' },
           { label: 'llms.txt', get: (s) => (s.hasLlms ? 'yes' : ''), cls: 'hide-sm' },
+          { label: 'Broken links', get: (s) => (s.brokenLinks ? h('a', { href: `#/sites/${enc(s.site)}`, class: 'warn' }, fmtInt(s.brokenLinks)) : ''), cls: 'num' },
           { label: 'Last crawl', get: (s) => (s.lastRun ? h('span', { class: 'row' }, time(s.lastRun.startedAt), pill(s.lastRun.status)) : ''), cls: 'nowrap' },
           { label: 'Search', get: (s) => (!s.approved && s.status !== 'not_devtool' ? approvalButtons(s.site) : ''), cls: 'nowrap' },
         ], d.sites, 'No sites match.'),
@@ -658,7 +659,7 @@ async function siteDetail(r) {
   const qs = new URLSearchParams();
   if (topic) qs.set('topic', topic);
   if (r.params.get('cursor')) qs.set('cursor', r.params.get('cursor'));
-  const [d, pages] = await Promise.all([api(`sites/${enc(site)}`), api(`sites/${enc(site)}/pages?${qs}`)]);
+  const [d, pages, broken] = await Promise.all([api(`sites/${enc(site)}`), api(`sites/${enc(site)}/pages?${qs}`), api(`sites/${enc(site)}/broken-links`)]);
   const p = d.profile;
   const active = p?.crawling || d.runs.some((x) => ACTIVE.has(x.status));
   const startUrl = d.runs[0]?.startUrl ?? `https://${site}/`;
@@ -691,6 +692,7 @@ async function siteDetail(r) {
           stat(fmtInt(d.counts.indexPending), 'waiting to queue'),
           stat(fmtInt(d.counts.chunks), 'chunks'),
           stat(fmtInt(d.counts.skills), 'shared skills'),
+          stat(fmtInt(d.counts.brokenLinks), 'broken links'),
           stat(fmtUsd(d.counts.classifyUsd), 'classification spend'))),
         card('Topics', topicTreeView(d.topics, site))),
       card(h('span', {}, topic ? ['Pages under ', h('code', {}, topic), ' ', h('a', { href: `#/sites/${enc(site)}`, class: 'small' }, 'all pages')] : 'Pages'),
@@ -705,6 +707,12 @@ async function siteDetail(r) {
         ], pages.pages, 'No pages.'),
         pager(pages.next, r.params, `#/sites/${enc(site)}`)),
       card('Crawl history', runsTable(d.runs, { site: false })),
+      h('div', { id: 'broken' }, card(`Broken links (${fmtInt(broken.links.length)})`, table([
+        { label: 'Link', get: (x) => h('span', { class: 'mono small' }, x.url), cls: 'url' },
+        { label: 'Status', get: (x) => (x.status == null ? 'no answer' : String(x.status)), cls: 'num' },
+        { label: 'Found on', get: (x) => pageLink(x.pageUrl, x.pageUrl), cls: 'url hide-sm' },
+        { label: 'Checked', get: (x) => h('span', { class: 'row' }, time(x.checkedAt), x.badChecks > 1 ? pill('permanent') : pill('recheck')), cls: 'nowrap' },
+      ], broken.links, 'No broken links.'))),
     ],
   };
 }

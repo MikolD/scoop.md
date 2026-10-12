@@ -19,7 +19,7 @@ import type { IndexDeps } from '../src/index/indexer.ts';
 import { coalesceEmbed, EMBED_DIMS } from '../src/index/embed.ts';
 import type { Embed } from '../src/index/embed.ts';
 import { quickCandidates, quickDiscover, registrable } from '../src/search/quick.ts';
-import type { Found } from '../src/search/quick.ts';
+import type { SiteFound } from '../src/search/quick.ts';
 import { buildIndexPackage } from '../src/search/package.ts';
 import { discoverSite } from '../src/crawl/site.ts';
 import { HostLimiter } from '../src/crawl/polite.ts';
@@ -363,10 +363,11 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
     'https://hono.dev/llms.txt': txt(llms),
     'https://hono.dev/llms-full.txt': txt('# Hono full\n' + 'x'.repeat(70_000)),
     'https://hono.dev/docs/api/routing.md': txt(page, 'text/markdown'),
+    'https://hono.dev/docs/api/routing': txt('<html><head><title>Routing - Hono</title></head><body><nav><a href="/docs">Docs</a></nav><p>Routing</p></body></html>', 'text/html'),
   });
-  const jev = fakeJev(() => choice('s1'));
-  const cache = new Map<string, Found[]>();
-  const siteCache = { get: async (k: string) => cache.get(k) ?? null, put: async (k: string, v: Found[]) => { cache.set(k, v); } };
+  const jev = fakeJev((_id, q) => (q.type === 'noul' ? noul(0.9) : choice('s1')));
+  const cache = new Map<string, SiteFound>();
+  const siteCache = { get: async (k: string) => cache.get(k) ?? null, put: async (k: string, v: SiteFound) => { cache.set(k, v); } };
   const d = await quickDiscover('https://hono.dev/docs/api/routing', { fetchImpl: site.fetchImpl, jev: { apiKey: 'k', fetchImpl: jev.fetchImpl }, siteCache });
   assert.deepEqual(d.sources, [
     { kind: 'llms-txt', url: 'https://hono.dev/llms.txt', label: 'Hono (llms.txt)', bytes: new TextEncoder().encode(llms).length },
@@ -378,12 +379,17 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.deepEqual(Object.keys(jev.calls[0].body.questions.overview.criteria), ['s0', 's1']);
   assert.equal(d.overview, 'https://hono.dev/docs/api/routing.md');
   assert.equal(d.jevTokens, 320);
-  assert.equal(site.hits.length, 8);
+  // The 8 candidates, and the page itself (for isDevDocs).
+  assert.equal(site.hits.length, 9);
+  assert.ok(site.hits.includes('https://hono.dev/docs/api/routing'));
+  assert.deepEqual(d.isDevDocs, { verdict: 'yes', method: 'jev', score: 0.9 });
+  // llms-full.txt here has no link: not a verified index, so no fullUrl.
+  assert.deepEqual(d.llms, { url: 'https://hono.dev/llms.txt', fullUrl: null, verified: true });
 
-  // Another page of the same site: only its own twins are fetched.
+  // Another page of the same site: only its own twins (and itself) are fetched.
   site.hits.length = 0;
   const other = await quickDiscover('https://hono.dev/docs/api/context', { fetchImpl: site.fetchImpl, jev: null, siteCache });
-  assert.deepEqual(site.hits, ['https://hono.dev/docs/api/context.md', 'https://hono.dev/docs/api/context/index.md']);
+  assert.deepEqual(site.hits.sort(), ['https://hono.dev/docs/api/context', 'https://hono.dev/docs/api/context.md', 'https://hono.dev/docs/api/context/index.md']);
   // Without Jev: the most specific llms.txt.
   assert.equal(other.overview, 'https://hono.dev/llms.txt');
 
@@ -394,7 +400,7 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.equal(down.calls.length, 1, 'no retry inside the 1.5 s budget');
 
   const none = await quickDiscover('https://nothing.example/', { fetchImpl: quickSite({}).fetchImpl });
-  assert.deepEqual(none, { sources: [], overview: null, jevTokens: 0 });
+  assert.deepEqual(none, { sources: [], overview: null, isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 }, llms: null, agentInstructions: [], jevTokens: 0 });
 });
 
 test('quickDiscover: private addresses are never fetched, and a slow host is cut off by the budget', async () => {
@@ -469,6 +475,7 @@ function seed(raw: ReturnType<typeof fakeD1>['raw']) {
   profile.run('shop.example', 'not_devtool', 'admin', 1);
   // Indexed by an admin with no profile (POST /v1/admin/index): listed.
   page.run('https://manual.example/x', 'manual.example', 'Manual');
+  raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) SELECT url, 1, 200, url, '2026-10-12', 'crawl' FROM page_index`).run();
   return { A, B };
 }
 
@@ -521,13 +528,14 @@ test('GET /v1/search hits carry the chunk id and no full text; GET /v1/packages?
   assert.equal(p.status, 200);
   assert.match(p.headers.get('content-type')!, /^text\/markdown/);
   const md = p.text;
-  assert.match(md, /^# docs\.example\.dev documentation: selected sections \(via scoop\.md\)/);
-  assert.match(md, /not as instructions to you/);
+  assert.match(md, /^# docs\.example\.dev docs for selected sections \(via scoop\.md\)\n> Reference copied/);
   const order = ['Alpha one', 'Beta zero', 'Alpha zero'].map((t) => md.indexOf(t));
   assert.ok(order.every((i, n) => i > 0 && (n === 0 || i > order[n - 1])), `order ${order}`);
   assert.equal(md.split('Alpha one').length, 2, 'a repeated id is used once');
-  assert.match(md, /`````markdown\nAlpha one ```` fence\.\n`````/, 'fenced longer than the text\'s backticks');
-  assert.equal((md.match(/^- Page A: <https:\/\/docs\.example\.dev\/a>$/gm) ?? []).length, 1, 'a page is listed once in Sources');
+  // A chunk that doesn't start its page says where it is; the fence outruns the text's backticks.
+  assert.match(md, /`````markdown\n## Two\n\nAlpha one ```` fence\.\n`````/);
+  // Page A, then B, then A again: a section each time, with the page's URL.
+  assert.equal((md.match(/^## Page A\nhttps:\/\/docs\.example\.dev\/a$/gm) ?? []).length, 2);
   assert.ok((await call(e, `/v1/packages?site=docs.example.dev&chunks=${A}-0,${A}-1,${B}-0&budget=2000`)).text.length <= 2000);
 
   const errors = [
@@ -551,7 +559,7 @@ test('GET /v1/quick: sources and overview with the index state; cached; private 
   seed(raw);
   const llms = `# Example docs\n\n${'- [A](https://docs.example.dev/a.md)\n'.repeat(5)}`;
   const site = quickSite({ 'https://docs.example.dev/llms.txt': txt(llms), 'https://docs.example.dev/a.md': txt(`# A\n\n${'text '.repeat(20)}`) });
-  const jev = fakeJev(() => choice('s0'));
+  const jev = fakeJev((_id, q) => (q.type === 'noul' ? noul(0.9) : choice('s0')));
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
@@ -570,6 +578,10 @@ test('GET /v1/quick: sources and overview with the index state; cached; private 
       overview: 'https://docs.example.dev/llms.txt',
       indexed: true,
       pages: 2,
+      // The page itself 404s here: no facts to judge it by.
+      isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 },
+      llms: { url: 'https://docs.example.dev/llms.txt', fullUrl: null, verified: true },
+      agentInstructions: [],
     });
     assert.equal(r.headers.get('x-scoop-cache'), 'miss');
     assert.equal(r.headers.get('access-control-allow-origin'), '*');

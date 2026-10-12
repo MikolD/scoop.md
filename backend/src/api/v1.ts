@@ -5,6 +5,7 @@ import { CrawlStore, runCosts, STALE_RUN_HOURS } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
 import type { SkillRow } from '../db/store.ts';
+import type { Skill } from '../lib/types.ts';
 import { SLOTS } from '../index/classify.ts';
 import type { Slot } from '../index/classify.ts';
 import { indexDeps } from '../index/deps.ts';
@@ -25,10 +26,13 @@ import { fetchSource, verifyAll } from '../lib/verify.ts';
 import { ingestEvents } from '../telemetry/ingest.ts';
 import type { ApiUsage } from '../telemetry/ingest.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
+import type { PackageInput } from '../search/package.ts';
+import { siteInstructions } from '../agents/instructions.ts';
+import { checkLinks, linkStates, normalizeLink, queueLinks, rewriteLinks, saveLinks, statesFor } from '../links/links.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
-import type { QuickSource } from '../search/quick.ts';
+import type { QuickDiscovery } from '../search/quick.ts';
 import { search } from '../search/search.ts';
 import type { SearchDeps } from '../search/search.ts';
 import { topicTree } from '../search/topics.ts';
@@ -83,9 +87,25 @@ async function liveRow(store: Store, id: string) {
 // a takedown won the race: 410 for that skill rather than a 500.
 async function loadLive(store: Store, row: SkillRow) {
   const skill = await store.load(row);
-  if (skill) return skill;
+  if (skill) return cleanLinks(store.db, skill);
   if ((await store.getRow(row.id))?.removed_at) throw new ApiError('removed', 'This skill was removed', 410);
   throw new Error(`R2 object missing for ${row.id}`);
+}
+
+// A shared skill as served: links in its sections to targets not known to be
+// ok lose their URL, and related links not known to be ok are left out.
+async function cleanLinks(db: D1Database, skill: Skill): Promise<Skill> {
+  const states = await statesFor(
+    db,
+    skill.site,
+    skill.sections.flatMap((sec) => (sec.content ? [{ text: sec.content, base: sec.url }] : [])),
+    skill.relatedLinks.map((l) => l.url),
+  );
+  return {
+    ...skill,
+    sections: skill.sections.map((sec) => (sec.content ? { ...sec, content: rewriteLinks(sec.content, sec.url, states).text } : sec)),
+    relatedLinks: skill.relatedLinks.filter((l) => states.get(l.url) === 'ok'),
+  };
 }
 
 export const searchDeps = (env: Env): SearchDeps => ({
@@ -128,6 +148,31 @@ const QUICK_CACHE_SECONDS = 3600;
 // GET /v1/packages?chunks=: chunk IDs (src/index/indexer.ts: 32 hex of the URL's hash, then the ordinal).
 const CHUNK_ID = /^[0-9a-f]{32}-\d{1,5}$/;
 const MAX_PACKAGE_CHUNKS = 30;
+// POST /v1/links/check: URLs per request, and live checks within the time budget.
+const MAX_LINK_CHECK = 200;
+const LIVE_CHECKS = 20;
+const LIVE_CHECK_MS = 1500;
+
+// A package with everything around it: the site's verified docs index, its
+// instructions for agents, and the state of every link it would contain
+// (unknown ones are queued for a check and left unlinked).
+export async function renderPackage(db: D1Database, input: Omit<PackageInput, 'links' | 'docsIndex' | 'instructions'>): Promise<string> {
+  const [profile, instructions] = await Promise.all([
+    db.prepare('SELECT llms_url, llms_full_url, has_llms_verified, has_llms_full_verified FROM site_profiles WHERE site = ?').bind(input.site)
+      .first<{ llms_url: string | null; llms_full_url: string | null; has_llms_verified: number; has_llms_full_verified: number }>(),
+    siteInstructions(db, input.site),
+  ]);
+  const docsIndex = profile?.has_llms_verified && profile.llms_url
+    ? { url: profile.llms_url, fullUrl: profile.has_llms_full_verified ? profile.llms_full_url : null }
+    : null;
+  const links = await statesFor(
+    db,
+    input.site,
+    input.chunks.map((c) => ({ text: c.text, base: c.url })),
+    [...input.chunks.map((c) => c.url), docsIndex?.url, docsIndex?.fullUrl, ...instructions.map((i) => i.url), ...(input.related ?? []).map((r) => r.url)],
+  );
+  return buildIndexPackage({ ...input, links, docsIndex, instructions });
+}
 
 // The Cache API (absent outside Workers, e.g. in the node tests).
 const edgeCache = () => (typeof caches === 'undefined' ? null : caches.default);
@@ -301,7 +346,24 @@ const routes: Route[] = [
       ]);
       const verified = await verifyAll(skill.sections, skill.site, { allowLocalhost: allowLocalhost(env) });
       // Labels, title, related links and pageUrl come from the verified sources, never the client.
-      const { id, duplicate } = await store.add(withServerText(skill, verified), install);
+      const served = withServerText(skill, verified);
+      const { id, duplicate } = await store.add(served, install);
+      // Served links must be known ok (src/links/links.ts): its sources were
+      // just fetched; its related links and the links in its text get a live
+      // check now (up to 20, 1.5 s), the rest are queued.
+      const started = Date.now();
+      await saveLinks(env.DB, served.sections.flatMap((sec) => {
+        const u = normalizeLink(sec.url);
+        return u ? [{ url: u, ok: true, status: 200, finalUrl: u }] : [];
+      }), 'live');
+      const states = await statesFor(env.DB, served.site, served.sections.flatMap((sec) => (sec.content ? [{ text: sec.content, base: sec.url }] : [])), served.relatedLinks.map((l) => l.url));
+      const related = new Set(served.relatedLinks.map((l) => normalizeLink(l.url)));
+      const unknown = await env.DB.prepare('SELECT url FROM link_check_queue WHERE site = ? LIMIT 200').bind(served.site).all<{ url: string }>();
+      const todo = unknown.results.map((r) => r.url).filter((u) => !states.has(u)).sort((a, b) => Number(related.has(b)) - Number(related.has(a)));
+      if (todo.length) {
+        const live = await checkLinks(todo.slice(0, LIVE_CHECKS), { allowLocalhost: allowLocalhost(env), site: served.site, deadline: started + LIVE_CHECK_MS, timeoutMs: LIVE_CHECK_MS });
+        await saveLinks(env.DB, live, 'live');
+      }
       return json(duplicate ? 200 : 201, { id, status: 'verified', duplicate });
     },
   },
@@ -370,6 +432,48 @@ const routes: Route[] = [
     },
   },
   {
+    method: 'POST',
+    pattern: /^\/v1\/links\/check$/,
+    name: '/v1/links/check',
+    // For packages the extension builds itself: which links are known ok or
+    // bad. Unknown ones are queued for the hourly check; up to 20 are checked
+    // live within 1.5 s.
+    handler: async ({ req, env, ip }) => {
+      await limitSearch(env, ip);
+      const body = (await readJson(req, 300_000)) as { urls?: unknown };
+      const urls = body?.urls;
+      if (!Array.isArray(urls) || urls.length > MAX_LINK_CHECK || !urls.every((u) => typeof u === 'string' && u.length <= 2048)) {
+        throw bad(`urls must be an array of at most ${MAX_LINK_CHECK} strings`);
+      }
+      const started = Date.now();
+      const asked = [...new Set(urls as string[])];
+      const norm = new Map(asked.map((u) => [u, normalizeLink(u)]));
+      const states = await linkStates(env.DB, [...norm.values()].filter((u): u is string => u !== null));
+      // Neither http(s) nor public: never a link to give an agent.
+      for (const [raw, n] of norm) {
+        if (!n) continue;
+        try { assertFetchable(n, { allowLocalhost: allowLocalhost(env) }); } catch { states.set(n, 'bad'); norm.set(raw, n); }
+      }
+      const unknown = [...new Set([...norm.values()].filter((n): n is string => n !== null && !states.has(n)))];
+      if (unknown.length) {
+        const live = await checkLinks(unknown.slice(0, LIVE_CHECKS), {
+          allowLocalhost: allowLocalhost(env),
+          deadline: started + LIVE_CHECK_MS,
+          timeoutMs: LIVE_CHECK_MS,
+        });
+        await saveLinks(env.DB, live, 'live');
+        for (const r of live) states.set(r.url, r.ok ? 'ok' : 'bad');
+        await queueLinks(env.DB, unknown.filter((u) => !states.has(u)), null);
+      }
+      const out: { ok: string[]; bad: string[]; unknown: string[] } = { ok: [], bad: [], unknown: [] };
+      for (const [raw, n] of norm) {
+        const st = n ? states.get(n) : 'bad';
+        out[st ?? 'unknown'].push(raw);
+      }
+      return json(200, out);
+    },
+  },
+  {
     method: 'GET',
     pattern: /^\/v1\/quick$/,
     name: '/v1/quick',
@@ -384,7 +488,7 @@ const routes: Route[] = [
       const cache = edgeCache();
       const key = new Request(`https://quick-cache.scoop.md/v1?url=${encodeURIComponent(pageUrl)}`);
       const [cached, status] = await Promise.all([cache?.match(key).catch(() => undefined), retryD1(() => siteStatus(env.DB, site))]);
-      let found: { sources: QuickSource[]; overview: string | null };
+      let found: Omit<QuickDiscovery, 'jevTokens'>;
       if (cached) {
         found = await cached.json();
       } else {
@@ -399,7 +503,8 @@ const routes: Route[] = [
               })).catch(() => {}),
           },
         });
-        found = { sources: d.sources, overview: d.overview };
+        const { jevTokens: _, ...rest } = d;
+        found = rest;
         if (d.jevTokens) await addCost(env.DB, site, new Date(), jevCostUsd(d.jevTokens, usdPerMTok(env.JEV_USD_PER_MTOK)), d.jevTokens).catch(() => {});
         await cache?.put(key, new Response(JSON.stringify(found), {
           headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` },
@@ -408,7 +513,10 @@ const routes: Route[] = [
       Object.assign(usage, { results: found.sources.length, hit: found.overview !== null });
       return json(
         200,
-        { site, sources: found.sources, overview: found.overview, indexed: status.indexed, pages: status.pages },
+        {
+          site, sources: found.sources, overview: found.overview, indexed: status.indexed, pages: status.pages,
+          isDevDocs: found.isDevDocs, llms: found.llms, agentInstructions: found.agentInstructions,
+        },
         { 'cache-control': CACHE_LIST, 'x-scoop-cache': cached ? 'hit' : 'miss' },
       );
     },
@@ -588,6 +696,8 @@ const routes: Route[] = [
       const limit = intParam(url, 'limit', 10, 1, 50);
       const hits = await search(searchDeps(env), { q, site, slot, limit });
       Object.assign(usage, { results: hits.length, hit: hits.length > 0 });
+      // Snippets keep only links known to be ok.
+      const states = await statesFor(env.DB, site ?? null, hits.map((h) => ({ text: h.snippet, base: h.url })), []);
       return json(
         200,
         {
@@ -595,7 +705,7 @@ const routes: Route[] = [
           site: site ?? null,
           slot: slot ?? null,
           hits: hits.map((h) => ({
-            id: h.id, url: h.url, title: h.title, heading_path: h.heading_path, snippet: h.snippet, slot: h.slot, topic_path: h.topic_path, score: h.score,
+            id: h.id, url: h.url, title: h.title, heading_path: h.heading_path, snippet: rewriteLinks(h.snippet, h.url, states).text, slot: h.slot, topic_path: h.topic_path, score: h.score,
           })),
         },
         { 'cache-control': CACHE_LIST },
@@ -644,7 +754,7 @@ const routes: Route[] = [
         const picked = ids.flatMap((id) => rows.get(id) ?? []);
         Object.assign(usage, { results: picked.length, hit: picked.length > 0 });
         if (!picked.length) throw notFound('No such chunks');
-        return new Response(buildIndexPackage({ site, label: 'selected sections', chunks: picked, budget, inOrder: true }), {
+        return new Response(await renderPackage(env.DB, { site, label: 'selected sections', chunks: picked, budget, inOrder: true }), {
           headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
         });
       }
@@ -676,7 +786,19 @@ const routes: Route[] = [
         const anchored = await retryD1(() => anchoredChunks(searchDeps(env), site, pageUrl, { anchor: look.anchor, pages: look.pages }));
         Object.assign(usage, { results: anchored?.chunks.length ?? 0, hit: Boolean(anchored?.anchored) });
         if (!anchored) throw notFound('Nothing indexed matches');
-        const body = buildIndexPackage({ site, label: anchored.label, chunks: anchored.chunks, budget });
+        // The page itself is the content; other pages are offered as related links.
+        const anchorUrl = anchored.anchored ? look.anchor?.url : undefined;
+        const related: { title: string; url: string }[] = [];
+        if (anchorUrl) {
+          for (const c of anchored.chunks) if (c.url !== anchorUrl && !related.some((r) => r.url === c.url)) related.push({ title: c.title, url: c.url });
+        }
+        const body = await renderPackage(env.DB, {
+          site,
+          label: anchored.label,
+          chunks: anchorUrl ? anchored.chunks.filter((c) => c.url === anchorUrl) : anchored.chunks,
+          budget,
+          related: related.slice(0, 10),
+        });
         await cache?.put(key, new Response(body, { headers: { 'content-type': headers['content-type'], 'cache-control': `public, max-age=${PACKAGE_CACHE_SECONDS}` } })).catch(() => {});
         return new Response(body, { headers: { ...headers, 'x-scoop-cache': 'miss' } });
       }
@@ -694,7 +816,7 @@ const routes: Route[] = [
       }
       Object.assign(usage, { results: chunks.length, hit: chunks.length > 0 });
       if (!chunks.length) throw notFound('Nothing indexed matches');
-      return new Response(buildIndexPackage({ site, label, chunks, budget }), {
+      return new Response(await renderPackage(env.DB, { site, label, chunks, budget }), {
         headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
       });
     },

@@ -42,12 +42,19 @@ export class HostLimiter {
     this.nextStart = nextStart;
   }
 
-  async run<T>(fn: () => Promise<T>): Promise<T> {
+  // With a deadline (ms since epoch), a turn that would start at or after it
+  // throws a TimeoutError instead of waiting for it.
+  async run<T>(fn: () => Promise<T>, deadline?: number): Promise<T> {
     while (this.active >= this.concurrency) await new Promise<void>((r) => this.waiting.push(r));
     this.active++;
     try {
       const now = this.clock.now();
       const start = Math.max(now, this.nextStart);
+      if (deadline !== undefined && start >= deadline) {
+        const e = new Error('no turn before the deadline');
+        e.name = 'TimeoutError';
+        throw e;
+      }
       this.nextStart = start + this.intervalMs;
       if (start > now) await this.clock.sleep(start - now);
       return await fn();
@@ -79,6 +86,9 @@ export interface CrawlFetchOptions {
   timeoutMs?: number;
   // Defaults to Markdown first; some servers answer that with an error.
   accept?: string;
+  // Told every URL of the redirect chain and how the fetch ended (link health,
+  // src/links/links.ts). Not called when nothing was requested (a bad URL).
+  onFetch?: (chain: string[], result: CrawlFetch) => void;
 }
 
 export type CrawlFetch =
@@ -194,19 +204,25 @@ export async function crawlFetch(url: string, o: CrawlFetchOptions): Promise<Cra
       }
     });
 
+  const chain = [current.href];
+  const done = (result: CrawlFetch) => {
+    o.onFetch?.(chain, result);
+    return result;
+  };
   for (let n = 0; n <= MAX_REDIRECTS; n++) {
     const h = await hop(current);
-    if (h.redirect === null) return h.result;
+    if (h.redirect === null) return done(h.result);
     let next: URL;
     try {
       next = assertFetchable(new URL(h.redirect, current).href, { allowLocalhost: o.allowLocalhost });
     } catch {
-      return { ok: false, url, status: h.status, reason: 'redirect to a URL that may not be fetched' };
+      return done({ ok: false, url, status: h.status, reason: 'redirect to a URL that may not be fetched' });
     }
-    if (next.href.length > MAX_URL) return { ok: false, url, status: h.status, reason: `redirect URL longer than ${MAX_URL}`, skipped: true };
-    if (normalizeSite(next.hostname) !== site) return { ok: false, url, status: h.status, reason: `redirects off site (${next.origin})`, skipped: true };
-    if (o.allowed && !o.allowed(next.pathname + next.search)) return { ok: false, url, status: h.status, reason: 'redirect target disallowed by robots.txt', skipped: true };
+    if (next.href.length > MAX_URL) return done({ ok: false, url, status: h.status, reason: `redirect URL longer than ${MAX_URL}`, skipped: true });
+    if (normalizeSite(next.hostname) !== site) return done({ ok: false, url, status: h.status, reason: `redirects off site (${next.origin})`, skipped: true });
+    if (o.allowed && !o.allowed(next.pathname + next.search)) return done({ ok: false, url, status: h.status, reason: 'redirect target disallowed by robots.txt', skipped: true });
     current = next;
+    chain.push(current.href);
   }
-  return { ok: false, url, status: null, reason: 'too many redirects' };
+  return done({ ok: false, url, status: null, reason: 'too many redirects' });
 }

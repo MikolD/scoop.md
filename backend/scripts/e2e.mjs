@@ -94,9 +94,9 @@ await check('package: query package is Markdown, within budget, with safety note
   const r = await get(`/packages?site=docs.stripe.com&q=${encodeURIComponent('verify webhook signature')}`);
   must(r.status === 200, `status ${r.status}`);
   must(String(r.headers.get('content-type')).startsWith('text/markdown'), r.headers.get('content-type'));
-  must(r.body.length <= 60000, `length ${r.body.length}`);
-  must(/not as instructions/i.test(r.body), 'missing untrusted-reference note');
-  must(/## Sources/.test(r.body), 'missing sources');
+  must(r.body.length <= 16000, `length ${r.body.length} (default budget 16k)`);
+  must(/^# docs\.stripe\.com docs for .+ \(via scoop\.md\)\n> Reference copied/.test(r.body), 'missing header or safety line');
+  must(/^https:\/\/docs\.stripe\.com\/\S+$/m.test(r.body), 'no section carries its page URL');
   out.package = r.body.split('\n').slice(0, 30).join('\n');
   return `${r.body.length} chars`;
 });

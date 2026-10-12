@@ -415,6 +415,19 @@ export interface SiteStatus {
   pages: number;
   lastCrawledAt: string | null;
   request: Pick<RequestView, 'id' | 'state' | 'phase' | 'pagesFound' | 'pagesIndexed'> | null;
+  // The devtool gate's last verdict: list (allow/deny lists), signals, or jev (the AI check).
+  isDevDocs: { verdict: 'yes' | 'no' | 'unknown'; method: 'list' | 'signals' | 'jev'; score: number };
+  llms: { url: string; fullUrl: string | null; verified: boolean } | null;
+  agentInstructionsCount: number;
+}
+
+// The gate's verdict on a site, as /v1/quick reports it for a page.
+export function devDocsVerdict(p: SiteProfileRow | null): SiteStatus['isDevDocs'] {
+  const m = p?.gate_method;
+  const method = m === 'allowlist' || m === 'denylist' ? 'list' : m === 'ai' ? 'jev' : 'signals';
+  if (!p || !m || m === 'forced') return { verdict: 'unknown', method, score: 0 };
+  const verdict = p.status === 'not_devtool' ? 'no' : p.gate_category === 'devtool-docs' ? 'yes' : p.gate_category ? 'no' : 'unknown';
+  return { verdict, method, score: p.gate_confidence ?? 0 };
 }
 
 // GET /v1/sites/:site/status: what the library has for a site, and the most
@@ -422,10 +435,11 @@ export interface SiteStatus {
 // "crawl this site?" decision. Unknown sites are status 'new'.
 export async function siteStatus(db: D1Database, site: string, now = new Date()): Promise<SiteStatus> {
   const since = new Date(now.getTime() - COOLDOWN_DAYS * 86_400_000).toISOString();
-  const [profileRes, pagesRes, reqRes] = await db.batch([
+  const [profileRes, pagesRes, reqRes, instrRes] = await db.batch([
     db.prepare('SELECT * FROM site_profiles WHERE site = ?').bind(site),
     db.prepare('SELECT COUNT(*) AS n FROM page_index WHERE site = ?').bind(site),
     db.prepare('SELECT * FROM crawl_requests WHERE site = ? AND created_at > ? ORDER BY created_at DESC, id DESC LIMIT 1').bind(site, since),
+    db.prepare('SELECT COUNT(*) AS n FROM site_agent_instructions WHERE site = ?').bind(site),
   ]);
   const profile = (profileRes.results[0] as SiteProfileRow | undefined) ?? null;
   const pages = Number((pagesRes.results[0] as { n: number } | undefined)?.n ?? 0);
@@ -452,6 +466,11 @@ export async function siteStatus(db: D1Database, site: string, now = new Date())
     pages,
     lastCrawledAt: profile?.last_crawled_at ?? null,
     request,
+    isDevDocs: devDocsVerdict(profile),
+    llms: profile?.llms_url
+      ? { url: profile.llms_url, fullUrl: profile.has_llms_full_verified ? profile.llms_full_url : null, verified: Boolean(profile.has_llms_verified) }
+      : null,
+    agentInstructionsCount: Number((instrRes.results[0] as { n: number } | undefined)?.n ?? 0),
   };
 }
 

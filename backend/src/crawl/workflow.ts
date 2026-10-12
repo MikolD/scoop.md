@@ -22,7 +22,10 @@ import { indexDeps } from '../index/deps.ts';
 import { gateSite, GateUndecided, listVerdict } from './gate.ts';
 import { ondemandShare, startWaiting } from './requests.ts';
 import type { GateAi, GateVerdict } from './gate.ts';
-import { usdPerMTok } from '../lib/jev.ts';
+import { jevCostUsd, usdPerMTok } from '../lib/jev.ts';
+import { checkRunLinks, normalizeLink, recordsFromFetch, saveLinks } from '../links/links.ts';
+import type { LinkRecord } from '../links/links.ts';
+import { findRunInstructions } from '../agents/instructions.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
@@ -139,12 +142,15 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       }
 
       const d: DiscoverySummary = await step.do('discover', NET, async () => {
+        const fetched: LinkRecord[] = [];
         const { plan, ...rest } = await discoverSite(p.startUrl, robots, {
           allowLocalhost: local,
           budget: p.maxPages,
           limiter: new HostLimiter({ intervalMs: interval }),
           priorityUrl: p.priorityUrl,
+          onFetch: (chain, r) => fetched.push(...recordsFromFetch(chain, r)),
         });
+        await saveLinks(env.DB, fetched, 'crawl');
         await env.CRAWL.put(planKey(p.runId), JSON.stringify(plan), { httpMetadata: { contentType: 'application/json' } });
         return { ...rest, planSize: plan.length, html: plan.some((pl) => pl.kind === 'page-html') };
       });
@@ -160,6 +166,9 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           has_llms_full: d.llmsFullUrl ? 1 : 0,
           llms_url: d.llmsUrl,
           llms_full_url: d.llmsFullUrl,
+          has_llms_verified: d.llmsVerified ? 1 : 0,
+          has_llms_full_verified: d.llmsFullVerified ? 1 : 0,
+          llms_checked_at: now,
           md_twins_ratio: d.twinRatio,
           twin_pattern: d.twinPattern,
           sitemap_urls_count: d.sitemapUrlsCount,
@@ -185,7 +194,14 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           const s = store();
           const prev = await s.prevPages(batch.map((b) => b.url));
           const limiter = new HostLimiter({ intervalMs: interval, nextStart });
-          const { pages, failed, skipped } = await fetchPlanned(batch, prev, robots, { limiter, allowLocalhost: local });
+          const fetched: LinkRecord[] = [];
+          const { pages, failed, skipped } = await fetchPlanned(batch, prev, robots, {
+            limiter,
+            allowLocalhost: local,
+            onFetch: (chain, r) => fetched.push(...recordsFromFetch(chain, r)),
+          });
+          // A page stored from its Markdown twin stands for its HTML page too.
+          await saveLinks(env.DB, [...fetched, ...pageRecords(pages)], 'crawl');
           const stats = await s.record(p.runId, p.site, pages);
           await s.addRunCounts(p.runId, { ...stats, failed, skipped });
           return limiter.nextStart;
@@ -270,7 +286,9 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
           await step.do(`browser-pages-${i}`, NET, async () => {
             const obj = await env.CRAWL.get(batchKey(p.runId, i));
             if (!obj) throw new Error(`browser batch ${i} missing`);
-            const stats = await store().record(p.runId, p.site, await obj.json<FetchedSource[]>());
+            const pages = await obj.json<FetchedSource[]>();
+            await saveLinks(env.DB, pageRecords(pages), 'crawl');
+            const stats = await store().record(p.runId, p.site, pages);
             await store().addRunCounts(p.runId, { ...stats, failed: 0, skipped: 0 });
           });
           await flush(`index-browser-${i}`);
@@ -279,6 +297,37 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
 
       // Anything a failed flush left pending (this run or an earlier one).
       await flush('index-final');
+
+      // Link health and the site's instructions for agents. Neither may fail
+      // the crawl: an error is logged and the run goes on.
+      await step.do('links', { retries: { limit: 1, delay: '10 seconds' }, timeout: '10 minutes' }, async () => {
+        try {
+          return await checkRunLinks({ db: env.DB, bucket: env.SKILLS }, p.runId, p.site, {
+            allowLocalhost: local,
+            limiter: new HostLimiter({ intervalMs: interval }),
+            allowed: robotsFrom(robots).allowed,
+          });
+        } catch (e) {
+          console.error(JSON.stringify({ step: 'links', site: p.site, error: e instanceof Error ? e.message : String(e) }));
+          return null;
+        }
+      });
+      if (env.JEV_API_KEY) {
+        await step.do('agent-instructions', { retries: { limit: 1, delay: '10 seconds' }, timeout: '5 minutes' }, async () => {
+          try {
+            const r = await findRunInstructions({ db: env.DB, bucket: env.SKILLS, jev: { apiKey: env.JEV_API_KEY! } }, p.runId, p.site, origin, {
+              allowLocalhost: local,
+              limiter: new HostLimiter({ intervalMs: interval }),
+              allowed: robotsFrom(robots).allowed,
+            });
+            if (r.tokens) await addCost(env.DB, p.site, new Date(), jevCostUsd(r.tokens, usdPerMTok(env.JEV_USD_PER_MTOK)), r.tokens);
+            return r;
+          } catch (e) {
+            console.error(JSON.stringify({ step: 'agent-instructions', site: p.site, error: e instanceof Error ? e.message : String(e) }));
+            return null;
+          }
+        });
+      }
       await step.do('cleanup', NET, () => cleanup(env, p.runId));
       await step.do('finish', DB, async () => {
         const now = new Date().toISOString();
@@ -316,6 +365,14 @@ function gateAi(env: Env, site: string): GateAi | null {
     addCost: (usd: number, jevTokens?: number) => addCost(db, site, new Date(), usd, jevTokens),
     timeoutMs: 60_000,
   };
+}
+
+// Stored pages are ok links (their sources were just fetched with a 200).
+function pageRecords(pages: FetchedSource[]): LinkRecord[] {
+  return pages.flatMap((pg) => {
+    const url = normalizeLink(pg.url);
+    return url ? [{ url, ok: true, status: 200, finalUrl: url }] : [];
+  });
 }
 
 // One message per new or changed page, body exactly { site, url, contentHash, runId }:

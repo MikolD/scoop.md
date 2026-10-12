@@ -23,6 +23,10 @@ export interface SiteProfileRow {
   has_llms_full: number;
   llms_url: string | null;
   llms_full_url: string | null;
+  // llms.txt checked to be a docs index for agents (migrations/0012): 200, text, an H1 and a link.
+  has_llms_verified: number;
+  has_llms_full_verified: number;
+  llms_checked_at: string | null;
   md_twins_ratio: number | null;
   twin_pattern: string | null;
   sitemap_urls_count: number;
@@ -82,6 +86,8 @@ export interface CrawlRunRow {
 
 // A run's spend, broken down. Per page is over the pages it stored (new +
 // changed); the total is final once every one of them is indexed.
+type LlmsCheck = 'has_llms_verified' | 'has_llms_full_verified' | 'llms_checked_at';
+
 export function runCosts(r: CrawlRunRow) {
   const pagesStored = r.pages_new + r.pages_changed;
   const totalUsd = r.cost_usd + r.gate_cost_usd + r.classify_cost_usd + r.embed_cost_usd;
@@ -243,7 +249,8 @@ export class CrawlStore {
   // Discovery facts. Never touches status, crawl_state or last_crawled_at,
   // which describe the last finished crawl.
   async putProfile(
-    p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at' | `gate_${string}` | 'source' | 'approved'>,
+    p: Omit<SiteProfileRow, 'pages_fetched' | 'status' | 'crawl_state' | 'last_crawled_at' | `gate_${string}` | 'source' | 'approved' | LlmsCheck>
+      & Partial<Pick<SiteProfileRow, LlmsCheck>>,
   ): Promise<void> {
     const cols = Object.keys(p) as (keyof typeof p)[];
     await this.db

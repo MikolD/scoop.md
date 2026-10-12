@@ -26,6 +26,12 @@ export function llmsBases(origin: string, docsRoot: string, max = 3): string[] {
 
 // SPA hosts often answer any path with 200 + their HTML shell, so status alone
 // is not evidence the file exists (same rule as extension/lib/discover.js).
+// An llms.txt that really is a docs index for agents: plain text or Markdown,
+// starting with an H1, with at least one link.
+export function verifyLlms(contentType: string, body: string): boolean {
+  return /text\/(plain|markdown|x-markdown)/i.test(contentType) && /^\s*#[ \t]+\S/.test(body) && /\]\(\s*[^)\s]+\)|https?:\/\//.test(body.slice(0, 200_000));
+}
+
 export function looksLikeText(contentType: string, body: string): boolean {
   if (/text\/html/i.test(contentType)) return false;
   if (/^\s*<(!doctype|html|head|body)/i.test(body)) return false;

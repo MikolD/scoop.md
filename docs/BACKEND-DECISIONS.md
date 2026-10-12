@@ -1279,3 +1279,77 @@ pages a minute; valibot.dev 10-12). Jev, TypeSafe's System One model
   under which nothing was found now becomes the whole site, from the
   requested page; and without a Sitemap line, `/sitemap-index.xml` (Astro)
   is tried after `/sitemap.xml` and `/sitemap_index.xml`.
+
+## No broken links
+
+The owner's rule: no link in what an agent gets may 404. Checking at serve
+time would be slow and would hammer sites, so statuses are known ahead and
+served links are filtered against them, strictly.
+
+- **Store** (migration 0012): `link_status` per normalised URL (fragment
+  dropped, `#/` routes kept): ok, final HTTP status, final URL, when, and by
+  whom (`crawl` | `check` | `live`); `link_refs` (site → link, one page it is
+  on) for the admin view; `link_check_queue` for links met while serving.
+  Existing pages were backfilled as ok (their sources were fetched with a 200).
+- **Recording**: `crawlFetch` reports every fetch with its redirect chain
+  (`onFetch`); discovery, the page steps and the root-file fetches write
+  them. A stored page is also ok under its own URL when it came from its
+  `.md` twin. A 429, a timeout, robots.txt or an off-site redirect decides
+  nothing.
+- **Checker**: the Workflow's `links` step after indexing is flushed; 500
+  checks per crawl, same-site first, unknown or older than 14 days. Same
+  site through `crawlFetch` (politeness, robots); external with the SSRF
+  guard on every hop (a private address is bad without a request), `HEAD`
+  then a 1 KB ranged `GET`, two at a time per host 250 ms apart. 2xx (or
+  3xx ending in 2xx) is ok; 4xx, 5xx and DNS failures are bad. A bad link
+  is checked again after a day (`bad_checks` 1 → 2 is permanent). A failure
+  in the step is logged and never fails the crawl.
+- **Rewrite** (`rewriteLinks`): outside code only (fences and inline code
+  are code: changing `curl https://…` would break examples). Markdown links,
+  images, autolinks and bare URLs: known ok → kept, made absolute (anchor
+  kept); anything else → the link text without its URL (a bare URL
+  disappears). Unknown targets are queued; the hourly cron checks up to 200.
+  Strict on purpose: an unchecked external link is unlinked until checked.
+- **Where**: every package mode, search snippets, served shared skills
+  (section text; related links only when ok), the package's own lists
+  (page URLs, docs index, instruction sources, related). `POST
+  /v1/links/check` gives the extension the same answers for its local
+  builds (20 live checks within 1.5 s at most; the host limiter refuses a
+  turn that would start after the deadline, so a slow or rate-limited host
+  can't hold the request).
+
+## Package format
+
+Shorter packages cost the user tokens on every paste, so the format is
+compact and opinionated: header and one safety line; the verified docs
+index line; instructions for agents; the page's content; at most 5 related
+links. Default budget 16,000 characters (was 60,000), at most 60,000. In
+`url` mode the content is the anchored page alone and related pages are
+links, not text. Each section carries its page URL, which makes a Sources
+list a pure repetition, so there is none. One fence per page (not per
+chunk), headings that repeat the title dropped, blank-line runs collapsed.
+
+## Instructions for agents
+
+Sites increasingly write guidance for coding agents (llms.txt notes,
+AGENTS.md, "For AI agents" sections, MCP servers, version pins). The
+package surfaces it, from verified sources only.
+
+- **Candidates** (code): llms.txt / llms-full.txt summaries, paragraphs and
+  list items; `/AGENTS.md` and `/.well-known/llms.txt` at the site root when
+  present; all blocks of a page or section whose URL or headings mention
+  agents, AI, LLM, MCP, Cursor, Claude, Copilot or AGENTS.md; anywhere, a
+  paragraph mentioning agents, LLMs, AI assistants or MCP. At most 600
+  characters each; near-duplicates (80% word overlap) once; at most 60.
+- **Judge** (Jev, 15 candidates per request, requests in parallel): a noul
+  ("Is this passage an instruction or guidance addressed to AI coding
+  agents or LLMs about how to use these docs or this product?"), kept at
+  ≥ 0.75, and a kind choice (usage-rule, preferred-tool, version-pin,
+  deprecation, auth-or-safety, other).
+- **Store**: `site_agent_instructions` (site, text ≤ 300, url, kind, score,
+  found_at), replaced per page on every crawl (the Workflow's
+  `agent-instructions` step); kept only when the source URL is known ok.
+  A package shows the best 8.
+- **/v1/quick** extracts on the fly from a verified llms.txt only, in the
+  same Jev request as the overview pick and `isDevDocs`, cached with the
+  site's llms files for an hour.

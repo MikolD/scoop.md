@@ -216,6 +216,8 @@ export function createApp(store, { allowLocalhost = false, adminToken = '', fetc
         return send(req, res, 200, {
           site, indexed: false, status: crawlOutcome === 'rejected' && latest ? 'not_devtool' : 'new', crawling: Boolean(latest) && !crawlOutcome, pages: 0, lastCrawledAt: null,
           request: v ? { id: v.id, state: v.state, phase: v.phase, pagesFound: v.pagesFound, pagesIndexed: v.pagesIndexed } : null,
+          // No gate, crawl or index here: nothing known.
+          isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 }, llms: null, agentInstructionsCount: 0,
         });
       }
 

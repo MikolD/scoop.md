@@ -44,6 +44,8 @@ function fixtureServer() {
       case '/docs/guide.md': return text(MD);
       case '/llms.txt': return text(LLMS, 'text/plain; charset=utf-8');
       case '/docs/guide': return text(HTML, 'text/html; charset=utf-8');
+      // Linked from the guide: a related link that really exists (served links must not 404).
+      case '/docs/auth': return text('# Auth\n\nAPI keys.\n');
       case '/docs/spa.md': return text('<!doctype html><html><body><div id="root"></div></body></html>', 'text/html');
       case '/docs/private.md': res.writeHead(401); return res.end('login required');
       case '/docs/moved.md': res.writeHead(302, { location: `http://127.0.0.1:${new URL(DOCS).port}/docs/guide.md` }); return res.end();
@@ -393,7 +395,10 @@ const PHASES = new Set(['gate', 'discover', 'fetch', 'browser', 'index', 'done']
 test('site status: unknown sites are new (never 404); private hosts are refused', async () => {
   const r = await call('GET', '/v1/sites/never-crawled.example/status', { install: null });
   assert.equal(r.status, 200, JSON.stringify(r.json));
-  assert.deepEqual(r.json, { site: 'never-crawled.example', indexed: false, status: 'new', crawling: false, pages: 0, lastCrawledAt: null, request: null });
+  assert.deepEqual(r.json, {
+    site: 'never-crawled.example', indexed: false, status: 'new', crawling: false, pages: 0, lastCrawledAt: null, request: null,
+    isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 }, llms: null, agentInstructionsCount: 0,
+  });
   assert.match(r.headers.get('cache-control') ?? '', /max-age=15/);
   for (const host of ['10.0.0.1', 'printer.local']) expectError(await call('GET', `/v1/sites/${host}/status`, { install: null }), 400, 'invalid_request');
 });
