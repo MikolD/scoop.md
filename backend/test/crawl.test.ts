@@ -448,7 +448,9 @@ test('discoverSite records where llms.txt ended up after a same-site redirect', 
 // --- admin crawl requests
 
 test('validateCrawl: defaults, scoping and refusals', () => {
-  assert.deepEqual(validateCrawl({ site: 'WWW.Ex.com' }, false), { site: 'ex.com', startUrl: 'https://ex.com/', maxPages: 500, maxMinutes: 10 });
+  assert.deepEqual(validateCrawl({ site: 'WWW.Ex.com' }, false), { site: 'ex.com', startUrl: 'https://ex.com/', maxPages: 500, maxMinutes: 10, force: false });
+  assert.equal(validateCrawl({ site: 'ex.com', force: true }, false).force, true);
+  assert.throws(() => validateCrawl({ site: 'ex.com', force: 'yes' }, false), /force must be a boolean/);
   assert.equal(validateCrawl({ site: 'ex.com', startUrl: 'https://ex.com/docs/', maxPages: 30 }, false).maxPages, 30);
   assert.throws(() => validateCrawl({ site: 'ex.com', startUrl: 'https://other.com/' }, false), /not on ex.com/);
   assert.throws(() => validateCrawl({ site: 'ex.com', maxPages: 0 }, false), /maxPages/);

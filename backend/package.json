@@ -9,7 +9,9 @@
     "test": "node --test --disable-warning=ExperimentalWarning test/*.test.ts",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "deploy:staging": "wrangler deploy --env staging",
-    "deploy:production": "wrangler deploy --env production"
+    "deploy:production": "wrangler deploy --env production",
+    "crawl:seeds": "node scripts/crawl-seeds.mjs",
+    "crawl:site": "node scripts/crawl-seeds.mjs"
   },
   "license": "MIT",
   "dependencies": {
