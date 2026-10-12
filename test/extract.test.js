@@ -98,7 +98,8 @@ test('prose fixtures pass the library\'s containment check against their own HTM
 });
 
 test('stripTracking drops utm_*, click IDs and ref, and keeps real parameters', () => {
-  assert.equal(stripTracking('https://ex.com/docs/a?utm_source=x&utm_medium=y&_gl=1&gclid=2&fbclid=3&mc_cid=4&mc_eid=5&ref=hn&ref_src=t'), 'https://ex.com/docs/a');
+  assert.equal(stripTracking('https://ex.com/docs/a?utm_source=x&utm_medium=y&_gl=1&gclid=2&fbclid=3&mc_cid=4&mc_eid=5&ref_src=t&ref_url=u'), 'https://ex.com/docs/a');
+  assert.equal(stripTracking('https://ex.com/docs/a?ref=main&utm_source=x'), 'https://ex.com/docs/a?ref=main', 'ref=<branch> selects content');
   assert.equal(stripTracking('https://ex.com/docs/a?tab=js&UTM_Campaign=z&page=2#install'), 'https://ex.com/docs/a?tab=js&page=2#install');
   assert.equal(stripTracking('https://ex.com/docs/a'), 'https://ex.com/docs/a');
   assert.equal(stripTracking('https://ex.com/s?q=a%20b&utm_source=x'), 'https://ex.com/s?q=a%20b', 'the rest is not re-encoded');
@@ -115,7 +116,21 @@ test('related links keep their query (minus tracking) and drop fragments except 
   </nav>`);
   assert.deepEqual(relatedLinks(doc, 'https://ex.com/docs/page').map((l) => l.url), [
     'https://ex.com/docs/api?lang=js',
-    'https://ex.com/docs/api?lang=py',
     'https://ex.com/docs/#/guide',
+  ], 'one link per path: the first query variant wins');
+});
+
+test('docsify heading anchors are the route, not more related links', () => {
+  const doc = parse(`<aside>
+    <a href="#/quickstart">Quick start</a>
+    <a href="#/quickstart?id=initialize">Initialize</a>
+    <a href="#/quickstart?id=preview">Preview</a>
+    <a href="#/configuration?id=el">el</a>
+    <a href="#/configuration">Configuration</a>
+    <a href="#/more-pages?id=x">This page's heading</a>
+  </aside>`);
+  assert.deepEqual(relatedLinks(doc, 'https://ex.com/#/more-pages').map((l) => l.url), [
+    'https://ex.com/#/quickstart',
+    'https://ex.com/#/configuration',
   ]);
 });

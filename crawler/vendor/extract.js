@@ -5,9 +5,10 @@
 // `containment`), so everything emitted here must be text the page contains:
 // no invented labels, and nothing from attributes except link targets.
 
+// Bare `ref` is not here: ?ref=<branch> selects content on GitHub/Gitea-style docs.
 // Tracking parameters say how someone arrived, not which page it is. Removing
 // them keeps shared URLs canonical (and under the library's query limits).
-const TRACKING = /^(utm_.*|_gl|_ga|gclid|dclid|gbraid|wbraid|fbclid|msclkid|yclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|ref|ref_src|ref_url)$/i;
+const TRACKING = /^(utm_.*|_gl|_ga|gclid|dclid|gbraid|wbraid|fbclid|msclkid|yclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|ref_src|ref_url)$/i;
 
 export function stripTracking(url) {
   const u = new URL(url);
@@ -175,25 +176,33 @@ function linkText(el) {
 // agent knows what else exists without us crawling it all up front.
 // A link as the library stores it: query kept (minus tracking), fragment
 // dropped unless it is a '#/' route.
+// A docsify heading anchor (#/route?id=heading) is the route itself.
 function linkUrl(u) {
   const clean = new URL(stripTracking(u.href));
-  if (!clean.hash.startsWith('#/')) clean.hash = '';
+  clean.hash = clean.hash.startsWith('#/') ? clean.hash.split('?')[0] : '';
   return clean.href;
+}
+
+// One link per page: query variants of a path count once (the first wins).
+function linkPage(href) {
+  const u = new URL(href);
+  return u.origin + u.pathname + u.hash;
 }
 
 export function relatedLinks(doc, pageUrl, limit = 60) {
   const page = new URL(pageUrl);
   const prefix = '/' + (page.pathname.split('/').filter(Boolean)[0] || '');
-  const seen = new Set([linkUrl(page)]);
+  const seen = new Set([linkPage(linkUrl(page))]);
   const links = [];
   for (const a of doc.querySelectorAll('nav a[href], aside a[href], [role=navigation] a[href]')) {
     let u;
     try { u = new URL(a.getAttribute('href'), pageUrl); } catch { continue; }
     if (!/^https?:$/.test(u.protocol)) continue;
-    const key = linkUrl(u);
+    const url = linkUrl(u);
+    const key = linkPage(url);
     if (u.origin !== page.origin || !u.pathname.startsWith(prefix) || seen.has(key)) continue;
     seen.add(key);
-    links.push({ url: key, text: linkText(a).trim().replace(/\s+/g, ' ').slice(0, 80) });
+    links.push({ url, text: linkText(a).trim().replace(/\s+/g, ' ').slice(0, 80) });
     if (links.length >= limit) break;
   }
   return links;
