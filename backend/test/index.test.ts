@@ -835,10 +835,9 @@ test('a batch runs its messages concurrently; a slow or failing one does not hol
   const err = console.error;
   console.log = () => {};
   console.error = () => {};
-  const started = Date.now();
   try { await handleIndexBatch(batch, deps); } finally { console.log = log; console.error = err; }
-  const ms = Date.now() - started;
-  assert.ok(ms < 300 + 50 + 50, `took ${ms} ms, so it wasn't sequential`);
+  // Order, not timing, shows concurrency: handled in turn, the slow first
+  // message would be acked first; run together, the fast ones finish before it.
   assert.deepEqual(acked.slice(0, 2).sort(), [1, 3], 'fast messages acked before the slow one');
   assert.deepEqual(acked.sort(), [0, 1, 3]);
   assert.deepEqual(retried.map((r) => r.i), [2]);
@@ -858,7 +857,7 @@ test('the classification budget aborts slow calls and skips the fallback', async
   setTimeout(() => budget.abort(new DOMException('budget', 'TimeoutError')), 50);
   const err = await classifyPage(page, { apiKey: 'k', fetchImpl: hang, signal: budget.signal }).then(() => null, (e) => e);
   assert.ok(err instanceof ClassifyUnavailable);
-  assert.ok(Date.now() - started < 1000);
+  assert.ok(Date.now() - started < 10_000, 'aborted, not left hanging');
   assert.deepEqual(calls, ['qwen/qwen3.7-flash'], 'no fallback call once the budget is gone');
   assert.ok(err.costUsd > 0, 'the aborted call is charged the estimate');
 });

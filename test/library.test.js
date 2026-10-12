@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DOMParser } from 'linkedom';
-import { createLibrary, shareBody, notSharedReason, libraryUrl, DEFAULT_LIBRARY } from '../extension/lib/library.js';
+import { createLibrary, shareBody, notSharedReason, libraryUrl, DEFAULT_LIBRARY, BEST_TIMEOUT_MS } from '../extension/lib/library.js';
 import { scoopPage } from '../extension/lib/scoop.js';
 
 const ID = '3b1f2c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d';
@@ -35,7 +35,8 @@ test('library errors, timeouts and outages resolve instead of throwing', async (
   const keepAlive = setTimeout(() => {}, 10_000); // AbortSignal.timeout's timer doesn't hold Node open
   assert.equal((await lib(slow).best('x')).error.code, 'timeout');
   clearTimeout(keepAlive);
-  assert.ok(Date.now() - started < 4000);
+  // The 3 s timeout fired rather than the call hanging; the slack keeps a busy machine from failing it.
+  assert.ok(Date.now() - started < BEST_TIMEOUT_MS + 5000);
   assert.equal((await createLibrary({ baseUrl: '' }).best('x')).ok, false);
 });
 

@@ -164,8 +164,13 @@ open, plus places where the spec and the reference server (`server/`) disagree.
   `normalizeText` are hand-written scans, not regexes: the regex versions were
   quadratic on crafted input (`'<script ' × n` took 6 s at 160 KB). Markdown
   link targets longer than 2,048 characters are not treated as links. Unit
-  tests run 2 MB adversarial inputs against a 200 ms budget; the reference
-  server has the same code and a matching test.
+  tests check linear scaling on adversarial inputs rather than a fixed time
+  (which failed on busy machines): from 250 KB to 2 MB the time must grow
+  less than 24× (linear is 8×, quadratic 64×), best of 5 interleaved runs,
+  re-measured up to 3 rounds, with a 2 s ceiling at 2 MB. A 1 MB → 2 MB ratio
+  under 3× was tried first and was itself flaky: GC in a full test process
+  pushed linear scanners to 3-4×. The reference server has the same code and
+  a matching test.
 - **Shingles are hashed** to 53-bit numbers (cyrb53) with a fresh random seed
   per comparison, instead of kept as joined strings: one 2.3 MB page took
   about 68 MB as strings, about 31 MB as a Set of hashes for 300k shingles.
