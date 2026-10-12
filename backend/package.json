@@ -11,7 +11,8 @@
     "deploy:staging": "wrangler deploy --env staging",
     "deploy:production": "wrangler deploy --env production",
     "crawl:seeds": "node scripts/crawl-seeds.mjs",
-    "crawl:site": "node scripts/crawl-seeds.mjs"
+    "crawl:site": "node scripts/crawl-seeds.mjs",
+    "e2e": "node scripts/e2e.mjs"
   },
   "license": "MIT",
   "dependencies": {
