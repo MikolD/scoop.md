@@ -1,0 +1,90 @@
+---
+// The extension's uninstall page (chrome.runtime.setUninstallURL):
+// /bye?i=<install ID>&v=<version>, or plain /bye when usage statistics were off.
+// It records the uninstall and an optional one-click reason (src/lib/beacon.ts).
+import Base from '../layouts/Base.astro';
+
+export const prerender = true;
+
+const reasons = [
+  { value: 'too_noisy', label: 'Too noisy' },
+  { value: 'didnt_work', label: "Didn't work" },
+  { value: 'privacy', label: 'Privacy' },
+  { value: 'other', label: 'Other' },
+];
+---
+
+<Base title="Uninstalled" description="scoop.md was removed from your browser.">
+  <article class="wrap page">
+    <p class="eyebrow">uninstalled</p>
+    <h1>Sorry to see you go.</h1>
+    <p class="lede">scoop.md has been removed from your browser, along with its settings and install ID.</p>
+
+    <section id="why" aria-labelledby="why-label" hidden>
+      <h2 id="why-label">What made you remove it? <span class="muted">(optional, one click)</span></h2>
+      <div class="reasons">
+        {reasons.map((r) => <button class="btn btn--quiet" type="button" data-reason={r.value}>{r.label}</button>)}
+      </div>
+    </section>
+    <p id="thanks" class="muted" role="status" hidden>Thanks, that helps.</p>
+
+    <p class="muted small">
+      Changed your mind? <a href="/">Get scoop.md again</a>. What this page records is in the <a href="/privacy">privacy policy</a>.
+    </p>
+  </article>
+</Base>
+
+<script>
+  import { send } from '../lib/beacon';
+
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  const q = new URLSearchParams(location.search);
+  const installId = q.get('i') ?? '';
+  const version = (q.get('v') ?? '').slice(0, 32);
+
+  // Only installs that had usage statistics on pass their ID.
+  if (UUID.test(installId)) {
+    send([{ name: 'uninstall', props: { installId, version } }]);
+    // The ID shouldn't linger in the address bar or history.
+    history.replaceState(null, '', location.pathname);
+    const why = document.getElementById('why')!;
+    why.hidden = false;
+    for (const b of why.querySelectorAll<HTMLButtonElement>('button[data-reason]')) {
+      b.addEventListener('click', () => {
+        send([{ name: 'uninstall_reason', props: { installId, reason: b.dataset.reason } }]);
+        why.hidden = true;
+        document.getElementById('thanks')!.hidden = false;
+      });
+    }
+  }
+</script>
+
+<style>
+  .page {
+    padding-top: clamp(2.5rem, 6vw, 4.5rem);
+    padding-bottom: 2rem;
+  }
+
+  h1 {
+    font-size: clamp(2.5rem, 1.5rem + 4vw, 4rem);
+    font-weight: 800;
+    letter-spacing: -0.04em;
+    margin-bottom: 0.75rem;
+  }
+
+  h2 {
+    font-size: 1.125rem;
+    margin: 2rem 0 0.75rem;
+  }
+
+  .reasons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .small {
+    font-size: 0.875rem;
+    margin-top: 2.5rem;
+  }
+</style>

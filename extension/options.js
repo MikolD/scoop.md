@@ -1,4 +1,4 @@
-import { createTelemetry, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
+import { createTelemetry, getInstallId, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
 
 const $ = (id) => document.getElementById(id);
 let telemetry = createTelemetry();
@@ -20,6 +20,7 @@ $('share').onchange = () => {
 
 // Off sends one telemetry_opt_out event, then nothing (lib/telemetry.js).
 telemetryEnabled(chrome).then((on) => { $('telemetry').checked = on; });
+getInstallId(chrome).then((id) => { $('install-id').textContent = id; });
 $('telemetry').onchange = async () => {
   const on = $('telemetry').checked;
   if (!on) telemetry.disable();

@@ -68,3 +68,16 @@ test('the options switch is visible when off: track to card contrast is at least
   }
   assert.match(readFileSync(ext('options.css'), 'utf8'), /\.toggle \{[^}]*background: var\(--switch-off\)/);
 });
+
+test('every usage event the backend accepts is disclosed on the privacy page and in STORE.md', () => {
+  const schema = readFileSync(new URL('../backend/src/telemetry/schema.ts', import.meta.url), 'utf8');
+  const names = [...schema.matchAll(/^ {2}(\w+): \['(extension|site)'/gm)].map((m) => m[1]);
+  assert.ok(names.length >= 20, `found ${names.length} events`);
+  const privacy = readFileSync(new URL('../site/src/pages/privacy.astro', import.meta.url), 'utf8');
+  for (const n of names.filter((n) => !['page_view', 'cta_click', 'uninstall', 'uninstall_reason'].includes(n))) assert.ok(privacy.includes(n), `privacy: ${n}`);
+  for (const s of ['Send usage statistics', '180 days', 'team@ddamoah.com', 'country', 'Global Privacy Control', 'scoop.md/bye']) {
+    assert.ok(privacy.includes(s) || privacy.includes('DELETION_EMAIL'), s);
+  }
+  const store = readFileSync(ext('STORE.md'), 'utf8');
+  for (const s of ['| Location | Yes', '| Web history | Yes', '| User activity | Yes', '`alarms`', 'Send usage statistics']) assert.ok(store.includes(s), s);
+});

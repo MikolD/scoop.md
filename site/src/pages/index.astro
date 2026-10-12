@@ -21,11 +21,11 @@ const agents = [
     <p class="lede">One click copies any docs page as Markdown for your coding agent.</p>
 
     <div class="cta">
-      <a class="btn" href={CHROME_STORE_URL ?? GITHUB_URL}>
+      <a class="btn" href={CHROME_STORE_URL ?? GITHUB_URL} data-cta={CHROME_STORE_URL ? 'chrome_store' : 'github_coming_soon'}>
         {CHROME_STORE_URL ? 'Add to Chrome' : 'Coming soon to Chrome'} <span aria-hidden="true">→</span>
       </a>
-      <a class="quiet" href="/library">Browse the library</a>
-      <a class="quiet" href={GITHUB_URL}>Open source on GitHub</a>
+      <a class="quiet" href="/library" data-cta="library">Browse the library</a>
+      <a class="quiet" href={GITHUB_URL} data-cta="github">Open source on GitHub</a>
     </div>
 
     <HeroAnimation />

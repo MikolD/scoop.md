@@ -1,10 +1,24 @@
 ---
 import Base from '../layouts/Base.astro';
-import { CONTACT_EMAIL, LEGAL_ENTITY } from '../lib/links';
+import { CONTACT_EMAIL, DELETION_EMAIL, LEGAL_ENTITY } from '../lib/links';
 
 export const prerender = true;
 
-const updated = '2026-09-30';
+const updated = '2026-10-12';
+
+// Every usage event the extension can send (docs/TELEMETRY.md).
+const events = [
+  ['install, update, browser_update', 'When the extension is installed or updated, or Chrome updates: the old and new version.'],
+  ['active_daily', 'Once a day while the browser runs: nothing beyond the common fields below.'],
+  ['popup_open, popup_close', 'You opened the popup; when it closes, how long it was open.'],
+  ['scoop_start, scoop_result', "A scoop began and how it ended: the site's hostname, the page's path (public pages only), the outcome, which kinds of sources were used and how many, the package size, whether it was cut for length, how long it took, whether the shared library had it (and its \"worked\" count), whether the page was public, and the number of related links."],
+  ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname and size.'],
+  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, signed-in page, the library refused it).'],
+  ['vote, report', "You voted or reported: the hostname, the scoop's ID, your vote or reason."],
+  ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
+  ['telemetry_opt_out, telemetry_opt_in', 'You switched usage statistics off or on.'],
+  ['error', 'Something failed: where, an error code and a short message with URLs and hostnames removed.'],
+];
 ---
 
 <Base title="Privacy" description="What the scoop.md extension reads, what leaves your device, and what the library keeps.">
@@ -24,15 +38,20 @@ const updated = '2026-09-30';
       <li>The extension reads only the tab you're on, and only when you click the button or press its shortcut.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
       <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
-      <li>No accounts. No browsing history. No ads, no trackers, and we don't sell data.</li>
-      <li>IP addresses are used for rate limiting and not stored.</li>
+      <li>
+        Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
+        path of each public docs page you scoop. Turn them off in the extension's settings ("Send usage statistics").
+      </li>
+      <li>No accounts, names or emails. Nothing about pages you don't click scoop.md on. No ads, no third-party trackers, and we don't sell data.</li>
+      <li>IP addresses are used for rate limiting and to look up your country, and are not stored.</li>
     </ul>
 
     <h2>What the extension reads</h2>
     <p>
       When you click <strong>Scoop to agent</strong>, the extension reads the active tab's address, title and page
-      content. It doesn't run in the background, doesn't see other tabs, and doesn't read your browsing history. It
-      writes the package to your clipboard; it never reads your clipboard.
+      content. It doesn't see other tabs and doesn't read your browsing history. It writes the package to your
+      clipboard; it never reads your clipboard. A small background script handles installs and updates and sends
+      queued usage statistics (once an hour at most, and only while they're on); it never reads tabs or pages.
     </p>
     <p>
       To find documentation the site already publishes, the extension requests files like <code>&lt;page&gt;.md</code>,{' '}
@@ -45,10 +64,11 @@ const updated = '2026-09-30';
     <ul>
       <li>The package on your clipboard.</li>
       <li>
-        Your settings, stored in Chrome's extension storage. Sharing on or off syncs with your Google account if you use
-        Chrome sync; the theme stays on this device.
+        Your settings, stored in Chrome's extension storage. Sharing and usage statistics on or off sync with your Google
+        account if you use Chrome sync; the theme stays on this device.
       </li>
-      <li>A random install ID the extension creates on first run. It identifies an installation, not a person.</li>
+      <li>A random install ID the extension creates on first run. It identifies an installation, not a person. The settings page shows it.</li>
+      <li>Usage events waiting to be sent (at most 500; the oldest are dropped).</li>
       <li>Anything from a page that only rendered because you're signed in. It reaches your clipboard and nowhere else.</li>
     </ul>
 
@@ -81,6 +101,53 @@ const updated = '2026-09-30';
       extension's version.
     </p>
 
+    <h2 id="usage-statistics">Usage statistics</h2>
+    <p>
+      Unless you turn them off, the extension sends anonymous usage events to <code>api.scoop.md/v1/events</code>, in
+      batches: when the popup closes, and from its background script. We use them to see who installs and keeps using
+      scoop.md, which documentation sites it's used on, what works and what breaks.
+    </p>
+    <table>
+      <thead><tr><th>Event</th><th>What it records</th></tr></thead>
+      <tbody>{events.map(([name, what]) => <tr><td><code>{name}</code></td><td>{what}</td></tr>)}</tbody>
+    </table>
+    <p>
+      Every event also carries the time, a random ID for that popup session, your install ID, the extension version, the
+      browser's name and version, the operating system and CPU architecture, the browser's interface language and your
+      time zone.
+    </p>
+    <ul>
+      <li>
+        <strong>Pages</strong>: the hostname and path of the public docs page you clicked scoop.md on, with the query
+        string, fragment and tracking parameters removed. For a page that only renders when you're signed in, only the
+        hostname. Nothing at all about pages on your computer or a private network (<code>localhost</code>, private IP
+        addresses, <code>.local</code>, <code>.internal</code> and similar).
+      </li>
+      <li><strong>Never</strong>: page content, page titles, what you copy, cookies, your name, email or Google account, or anything about tabs you didn't click scoop.md on.</li>
+      <li>
+        <strong>Worked out on our server</strong>: your country, region and continent, and the name of your network
+        provider, looked up by Cloudflare from your IP address as the request arrives; the browser family from the user
+        agent; and a hash of your IP address salted with a secret that changes every day, used only to spot abuse. The IP
+        address itself is never stored.
+      </li>
+      <li>
+        <strong>Turning it off</strong>: switch off "Send usage statistics" in the extension's settings. The extension
+        then sends one last event saying you switched it off, deletes any events still waiting, and sends nothing more
+        (not even the daily ping) until you switch it back on.
+      </li>
+      <li>
+        <strong>Uninstalling</strong>: Chrome opens <code>scoop.md/bye</code>. While usage statistics are on, its address
+        includes your install ID and version, and the page records the uninstall and, if you click one, your reason.
+      </li>
+    </ul>
+
+    <h3>Library requests</h3>
+    <p>
+      For lookups, searches and package requests to the library (including the extension's lookup by hostname), the
+      library records the route, the hostname, the search text, whether anything was found, how many results, how long it
+      took, the <code>X-Scoop-Client</code> value and the country. Not the IP address, and not an install ID.
+    </p>
+
     <h2>What the library keeps</h2>
     <ul>
       <li>
@@ -94,10 +161,15 @@ const updated = '2026-09-30';
         <strong>Request logs</strong>: method, route, status, duration and extension version. No IP addresses, install
         IDs or content.
       </li>
+      <li>
+        <strong>Usage statistics and website page views</strong>: each event in our database for 180 days, then deleted.
+        Daily counts (per day, event, hostname, country and version, with no install IDs) are kept. Every event is also
+        kept in a compressed archive for later analysis, with no fixed end date.
+      </li>
     </ul>
     <p>
-      IP addresses are used only to apply rate limits and are not stored. Scoops stay until they are taken down. When one
-      is taken down, its content is deleted and a record that it existed is kept for audit.
+      IP addresses are used only to apply rate limits and look up the country, and are not stored. Scoops stay until they
+      are taken down. When one is taken down, its content is deleted and a record that it existed is kept for audit.
     </p>
     <p>
       We run on Cloudflare, which processes requests to this website and the library on our behalf.
@@ -105,17 +177,28 @@ const updated = '2026-09-30';
 
     <h2>This website</h2>
     <p>
-      scoop.md sets no cookies and runs no analytics. Fonts are served from this site. The library pages show only the
-      public data described above.
+      scoop.md sets no cookies and loads no third-party scripts. Fonts are served from this site. The library pages show
+      only the public data described above.
+    </p>
+    <p>
+      Each page view sends a small event to <code>api.scoop.md</code>: the page's path, the referring site's hostname,
+      any <code>utm_source</code>, <code>utm_medium</code> and <code>utm_campaign</code>, and clicks on the main buttons.
+      Our server adds the country and the browser family, and counts visitors with a hash of your IP address and user
+      agent that changes every day, so a visitor can't be followed from one day to the next. If your browser sends Global
+      Privacy Control or Do Not Track, no page views or clicks are recorded. The uninstall page is described under
+      <a href="#usage-statistics">Usage statistics</a>.
     </p>
 
     <h2>Your choices</h2>
     <ul>
       <li>Turn sharing off in the extension's options. Scooping still works; nothing is uploaded.</li>
+      <li>Turn usage statistics off in the extension's options. Scooping and sharing still work.</li>
       <li>Uninstalling the extension deletes its settings and install ID from your browser.</li>
       <li>
-        To have data linked to your install ID deleted, email us. We don't know who you are, so we may need the install
-        ID from your extension to find it.
+        To have the usage statistics linked to your install ID deleted, email <a href={`mailto:${DELETION_EMAIL}`}>{DELETION_EMAIL}</a>
+        with the install ID shown on the extension's settings page. We delete its events from our database, stop accepting
+        new ones for it, and leave it out of every export of the archive. Daily counts don't contain install IDs and stay.
+        For shared scoops, votes and reports, email <a href={`mailto:${CONTACT_EMAIL}`}>{CONTACT_EMAIL}</a>.
       </li>
     </ul>
 
@@ -143,6 +226,25 @@ const updated = '2026-09-30';
 </Base>
 
 <style>
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1rem 0;
+    font-size: 0.95rem;
+  }
+
+  th,
+  td {
+    text-align: left;
+    vertical-align: top;
+    padding: 0.5rem 0.75rem 0.5rem 0;
+    border-bottom: 1px solid var(--rule);
+  }
+
+  td:first-child code {
+    overflow-wrap: anywhere;
+  }
+
   .page {
     padding-top: clamp(2.5rem, 6vw, 4.5rem);
   }

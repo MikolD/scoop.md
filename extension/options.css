@@ -36,3 +36,4 @@ main { display: grid; gap: var(--gap); }
 .foot a { color: var(--muted); }
 .foot a:hover { color: var(--link); }
 #version { margin-left: auto; }
+.mono { font-family: var(--mono); font-size: 0.95em; overflow-wrap: anywhere; user-select: all; }

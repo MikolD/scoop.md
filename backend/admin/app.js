@@ -173,7 +173,7 @@ function route() {
 
 const VIEWS = {
   '': overview, crawls, runs: runDetail, batches: batchDetail, seeds, sites: (r) => (r.parts[1] ? siteDetail(r) : sites(r)),
-  page: pageDetail, agent, library: (r) => (r.parts[1] ? librarySite(r) : library(r)), skills: skillDetail, costs,
+  page: pageDetail, agent, library: (r) => (r.parts[1] ? librarySite(r) : library(r)), skills: skillDetail, costs, telemetry,
 };
 const NAV = { '': 'overview', runs: 'crawls', batches: 'crawls', page: 'sites', skills: 'library' };
 
@@ -899,6 +899,527 @@ function crawlCostCards(c) {
       { label: 'Embeddings', get: (x) => fmtUsd(x.embedUsd, 6), cls: 'num' },
     ], c.reclassify, 'No reclassify spend in this window.'),
     h('p', { class: 'meta small' }, 'Pages first indexed unclassified (cap reached, classifier down) are classified later by the cron; that spend is kept apart from the run that crawled them.')),
+  ];
+}
+
+// ---- Telemetry ---------------------------------------------------------------
+// Usage statistics (docs/TELEMETRY.md): #/telemetry/<tab>, with ?days= for the window.
+
+const TELEMETRY_TABS = [
+  ['', 'Overview'], ['sites', 'Sites'], ['users', 'Users'], ['retention', 'Retention'], ['platforms', 'Versions & platforms'],
+  ['geo', 'Geography'], ['errors', 'Errors'], ['api', 'API usage'], ['website', 'Website'], ['export', 'Export'],
+];
+const pct = (n, d) => (d ? `${Math.round((n / d) * 100)}%` : '—');
+const fmtMs = (n) => (n == null ? '—' : n < 1000 ? `${Math.round(n)} ms` : `${(n / 1000).toFixed(1)} s`);
+const installLink = (id) => h('a', { href: `#/telemetry/users/${enc(id)}`, class: 'mono', title: id }, shortId(id));
+const tSiteLink = (site) => (site ? h('a', { href: `#/telemetry/sites/${enc(site)}`, class: 'mono' }, site) : '');
+
+function bar(v, max) {
+  const m = h('div', { class: 'meter' }, h('i'));
+  m.firstChild.style.width = `${max > 0 ? Math.min(100, (v / max) * 100) : 0}%`;
+  return m;
+}
+
+// A count with a bar scaled to the column's largest value.
+function barCol(label, key, rows, fmt = fmtInt) {
+  const max = Math.max(0, ...rows.map((r) => Number(r[key] ?? 0)));
+  return { label, get: (r) => h('div', { class: 'barcell' }, h('span', {}, fmt(r[key] ?? 0)), bar(Number(r[key] ?? 0), max)), cls: 'num' };
+}
+
+function tabs(active, days) {
+  const q = days ? `?days=${days}` : '';
+  return h('nav', { class: 'tabs', 'aria-label': 'Telemetry' },
+    TELEMETRY_TABS.map(([key, label]) => h('a', { href: `#/telemetry${key ? `/${key}` : ''}${key === 'export' || key === 'users' ? '' : q}`, class: key === active ? 'on' : undefined }, label)));
+}
+
+function windowPicker(base, days) {
+  return h('span', { class: 'row small' }, 'Window:', [7, 30, 90, 365].map((d) => (d === days ? h('b', {}, `${d}d`) : h('a', { href: `${base}?days=${d}` }, `${d}d`))));
+}
+
+function telemetryHead(title, tab, days, base) {
+  return [
+    h('div', { class: 'head' }, h('h1', {}, title), days ? windowPicker(base, days) : null),
+    tabs(tab, days),
+  ];
+}
+
+const daysOf = (r) => Math.min(365, Math.max(1, Number(r.params.get('days')) || 30));
+
+// Merges per-day series into one row per day, oldest first.
+function byDay(series) {
+  const days = new Map();
+  for (const [key, rows] of Object.entries(series)) {
+    for (const x of rows) days.set(x.day, { day: x.day, ...days.get(x.day), [key]: Number(x.n ?? x.views ?? 0) });
+  }
+  return [...days.values()].sort((a, b) => (a.day < b.day ? -1 : 1));
+}
+
+async function telemetry(r) {
+  const tab = r.parts[1] ?? '';
+  if (tab === 'sites' && r.parts[2]) return telemetrySite(r);
+  if (tab === 'users' && r.parts[2]) return telemetryInstall(r);
+  const view = { '': telemetryOverview, sites: telemetrySites, users: telemetryUsers, retention: telemetryRetention, platforms: telemetryPlatforms, geo: telemetryGeo, errors: telemetryErrors, api: telemetryApi, website: telemetryWebsite, export: telemetryExport }[tab];
+  if (!view) return [card('Not found', h('p', {}, 'No such telemetry page. '), h('a', { href: '#/telemetry' }, 'Back to telemetry'))];
+  return view(r);
+}
+
+async function telemetryOverview(r) {
+  const days = daysOf(r);
+  const o = await api(`telemetry/overview?days=${days}`);
+  const f = o.funnel;
+  const steps = [['Popup opened', 'popupOpen'], ['Scooped (copied or ready)', 'scooped'], ['Copied', 'copied'], ['Voted', 'voted']];
+  const perDay = byDay({ installs: o.perDay.installs, uninstalls: o.perDay.uninstalls, active: o.perDay.active });
+  return [
+    ...telemetryHead('Telemetry', '', days, '#/telemetry'),
+    card('Installs', h('div', { class: 'stats' },
+      stat(fmtInt(o.installs.total), 'installs seen'),
+      stat(fmtInt(o.installs.uninstalled), 'uninstalled'),
+      stat(fmtInt(o.installs.net), 'net installs'),
+      stat(fmtInt(o.installs.optedOut), 'opted out of statistics'),
+      stat(fmtInt(o.active.dau), 'DAU (today)'),
+      stat(fmtInt(o.active.wau), 'WAU (7 days)'),
+      stat(fmtInt(o.active.mau), 'MAU (30 days)'))),
+    card(`Per day (since ${o.since})`, table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      barCol('Installs', 'installs', perDay),
+      barCol('Uninstalls', 'uninstalls', perDay),
+      barCol('Active installs', 'active', perDay),
+    ], perDay, 'No installs or activity in this window.')),
+    card('Funnel', table([
+      { label: 'Step', get: (x) => x[0] },
+      { label: 'Events', get: (x) => fmtInt(f.events[x[1]]), cls: 'num' },
+      { label: 'of popup opens', get: (x) => pct(f.events[x[1]], f.events.popupOpen), cls: 'num' },
+      { label: 'Installs', get: (x) => fmtInt(f.installs[x[1]]), cls: 'num' },
+      { label: '', get: (x) => bar(f.installs[x[1]], f.installs.popupOpen), cls: 'hide-sm' },
+      { label: 'of installs', get: (x) => pct(f.installs[x[1]], f.installs.popupOpen), cls: 'num' },
+    ], steps),
+    h('p', { class: 'meta small' }, `Votes: ${fmtInt(f.votes.worked)} worked, ${fmtInt(f.votes.failed)} didn't.`)),
+    card('Library and packages', h('div', { class: 'stats' },
+      stat(o.library.hitRate == null ? '—' : pct(o.library.hits, o.library.scoops), `library hit rate (${fmtInt(o.library.hits)} of ${fmtInt(o.library.scoops)} scoops)`),
+      stat(fmtBytes(o.averages.sizeBytes) || '—', 'average package size'),
+      stat(fmtMs(o.averages.durationMs), 'average scoop duration')),
+    table([
+      { label: 'Share outcome', get: (x) => pill(x.outcome || '—') },
+      barCol('Count', 'n', o.shares),
+    ], o.shares, 'No shares in this window.')),
+  ];
+}
+
+async function telemetrySites(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/sites?days=${days}`);
+  return [
+    ...telemetryHead('Sites', 'sites', days, '#/telemetry/sites'),
+    card(`Top sites (${d.sites.length})`, table([
+      { label: 'Site', get: (s) => tSiteLink(s.site) },
+      barCol('Scoops', 'scoops', d.sites),
+      { label: 'Copied', get: (s) => fmtInt(s.copies), cls: 'num' },
+      { label: 'Installs', get: (s) => fmtInt(s.installs), cls: 'num' },
+      { label: 'Library hits', get: (s) => `${fmtInt(s.library_hits)} (${pct(s.library_hits, s.scoops)})`, cls: 'num' },
+      { label: 'Failed', get: (s) => (s.failures ? h('span', { class: 'err' }, fmtInt(s.failures)) : '0'), cls: 'num' },
+      { label: 'Votes', get: (s) => votes({ worked: s.worked, failed: s.failed }), cls: 'hide-sm' },
+      { label: 'Last', get: (s) => time(s.last_at), cls: 'nowrap' },
+    ], d.sites, 'No scoops in this window.')),
+  ];
+}
+
+async function telemetrySite(r) {
+  const site = r.parts[2];
+  const days = daysOf(r);
+  const d = await api(`telemetry/sites/${enc(site)}?days=${days}`);
+  const s = d.summary;
+  const best = Object.fromEntries(d.best.map((b) => [b.outcome, b.n]));
+  return [
+    h('p', { class: 'crumbs' }, h('a', { href: `#/telemetry/sites?days=${days}` }, 'Telemetry sites'), ' / '),
+    h('div', { class: 'head' }, h('h1', { class: 'mono' }, site), windowPicker(`#/telemetry/sites/${enc(site)}`, days), h('a', { href: `#/sites/${enc(site)}`, class: 'small' }, 'crawl profile')),
+    card(null, h('div', { class: 'stats' },
+      stat(fmtInt(s.scoops), 'scoops'),
+      stat(fmtInt(s.copies), 'copies'),
+      stat(fmtInt(s.installs), 'installs'),
+      stat(pct(s.library_hits ?? 0, s.scoops ?? 0), 'library hit rate'),
+      stat(`${fmtInt(s.worked)} / ${fmtInt(s.failed)}`, 'worked / didn\'t'),
+      stat(fmtInt(s.reports), 'reports'),
+      stat(fmtBytes(s.avg_size && Math.round(s.avg_size)) || '—', 'average size'),
+      stat(fmtMs(s.avg_duration), 'average duration'),
+      stat(`${fmtInt(best.hit)} / ${fmtInt(best.miss)}`, 'API best: hit / miss'))),
+    card('Per day', table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      barCol('Scoops', 'scoops', d.perDay),
+      { label: 'Copies', get: (x) => fmtInt(x.copies), cls: 'num' },
+      { label: 'Installs', get: (x) => fmtInt(x.installs), cls: 'num' },
+    ], d.perDay)),
+    card('Paths (public pages only)', table([
+      { label: 'Path', get: (x) => h('span', { class: 'mono' }, x.path), cls: 'url' },
+      barCol('Scoops', 'scoops', d.paths),
+      { label: 'Copies', get: (x) => fmtInt(x.copies), cls: 'num' },
+      { label: 'Installs', get: (x) => fmtInt(x.installs), cls: 'num' },
+      { label: 'Failed', get: (x) => fmtInt(x.failures), cls: 'num' },
+    ], d.paths, 'No public paths recorded.')),
+    h('div', { class: 'cols' },
+      card('Outcomes', table([
+        { label: 'Outcome', get: (x) => pill(x.outcome) },
+        { label: 'Library', get: (x) => (x.library_hit ? 'hit' : 'miss') },
+        { label: 'Count', get: (x) => fmtInt(x.n), cls: 'num' },
+      ], d.outcomes)),
+      card('Sources', table([
+        { label: 'Kind', get: (x) => x.kind },
+        { label: 'Scoops', get: (x) => fmtInt(x.n), cls: 'num' },
+      ], d.sources)),
+      card('Shares', table([
+        { label: 'Outcome', get: (x) => pill(x.outcome) },
+        { label: 'Count', get: (x) => fmtInt(x.n), cls: 'num' },
+      ], d.shares))),
+    card('Search and package queries for this site', table([
+      { label: 'Query', get: (x) => x.q },
+      { label: 'Route', get: (x) => x.name.replace('api_', ''), cls: 'hide-sm' },
+      { label: 'Count', get: (x) => fmtInt(x.n), cls: 'num' },
+      { label: 'Avg results', get: (x) => (x.avg_results == null ? '' : x.avg_results.toFixed(1)), cls: 'num' },
+      { label: 'Zero results', get: (x) => fmtInt(x.misses), cls: 'num' },
+    ], d.queries, 'No queries for this site.')),
+    card('Errors and refusals', table([
+      { label: 'When', get: (x) => time(x.ts), cls: 'nowrap' },
+      { label: 'Event', get: (x) => x.name },
+      { label: 'Outcome', get: (x) => (x.outcome ? pill(x.outcome) : '') },
+      { label: 'Install', get: (x) => (x.install_id ? installLink(x.install_id) : '') },
+      { label: 'Details', get: (x) => h('span', { class: 'mono small' }, x.props), cls: 'hide-sm' },
+    ], d.problems, 'None.')),
+  ];
+}
+
+const INSTALL_STATUS = (i) => (i.uninstalled_at ? 'uninstalled' : i.opted_out ? 'opted out' : 'active');
+const STATUS_PILL = { active: 'complete', uninstalled: 'failed', 'opted out': 'rejected' };
+const statusPill = (i) => h('span', { class: `pill ${STATUS_PILL[INSTALL_STATUS(i)]}` }, INSTALL_STATUS(i));
+
+async function telemetryUsers(r) {
+  const status = r.params.get('status') ?? '';
+  const q = r.params.get('q') ?? '';
+  const qs = new URLSearchParams();
+  if (status) qs.set('status', status);
+  if (q) qs.set('q', q);
+  if (r.params.get('cursor')) qs.set('cursor', r.params.get('cursor'));
+  const d = await api(`telemetry/installs?${qs}`);
+  const statusSel = h('select', { id: 'installs-status' }, ['', 'active', 'uninstalled', 'opted_out'].map((x) => h('option', { value: x, selected: x === status }, x || 'any status')));
+  const qIn = h('input', { id: 'installs-q', type: 'search', placeholder: 'install ID starts with', value: q });
+  return [
+    ...telemetryHead('Users', 'users'),
+    card(null,
+      h('form', {
+        onsubmit: (e) => {
+          e.preventDefault();
+          const p = new URLSearchParams();
+          if (statusSel.value) p.set('status', statusSel.value);
+          if (qIn.value.trim()) p.set('q', qIn.value.trim().toLowerCase());
+          location.hash = `#/telemetry/users${p.toString() ? `?${p}` : ''}`;
+        },
+      }, h('label', { class: 'field' }, 'Status', statusSel), h('label', { class: 'field' }, 'Install ID', qIn), h('button', { class: 'btn ghost', type: 'submit' }, 'Filter')),
+      table([
+        { label: 'Install', get: (i) => installLink(i.install_id) },
+        { label: 'First seen', get: (i) => time(i.first_seen), cls: 'nowrap' },
+        { label: 'Last seen', get: (i) => time(i.last_seen), cls: 'nowrap' },
+        { label: 'Version', get: (i) => i.ext_version ?? '', cls: 'mono' },
+        { label: 'Browser / OS', get: (i) => [i.browser, i.browser_version, i.os && `· ${i.os}`, i.arch].filter(Boolean).join(' '), cls: 'hide-sm' },
+        { label: 'Country', get: (i) => i.country ?? '' },
+        { label: 'Scoops', get: (i) => fmtInt(i.scoops), cls: 'num' },
+        { label: 'Copies', get: (i) => fmtInt(i.copies), cls: 'num' },
+        { label: 'Status', get: statusPill },
+      ], d.installs, 'No installs match.'),
+      pager(d.next, r.params, '#/telemetry/users')),
+  ];
+}
+
+async function telemetryInstall(r) {
+  const id = r.parts[2];
+  const d = await api(`telemetry/installs/${enc(id)}`);
+  const i = d.install;
+  const del = h('button', { class: 'btn danger sm', type: 'button' }, 'Delete all data for this install');
+  del.addEventListener('click', () => {
+    if (!confirm(`Delete every event, the install row and its active days for ${id}? Its archived events are excluded from exports from now on, and new events from it are refused. This can't be undone.`)) return;
+    act(del, () => api(`telemetry/installs/${enc(id)}`, { method: 'DELETE' }), (x) => {
+      location.hash = '#/telemetry/users';
+      return `Deleted ${fmtInt(x.eventsDeleted)} events for ${id}`;
+    });
+  });
+  return [
+    h('p', { class: 'crumbs' }, h('a', { href: '#/telemetry/users' }, 'Users'), ' / '),
+    h('div', { class: 'head' }, h('h1', { class: 'mono' }, id), i ? statusPill(i) : null),
+    i ? card(null, h('dl', { class: 'kv' }, [
+      ['First seen', time(i.first_seen)], ['Last seen', time(i.last_seen)], ['Installed', time(i.installed_at)],
+      ['Days active', `${fmtInt(d.activeDays)}${d.firstDay ? ` (${d.firstDay} – ${d.lastDay})` : ''}`],
+      ['Version', i.ext_version ?? ''], ['Browser', [i.browser, i.browser_version].filter(Boolean).join(' ')], ['OS', [i.os, i.arch].filter(Boolean).join(' ')],
+      ['Locale / time zone', [i.locale, i.timezone].filter(Boolean).join(' · ')], ['Country', i.country ?? ''],
+      ['Events / scoops / copies', `${fmtInt(i.events)} / ${fmtInt(i.scoops)} / ${fmtInt(i.copies)}`],
+      ['Statistics', i.opted_out ? `opted out ${i.opted_out_at ?? ''}` : 'on'],
+      ['Uninstalled', i.uninstalled_at ? `${i.uninstalled_at}${i.uninstall_reason ? ` (${i.uninstall_reason})` : ''}` : ''],
+    ].flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)]))) : card(null, h('p', { class: 'meta' }, 'Only website events for this ID (no extension activity recorded).')),
+    card(`Sites (${d.sites.length})`, table([
+      { label: 'Site', get: (x) => tSiteLink(x.site) },
+      { label: 'Scoops', get: (x) => fmtInt(x.scoops), cls: 'num' },
+      { label: 'Copies', get: (x) => fmtInt(x.copies), cls: 'num' },
+      { label: 'Last', get: (x) => time(x.last_at), cls: 'nowrap' },
+    ], d.sites, 'No sites.')),
+    card(`Timeline (latest ${d.timeline.length})`, table([
+      { label: 'When', get: (x) => h('span', { title: x.ts, class: 'mono small' }, x.ts.replace('T', ' ').slice(0, 19)), cls: 'nowrap' },
+      { label: 'Event', get: (x) => x.name },
+      { label: 'Site', get: (x) => tSiteLink(x.site) },
+      { label: 'Path', get: (x) => (x.path ? h('span', { class: 'mono' }, x.path) : ''), cls: 'url' },
+      { label: 'Outcome', get: (x) => (x.outcome ? pill(x.outcome) : '') },
+      { label: 'Properties', get: (x) => (x.props === '{}' ? '' : h('span', { class: 'mono small' }, x.props)), cls: 'hide-sm' },
+      { label: 'Session', get: (x) => h('span', { class: 'mono small', title: x.session_id ?? '' }, (x.session_id ?? '').slice(-6)), cls: 'hide-sm' },
+    ], d.timeline, 'No events.')),
+    card('Deletion request', h('p', { class: 'meta small' }, 'For a request to team@ddamoah.com with this install ID. Daily counts (no install IDs) are kept.'), h('div', {}, del)),
+  ];
+}
+
+async function telemetryRetention(r) {
+  const weeks = Math.min(26, Math.max(1, Number(r.params.get('weeks')) || 12));
+  const d = await api(`telemetry/retention?weeks=${weeks}`);
+  const cols = Array.from({ length: weeks + 1 }, (_, w) => w);
+  const heat = (n, size) => {
+    const p = size ? n / size : 0;
+    return `heat heat-${p === 0 ? 0 : Math.min(5, 1 + Math.floor(p * 5))}`;
+  };
+  return [
+    h('div', { class: 'head' }, h('h1', {}, 'Retention'),
+      h('span', { class: 'row small' }, 'Weeks:', [4, 8, 12, 26].map((w) => (w === weeks ? h('b', {}, String(w)) : h('a', { href: `#/telemetry/retention?weeks=${w}` }, String(w)))))),
+    tabs('retention'),
+    card('Weekly install cohorts × weeks active', table([
+      { label: 'Cohort (week of)', get: (c) => c.cohort, cls: 'nowrap mono' },
+      { label: 'Installs', get: (c) => fmtInt(c.size), cls: 'num' },
+      ...cols.map((w) => ({
+        label: `W${w}`,
+        get: (c) => (w < c.active.length ? h('span', { class: heat(c.active[w], c.size), title: `${c.active[w]} of ${c.size}` }, pct(c.active[w], c.size)) : ''),
+        cls: 'num',
+      })),
+    ], d.cohorts, 'No installs in this window.'),
+    h('p', { class: 'meta small' }, 'A cohort is the installs first seen in a week (Monday to Sunday, UTC). Wn is the share that sent anything n weeks later.')),
+  ];
+}
+
+async function telemetryPlatforms(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/platforms?days=${days}`);
+  const breakdown = (title, rows) => card(title, table([
+    { label: 'Value', get: (x) => x.value || '—', cls: 'mono' },
+    barCol('Installs', 'installs', rows),
+  ], rows));
+  const versions = [...new Set(d.adoption.map((x) => x.version))].sort();
+  const adoption = [...d.adoption.reduce((m, x) => m.set(x.day, { day: x.day, ...m.get(x.day), [x.version]: x.n }), new Map()).values()];
+  return [
+    ...telemetryHead('Versions & platforms', 'platforms', days, '#/telemetry/platforms'),
+    h('p', { class: 'meta small' }, 'Installs seen in the window and not uninstalled.'),
+    h('div', { class: 'cols' },
+      breakdown('Extension version', d.versions),
+      breakdown('Browser', d.browsers),
+      breakdown('Browser version', d.browserVersions),
+      breakdown('OS', d.oses),
+      breakdown('CPU architecture', d.arches),
+      breakdown('UI language', d.locales),
+      breakdown('Time zone', d.timezones)),
+    card('Update adoption (daily active installs by version)', table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      ...versions.map((v) => ({ label: v || '—', get: (x) => (x[v] ? `${fmtInt(x[v])} (${pct(x[v], versions.reduce((n, k) => n + (x[k] ?? 0), 0))})` : ''), cls: 'num' })),
+    ], adoption, 'No daily pings in this window.')),
+    card('Website visitors by browser (parsed user agent)', table([
+      { label: 'Browser', get: (x) => x.value || '—' },
+      { label: 'OS', get: (x) => x.os || '—' },
+      { label: 'Page views', get: (x) => fmtInt(x.n), cls: 'num' },
+    ], d.websiteBrowsers)),
+  ];
+}
+
+async function telemetryGeo(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/geo?days=${days}`);
+  return [
+    ...telemetryHead('Geography', 'geo', days, '#/telemetry/geo'),
+    h('p', { class: 'meta small' }, 'Country from the request IP (Cloudflare), at ingest. IPs are never stored.'),
+    h('div', { class: 'cols' },
+      card('Installs by country', table([
+        { label: 'Country', get: (x) => x.country || '—', cls: 'mono' },
+        barCol('Installs', 'installs', d.installs),
+        { label: 'Uninstalled', get: (x) => fmtInt(x.uninstalled), cls: 'num' },
+      ], d.installs)),
+      card('Scoops by country', table([
+        { label: 'Country', get: (x) => x.country || '—', cls: 'mono' },
+        barCol('Scoops', 'scoops', d.events),
+        { label: 'Events', get: (x) => fmtInt(x.events), cls: 'num' },
+      ], d.events)),
+      card('Website views by country', table([
+        { label: 'Country', get: (x) => x.country || '—', cls: 'mono' },
+        barCol('Views', 'views', d.website),
+      ], d.website))),
+    card('Networks (ISP or organisation)', table([
+      { label: 'Continent', get: (x) => x.continent || '—', cls: 'mono' },
+      { label: 'Network', get: (x) => x.network || '—' },
+      barCol('Installs', 'installs', d.networks),
+    ], d.networks)),
+  ];
+}
+
+async function telemetryErrors(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/errors?days=${days}`);
+  const perDay = byDay(Object.fromEntries([...new Set(d.scoopFailures.map((x) => x.outcome))].map((o) => [o, d.scoopFailures.filter((x) => x.outcome === o)])));
+  const errDay = d.perDay.reduce((m, x) => m.set(x.day, (m.get(x.day) ?? 0) + x.n), new Map());
+  for (const row of perDay) row.errors = errDay.get(row.day) ?? 0;
+  for (const [day, n] of errDay) if (!perDay.some((x) => x.day === day)) perDay.push({ day, errors: n });
+  perDay.sort((a, b) => (a.day < b.day ? -1 : 1));
+  return [
+    ...telemetryHead('Errors', 'errors', days, '#/telemetry/errors'),
+    card('By code, where and version', table([
+      { label: 'Where', get: (x) => x.where_ ?? '' },
+      { label: 'Code', get: (x) => h('span', { class: 'mono' }, x.code ?? '') },
+      { label: 'Version', get: (x) => x.version || '—', cls: 'mono' },
+      barCol('Count', 'n', d.byCode),
+      { label: 'Installs', get: (x) => fmtInt(x.installs), cls: 'num' },
+      { label: 'Last', get: (x) => time(x.last_at), cls: 'nowrap' },
+    ], d.byCode, 'No errors in this window.')),
+    card('Over time', table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      barCol('Error events', 'errors', perDay),
+      { label: 'Scoops failed', get: (x) => fmtInt(x.error), cls: 'num' },
+      { label: 'Empty pages', get: (x) => fmtInt(x.empty), cls: 'num' },
+      { label: 'Unsupported pages', get: (x) => fmtInt(x.unsupported_page), cls: 'num' },
+    ], perDay, 'Nothing in this window.')),
+    card('Recent', table([
+      { label: 'When', get: (x) => time(x.ts), cls: 'nowrap' },
+      { label: 'Install', get: (x) => (x.install_id ? installLink(x.install_id) : '') },
+      { label: 'Version', get: (x) => x.ext_version ?? '', cls: 'mono' },
+      { label: 'Where', get: (x) => x.where_ ?? '' },
+      { label: 'Code', get: (x) => x.code ?? '', cls: 'mono' },
+      { label: 'Message', get: (x) => x.message ?? '' },
+    ], d.recent, 'No errors.')),
+  ];
+}
+
+async function telemetryApi(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/api?days=${days}`);
+  const routes = [...d.routes.reduce((m, x) => m.set(x.name, { name: x.name, ...m.get(x.name), [x.outcome || 'other']: x.n, total: (m.get(x.name)?.total ?? 0) + x.n }), new Map()).values()];
+  return [
+    ...telemetryHead('API usage', 'api', days, '#/telemetry/api'),
+    h('p', { class: 'meta small' }, 'Server-side, per request: route, site, query text, hit or miss, results, latency, client and country. No IPs or install IDs.'),
+    card('Routes', table([
+      { label: 'Route', get: (x) => h('span', { class: 'mono' }, x.name.replace('api_', '')) },
+      barCol('Requests', 'total', routes),
+      { label: 'Hit', get: (x) => fmtInt(x.hit), cls: 'num' },
+      { label: 'Miss', get: (x) => fmtInt(x.miss), cls: 'num' },
+    ], routes, 'No API requests recorded.')),
+    card('Top search queries', table([
+      { label: 'Query', get: (x) => x.q ?? '' },
+      { label: 'Site', get: (x) => tSiteLink(x.site) },
+      barCol('Count', 'n', d.queries),
+      { label: 'Avg results', get: (x) => (x.avg_results == null ? '' : x.avg_results.toFixed(1)), cls: 'num' },
+      { label: 'Avg latency', get: (x) => fmtMs(x.avg_ms), cls: 'num' },
+    ], d.queries, 'No searches.')),
+    card('Zero-result queries', table([
+      { label: 'Query', get: (x) => x.q ?? '' },
+      { label: 'Site', get: (x) => tSiteLink(x.site) },
+      { label: 'Route', get: (x) => x.name.replace('api_', '') },
+      { label: 'Count', get: (x) => fmtInt(x.n), cls: 'num' },
+      { label: 'Last', get: (x) => time(x.last_at), cls: 'nowrap' },
+    ], d.zeroResults, 'None.')),
+    h('div', { class: 'cols' },
+      card('Package requests by site', table([
+        { label: 'Site', get: (x) => tSiteLink(x.site) },
+        barCol('Requests', 'n', d.packages),
+        { label: 'Hit', get: (x) => pct(x.hits, x.n), cls: 'num' },
+        { label: 'By topic', get: (x) => fmtInt(x.by_topic), cls: 'num' },
+      ], d.packages, 'None.')),
+      card('Best skill: hit / miss by site', table([
+        { label: 'Site', get: (x) => tSiteLink(x.site) },
+        { label: 'Hit', get: (x) => fmtInt(x.hits), cls: 'num' },
+        { label: 'Miss', get: (x) => fmtInt(x.misses), cls: 'num' },
+        { label: 'Hit rate', get: (x) => pct(x.hits, x.hits + x.misses), cls: 'num' },
+      ], d.best, 'None.')),
+      card('Clients (X-Scoop-Client)', table([
+        { label: 'Client', get: (x) => x.client || '—', cls: 'mono' },
+        barCol('Requests', 'n', d.clients),
+      ], d.clients, 'None.'))),
+  ];
+}
+
+async function telemetryWebsite(r) {
+  const days = daysOf(r);
+  const d = await api(`telemetry/website?days=${days}`);
+  return [
+    ...telemetryHead('Website', 'website', days, '#/telemetry/website'),
+    h('p', { class: 'meta small' }, 'scoop.md page views: no cookies; a visitor is a daily-rotating hash, so visitors are unique per day.'),
+    card('Per day', table([
+      { label: 'Day', get: (x) => x.day, cls: 'nowrap mono' },
+      barCol('Views', 'views', d.perDay),
+      { label: 'Visitors', get: (x) => fmtInt(x.visitors), cls: 'num' },
+    ], d.perDay, 'No page views.')),
+    h('div', { class: 'cols' },
+      card('Pages', table([
+        { label: 'Path', get: (x) => h('span', { class: 'mono' }, x.path ?? ''), cls: 'url' },
+        barCol('Views', 'views', d.paths),
+        { label: 'Visitors', get: (x) => fmtInt(x.visitors), cls: 'num' },
+      ], d.paths)),
+      card('Referrers', table([
+        { label: 'Host', get: (x) => h('span', { class: 'mono' }, x.host) },
+        barCol('Views', 'views', d.referrers),
+      ], d.referrers, 'None.')),
+      card('Campaigns (UTM)', table([
+        { label: 'Source', get: (x) => x.source ?? '' },
+        { label: 'Medium', get: (x) => x.medium ?? '' },
+        { label: 'Campaign', get: (x) => x.campaign ?? '' },
+        { label: 'Views', get: (x) => fmtInt(x.views), cls: 'num' },
+      ], d.utm, 'None.')),
+      card('Calls to action', table([
+        { label: 'Target', get: (x) => x.target ?? '' },
+        { label: 'Page', get: (x) => h('span', { class: 'mono' }, x.path) },
+        { label: 'Clicks', get: (x) => fmtInt(x.n), cls: 'num' },
+      ], d.ctas, 'None.'))),
+    card('Uninstall page (/bye)', h('div', { class: 'stats' },
+      stat(fmtInt(d.bye.views), 'page views'),
+      stat(fmtInt(d.bye.uninstalls), 'uninstalls recorded')),
+    table([
+      { label: 'Reason', get: (x) => x.reason ?? '' },
+      barCol('Count', 'n', d.bye.reasons),
+    ], d.bye.reasons, 'No reasons given.')),
+  ];
+}
+
+const EXPORTS = [
+  ['events', 'Raw events (D1, last 180 days)'],
+  ['installs', 'Installs'],
+  ['install_days', 'Install active days'],
+  ['events_daily', 'Daily rollups'],
+  ['archive', 'R2 archive (raw, NDJSON, ≤31 days)'],
+];
+
+async function telemetryExport() {
+  const today = new Date().toISOString().slice(0, 10);
+  const monthAgo = new Date(Date.now() - 29 * 86_400_000).toISOString().slice(0, 10);
+  const tableSel = h('select', { id: 'export-table' }, EXPORTS.map(([v, label]) => h('option', { value: v }, label)));
+  const from = h('input', { id: 'export-from', type: 'date', value: monthAgo });
+  const to = h('input', { id: 'export-to', type: 'date', value: today });
+  const format = h('select', { id: 'export-format' }, ['csv', 'ndjson'].map((v) => h('option', { value: v }, v.toUpperCase())));
+  const link = h('a', { class: 'btn', download: '' }, 'Download');
+  // A same-origin GET: the browser's Basic auth covers it and the response is an attachment.
+  const update = () => {
+    const p = new URLSearchParams({ table: tableSel.value, from: from.value, to: to.value, format: tableSel.value === 'archive' ? 'ndjson' : format.value });
+    link.setAttribute('href', safeHref(new URL(`/api/telemetry/export?${p}`, location.origin).href));
+    format.disabled = tableSel.value === 'archive';
+  };
+  for (const el of [tableSel, from, to, format]) el.addEventListener('change', update);
+  update();
+  const { deletions } = await api('telemetry/deletions');
+  return [
+    ...telemetryHead('Export', 'export'),
+    card('Download a table', h('div', { class: 'form' },
+      h('label', { class: 'field' }, 'Table', tableSel),
+      h('label', { class: 'field' }, 'From', from),
+      h('label', { class: 'field' }, 'To (inclusive)', to),
+      h('label', { class: 'field' }, 'Format', format),
+      link),
+    h('p', { class: 'meta small' }, 'Days are UTC. The archive skips every install ID with a deletion tombstone. CSV cells that start with = + - @ are prefixed with \' so spreadsheets don\'t run them.')),
+    card(`Deletion requests (${deletions.length})`, table([
+      { label: 'Install', get: (x) => h('span', { class: 'mono' }, x.install_id) },
+      { label: 'Deleted', get: (x) => time(x.deleted_at), cls: 'nowrap' },
+      { label: 'Events deleted', get: (x) => fmtInt(x.events_deleted), cls: 'num' },
+    ], deletions, 'None.')),
   ];
 }
 

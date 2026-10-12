@@ -6,3 +6,6 @@ export const CHROME_STORE_URL: string | undefined = import.meta.env.PUBLIC_CHROM
 // Placeholders the owner still has to fill in (see README.md).
 export const CONTACT_EMAIL = 'privacy@scoop.md';
 export const LEGAL_ENTITY = '[LEGAL ENTITY]';
+
+// Where deletion requests for usage statistics go (by install ID).
+export const DELETION_EMAIL = 'team@ddamoah.com';
