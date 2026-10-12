@@ -216,6 +216,124 @@ On the development machine port 8787 was already taken by the reference server
 `127.0.0.1` rather than `localhost` in `SCOOP_API` when anything else might be
 listening on `::` for that port.
 
+## Crawl pipeline (M2/M3)
+
+### Discovery and fetching
+
+- **Site** is the hostname, normalised as in §3. `POST /v1/admin/crawl` takes an
+  optional `startUrl` (default `https://<site>/`); a start URL with a path
+  scopes the docs root (`/d1`). Without one, the docs root is inferred only from
+  a sitemap first segment that names the docs as a whole (`docs`,
+  `documentation`, `developer(s)`, `manual`) covering >= 20% of URLs: on
+  docs.stripe.com an earlier rule picked `/api`, a section, and dropped the
+  rest. Profiles are per hostname, so a scoped crawl overwrites `docs_root`.
+- **llms.txt probing** tries at most three bases (start path's first segment,
+  `/docs`, `/documentation`, root) and records the URL a probe *ended up at*
+  (Stripe's `/docs/llms.txt` redirects to `/llms.txt`). llms-full.txt is only
+  checked for existence (64 KB read) during discovery and fetched in full as a
+  page.
+- **Twins:** 10 sitemap pages sampled evenly; `<path>.md` first, then
+  `<path>/index.md`; once one pattern hits, the other isn't tried. Twins are
+  guessed for the rest of the sitemap only when >= 30% of the sample had one.
+- **Fetch plan order:** llms.txt, llms-full.txt, Markdown links listed in
+  llms.txt, then twins of sitemap pages; deduplicated by source URL; cut at the
+  page budget (default 500, max 1000). `pages.url` is the HTML page when we
+  derived the twin, else the Markdown URL itself.
+- **HTML-only sites** (`html_only`: no llms files, no twins, server-rendered)
+  get a profile and no pages in M2. Converting their HTML needs a DOM, which
+  Workers lack; running `extract.js` over linkedom in the Worker, or sending
+  them to the browser crawler, is a later call.
+- **needs_browser** = no Markdown sources and the start page is a client shell:
+  fewer than 150 words once scripts/styles are dropped, plus an empty mount
+  point (`#root`, `#app`, `#__next`, …) or a "needs JavaScript" notice with any
+  script, or fewer than 30 words with 3+ scripts.
+- **robots.txt:** our product token is `scoop.md-bot`; groups naming it win over
+  `*`, longest match wins, Allow wins ties, `*`/`$` wildcards (glob matched
+  without regex). 4xx → no rules; 5xx or unreachable → treated as disallow-all
+  for this run (RFC 9309), so the profile says `blocked`. `Crawl-delay` is
+  honoured between 1 s and 10 s.
+- **Politeness:** per host, 2 requests in flight and >= 1 s between request
+  starts (start times are reserved in order). Each Workflow step carries the
+  limiter's next start time into the next, so batches don't bunch up at step
+  boundaries.
+- **Crawler UA** `scoop.md-bot (+https://scoop.md/bot)` for the Worker's
+  fetches; the browser sends a Chrome UA with `scoop.md-bot/1
+  (+https://scoop.md/bot)` in it, since some SPAs refuse unknown browsers.
+  `https://scoop.md/bot` doesn't exist yet; it should describe the bot.
+- **Caps:** 2 MB per Markdown source (bigger ones count as failed), 10 MB per
+  sitemap (after gunzip), 5,000 sitemap URLs kept, 8 sitemap files.
+
+### Storage
+
+- New tables in `0002_crawl.sql` (`site_profiles`, `crawl_runs`, `pages`); the
+  v1 tables are untouched. Run IDs are `cr_<ulid>` and double as the Workflow
+  instance ID.
+- New bucket binding `CRAWL` (`scoop-crawl-<env>`), not the skills bucket:
+  crawled pages and short-lived browser results get their own lifecycle rule and
+  the R2 API token can be scoped to this bucket alone.
+- **Content-addressed:** `pages/<sha256>.md` is the SHA-256 of the Markdown as
+  fetched (no normalisation). R2 is `head`-checked before `put`, so identical
+  content across URLs and runs is written once. Objects are never deleted when a
+  page changes (other URLs may share the hash); garbage collection is later.
+- **Unchanged** = 304 to our `If-None-Match`/`If-Modified-Since`, or the same
+  hash. It refreshes `fetched_at`, `run_id` and validators only; no R2 write, no
+  queue message.
+- **Queue messages** `{ site, url, contentHash, change, runId }`, one per new or
+  changed page, sent with `sendBatch` per step. The consumer logs per-site
+  counts and acks (M4 replaces it).
+
+### Workflow
+
+- 10 pages per step (well under the Free plan's 50 subrequests per invocation,
+  counting the fetch, R2 head/put and D1 calls). Network steps retry twice,
+  D1-only steps three times.
+- Failures anywhere run a `fail` step (kill the sandbox if one is up, mark run
+  and profile `failed`) and rethrow, so the Workflow instance shows `errored`
+  too.
+- `GET /v1/admin/crawl/:runId` returns the D1 run row (the durable record), the
+  Workflow status when the instance is still retained, and up to 10 pages the
+  run stored.
+
+### Browser crawls (E2B)
+
+- **Interface:** `BrowserCrawler { start, poll, result, stop }` plus
+  `runCrawl()` for callers that can wait. A Workflow can't hold one call open
+  across `step.sleep`, so the interface is split rather than a single
+  `runCrawl(site, budget)`.
+- **No SDK, no Connect-RPC.** The template's start command is a small job server
+  (`crawler/server.js`, port 8080) captured running in the snapshot, so the
+  Worker needs only `POST /v2/sandboxes`, `DELETE /sandboxes/{id}` and plain
+  HTTPS to `https://8080-<id>.<domain>`. Sandboxes are created with
+  `network.allowPublicTraffic: false`: every call carries E2B's
+  `e2b-traffic-access-token`, plus a random per-job bearer token so pages
+  rendered inside the sandbox can't drive the job server via localhost. The
+  `browser-start` step output (which holds both tokens) is marked
+  `sensitive: 'output'`.
+- **Upload:** the Workflow presigns one SigV4 `PUT` (with `content-type`
+  signed) for `crawl-results/<runId>.json`, valid for the crawl + 10 minutes.
+  R2 presigned URLs can't be made single-use; the key is unique per run, short
+  lived and deleted after ingestion. In local dev without R2 credentials the
+  Workflow fetches `GET /result` from the sandbox and writes the same key;
+  staging/production refuse a browser crawl without the credentials.
+- **Presigning by hand** (Web Crypto, ~80 lines) rather than `aws4fetch`: no new
+  dependency, portable, and pinned by the AWS SigV4 test vector in the tests.
+- **Untrusted output:** pages are re-checked in the Worker (`result.ts`): same
+  site, http(s), robots-allowed, <= 300,000 chars, unique, within budget. The
+  crawler also blocks private/local hosts, images, media and fonts, and caps the
+  result at 20 MB.
+- **Limits:** sandbox timeout = crawl minutes + 3 (max 60, the Hobby plan's
+  continuous-runtime cap); `maxMinutes` defaults to 10 and is capped at 50.
+  Polled every 20 s. Template: 2 vCPU, 2 GiB, `mcr.microsoft.com/playwright:v1.64.0-noble`.
+- **Cost** recorded per run: sandbox seconds × (2 × $0.000014 + 2 × $0.0000045)
+  = $0.000037/s, E2B's published per-second prices on 2026-10-12.
+- **Shared code** (`extract.js`, `robots.ts`) is copied into `crawler/vendor/`
+  because the template build only sees `crawler/`; a root test fails if the
+  copies drift. Node in the Playwright image runs `robots.ts` directly (type
+  stripping).
+- **Hash routes:** docsify-style `#/page` URLs are distinct pages (kept in
+  `pages.url`), and the crawler reloads the page for a hash-only navigation so it
+  never reads the previous route's content.
+
 ## Indexing model (for M4)
 
 Not used yet; recorded from a 4-page trial so M4 starts from a known baseline.

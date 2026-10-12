@@ -8,6 +8,9 @@ repo root is the dependency-free reference implementation of the same contract.
 - Metadata, votes, reports, write rate-limit counters: **D1** (`DB`)
 - Skill content (`skills/<id>.json`): **R2** (`SKILLS`)
 - Read rate limit (600/min/IP): **rate limiting binding** (`READ_LIMITER`)
+- Crawl pipeline: **Workflow** `CrawlSite` (`CRAWL_SITE`), **R2** `CRAWL`
+  (`pages/<sha256>.md`, `crawl-results/`), **Queue** `index-pages`
+  (`INDEX_QUEUE`), E2B sandboxes for client-rendered sites (`/crawler`)
 
 ## Layout
 
@@ -16,9 +19,9 @@ src/index.ts      Worker entry: CORS, read rate limit, errors, request log
 src/env.ts        bindings and vars
 src/api/          v1 routes (v1.ts) and HTTP helpers (http.ts)
 src/lib/          portable logic, no Workers APIs: verify, ssrf, validate, ids, ranking
-src/db/           D1/R2 store and hourly rate-limit counters
-src/crawl/        (later) Workflow "CrawlSite"
-src/index/        (later) Queue consumer: classify → chunks → embeddings
+src/db/           D1/R2 stores (skills; crawl profiles, runs, pages) and hourly rate-limit counters
+src/crawl/        Workflow "CrawlSite" and its portable parts (see src/crawl/README.md)
+src/index/        Queue consumer for index-pages (stub until M4: classify → chunks → embeddings)
 src/search/       (later) Vectorize + D1 FTS5 hybrid search
 migrations/       D1 migrations (wrangler d1 migrations apply)
 test/             unit tests (node:test; node:sqlite stands in for D1)
@@ -35,7 +38,7 @@ Node 22.18+ (unit tests run TypeScript directly and use `node:sqlite`).
 ```sh
 cd backend
 npm install
-cp .dev.vars.example .dev.vars        # ADMIN_TOKEN, RATE_KEY, ALLOW_LOCALHOST=1, ALLOW_ANY_EXTENSION=1
+cp .dev.vars.example .dev.vars        # ADMIN_TOKEN, RATE_KEY, ALLOW_LOCALHOST=1, ALLOW_ANY_EXTENSION=1; add E2B_API_KEY for browser crawls
 npm run db:migrate:local              # creates the local D1 in .wrangler/state
 npm run dev                           # wrangler dev on http://localhost:8787
 ```
@@ -56,6 +59,24 @@ per-IP share limit (429). Reset with:
 ```sh
 npx wrangler d1 execute DB --local --command "DELETE FROM rate_counters"
 ```
+
+## Crawling
+
+```sh
+# start a crawl (admin); startUrl scopes the docs root, maxPages defaults to 500
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H 'content-type: application/json' \
+  http://127.0.0.1:8787/v1/admin/crawl -d '{"site":"developers.cloudflare.com","startUrl":"https://developers.cloudflare.com/d1/","maxPages":30}'
+# -> 202 { "runId": "cr_…", … }
+curl -H "Authorization: Bearer $ADMIN_TOKEN" http://127.0.0.1:8787/v1/admin/crawl/cr_…   # run stats, Workflow status, sample pages
+curl http://127.0.0.1:8787/v1/sites/developers.cloudflare.com/profile                       # public SiteProfile
+```
+
+`wrangler dev` runs the Workflow and the Queue locally. Browser crawls need
+`E2B_API_KEY` in `.dev.vars` and create a real sandbox (template
+`E2B_TEMPLATE_ID`, built from `/crawler`). Without the R2 API token secrets, and
+only when `ENVIRONMENT` is `dev`, the Workflow reads the result from the sandbox
+instead of via the presigned upload; staging and production refuse to run a
+browser crawl without them.
 
 ## Before the first deploy
 
@@ -89,7 +110,30 @@ on the account (`accralions-com-worker`, `herd-room`, the `big-files` bucket).
    account and those hostnames must not already have DNS records.
 6. When the extension's Chrome Web Store ID is known, set `EXTENSION_IDS` in
    the `production` (and `staging`) vars.
-7. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
+7. Crawl pipeline (M2/M3), per environment (`-staging` / production):
+   ```sh
+   npx wrangler r2 bucket create scoop-crawl-staging
+   npx wrangler r2 bucket create scoop-crawl-production
+   npx wrangler queues create index-pages-staging
+   npx wrangler queues create index-pages
+   ```
+   - Lifecycle rule on each crawl bucket: delete objects under
+     `crawl-results/` after 1 day (the Workflow deletes them itself; this
+     catches failed runs).
+   - An **R2 API token** (dashboard → R2 → Manage API tokens → Create, *Object
+     Read & Write*, scoped to the crawl bucket only), then per environment:
+     ```sh
+     npx wrangler secret put R2_ACCESS_KEY_ID --env staging       # token's Access Key ID
+     npx wrangler secret put R2_SECRET_ACCESS_KEY --env staging   # token's Secret Access Key
+     npx wrangler secret put R2_ACCOUNT_ID --env staging          # Cloudflare account ID
+     npx wrangler secret put E2B_API_KEY --env staging
+     ```
+   - The Workflows (`crawl-site-staging`, `crawl-site`) are created by
+     `wrangler deploy`; nothing to create by hand.
+   - `E2B_TEMPLATE_ID` in `wrangler.jsonc` is the `scoop-crawler` template
+     built from `/crawler` (see `crawler/README.md`). If production uses a
+     different E2B team, build the template there and set its ID.
+8. For CI deploys: repository secrets `CLOUDFLARE_API_TOKEN` (Workers Scripts,
    D1, Workers Routes edit) and `CLOUDFLARE_ACCOUNT_ID`, then set the repository
    variable `BACKEND_DEPLOY=1` to switch the deploy jobs on.
 

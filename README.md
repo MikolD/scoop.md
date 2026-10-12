@@ -51,6 +51,8 @@ extension/            Chrome MV3 extension
   popup.js            the click flow
   STORE.md            Chrome Web Store listing, permissions, data disclosures
 server/               shared library (Node, no dependencies, JSON file store)
+backend/              api.scoop.md: Cloudflare Worker (v1 API, CrawlSite Workflow)
+crawler/              Playwright crawler for client-rendered docs (runs in an E2B sandbox)
 scripts/probe.js      runs discovery against real sites
 scripts/check-live.js scoops real sites and verifies each section with server/verify.js
 test/                 node:test suites
