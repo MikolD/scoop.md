@@ -66,3 +66,8 @@ test('the options switch is visible when off: track to card contrast is at least
   }
   assert.match(readFileSync(ext('options.css'), 'utf8'), /\.toggle \{[^}]*background: var\(--switch-off\)/);
 });
+
+test('the store zip leaves out store artwork, docs, types, tests and source maps', () => {
+  const pack = readFileSync(new URL('../scripts/pack-extension.js', import.meta.url), 'utf8');
+  for (const pattern of ["'store-assets/*'", "'*.md'", "'*.d.ts'", "'*.test.js'", "'*.map'"]) assert.ok(pack.includes(pattern), pattern);
+});
