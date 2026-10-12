@@ -6,7 +6,7 @@
 // tabs: "…" while running, "✓" when ready (lib/badge.js). Reopening the popup
 // on that site copies the full docs.
 
-import { loadSites, refreshTabs } from './badge.js';
+import { refreshTabs } from './badge.js';
 
 export const PENDING_KEY = 'crawlPending';
 export const CRAWL_ALARM = 'crawl-poll';
@@ -90,15 +90,15 @@ export function live(pending, now = Date.now()) {
     : isTerminal(e.state) || now - (e.startedAt ?? now) <= PENDING_TTL_MS)));
 }
 
-// Re-draws the per-tab badges (lib/badge.js) after a crawl changed. Returns
-// what the crawls amount to: "✓" when a finished one is waiting to be picked
-// up, "…" while one runs (a crawl whose pages were already delivered never ✓).
+// Re-draws the per-tab icons (lib/badge.js) after a crawl changed: a site it
+// indexed may now be in the list. The crawl itself never shows on the icon
+// (the popup shows it). Returns what the crawls amount to, for the popup:
+// "✓" when a finished one is waiting to be picked up, "…" while one runs.
 export async function updateBadge(chromeApi, pending, now = Date.now()) {
   const kept = live(pending ?? await loadPending(chromeApi), now);
   const entries = Object.values(kept);
   const text = entries.some((e) => e.state === 'complete' && !e.delivered) ? '✓' : entries.some((e) => !isTerminal(e.state)) ? '…' : '';
-  const { sites } = await loadSites(chromeApi);
-  await refreshTabs(chromeApi, { sites, pending: kept });
+  await refreshTabs(chromeApi);
   return text;
 }
 

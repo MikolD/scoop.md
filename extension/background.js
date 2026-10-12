@@ -9,7 +9,7 @@
 import { createTelemetry, FLUSH_ALARM, getInstallId, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, telemetryEnabled, uninstallUrl } from './lib/telemetry.js';
 import { createLibrary, libraryUrl } from './lib/library.js';
 import { CRAWL_ALARM, PENDING_KEY, live, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
-import { countShown, loadSites, refreshSites, setTabBadge, SITES_ALARM, SITES_PERIOD_MINUTES, takeShownCount } from './lib/badge.js';
+import { countShown, loadSites, refreshSites, setTabBadge, SITES_ALARM, SITES_PERIOD_MINUTES, takeShownCounts } from './lib/badge.js';
 import { siteKey } from './lib/discover.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
@@ -108,9 +108,10 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
       await activePing(t);
       // Expires finished crawls nobody picked up, so their ✓ clears.
       await ensureAlarms();
-      // How many page-count badges were shown this hour: one number, no sites.
-      const shown = await takeShownCount(chrome);
-      if (shown) t.track('badge_count_shown', { count: shown });
+      // How often each docs verdict was shown this hour: two numbers, no sites.
+      for (const [verdict, count] of Object.entries(await takeShownCounts(chrome))) {
+        if (count > 0) t.track('badge_verdict_shown', { verdict, count });
+      }
     }
     await t.flush();
   })().catch(() => {});
@@ -124,18 +125,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
   setUninstallUrl();
 });
 
-// The badge follows the tab: on switching tabs and when a page finishes loading.
-// A page count is counted as shown once per tab per site, not on every load.
+// The icon follows the tab: on switching tabs and when a page finishes loading.
+// A verdict is counted as shown once per tab per site, not on every load.
 const countedSite = new Map();
 async function badgeTab(tab) {
-  const [{ sites }, pending] = await Promise.all([loadSites(chrome), loadPending(chrome)]);
-  const text = await setTabBadge(chrome, tab, { sites, pending: live(pending) });
+  const verdict = await setTabBadge(chrome, tab);
   let site = null;
   try { site = siteKey(tab.url); } catch {}
-  if (!text || !/^\d/.test(text)) return countedSite.delete(tab.id);
-  if (countedSite.get(tab.id) === site) return;
-  countedSite.set(tab.id, site);
-  await countShown(chrome);
+  if (!verdict) return countedSite.delete(tab.id);
+  const key = `${site} ${verdict}`;
+  if (countedSite.get(tab.id) === key) return;
+  countedSite.set(tab.id, key);
+  await countShown(chrome, verdict);
 }
 chrome.tabs.onRemoved?.addListener((tabId) => countedSite.delete(tabId));
 

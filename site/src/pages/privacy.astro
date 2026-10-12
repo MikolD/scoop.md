@@ -15,9 +15,9 @@ const events = [
   ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname, the path (public docs pages only) and the size.'],
   ['copied_animation_shown', 'The "copied to your clipboard" animation played, and whether your system asks for reduced motion.'],
   ['crawl_request, crawl_wait', "You were the first to scoop a docs site, so scoop.md asked for it to be crawled: the site's hostname and how the request went; then how long you waited and how it ended (ready, not developer docs, failed, you copied the page instead, it took too long or stalled, or you closed the popup)."],
-  ['tab_switch', 'You switched between the This page, Overview and Search tabs: which tab.'],
+  ['tab_switch', 'You switched between the Quick Start, Overview and Search tabs: which tab.'],
   ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
-  ['badge_count_shown', 'Once an hour at most: how many times the toolbar showed a docs count. One number, no sites or pages.'],
+  ['badge_verdict_shown', 'Once an hour at most: how many times the toolbar icon showed "developer docs" and "not developer docs". Two numbers, no sites or pages.'],
   ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
   ['vote, report', "You voted or reported: the hostname and path (public docs pages only), the scoop's ID, your vote or reason."],
   ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
@@ -40,7 +40,7 @@ const events = [
 
     <h2>The short version</h2>
     <ul>
-      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show how many docs are indexed for a site on its icon, it compares each tab's site with a list of indexed sites downloaded to your device; that check never leaves your device.</li>
+      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show on its icon whether a site is developer docs (a check, a "!" or nothing), it compares each tab's site with lists downloaded to your device and with the verdicts for sites you scooped (kept on your device for 7 days); that check never leaves your device.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
       <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
       <li>
@@ -111,12 +111,12 @@ const events = [
       in the search box, to search its docs (<code>/v1/search</code>, and <code>/v1/packages</code> for "Copy all
       results"). The library's request log keeps the query, as described under Library requests below.
     </p>
-    <h3>The docs count on the icon</h3>
+    <h3>The docs check on the icon</h3>
     <p>
-      Every 6 hours the extension downloads the list of indexed sites with their page counts from
-      <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The count for the site
-      you're on is looked up in that list on your device. Pages on your computer or a private network are never looked
-      up.
+      Every 6 hours the extension downloads the list of indexed docs sites, and of sites known not to be developer docs,
+      from <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The site you're on
+      is looked up in those lists on your device, along with the verdicts the library gave for sites you scooped in the
+      last 7 days. Pages on your computer or a private network are never looked up.
     </p>
     <h3>When a docs site isn't indexed yet, sharing is on and the page is public developer docs</h3>
     <p>

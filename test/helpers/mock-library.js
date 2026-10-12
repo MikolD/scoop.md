@@ -6,8 +6,10 @@
 // sites: { [site]: { indexed, status, crawling, request, pages,
 //   crawl: 'ok' | 'complete' | 'rejected' | 'failed' | '429', steps: [...], hold, packageText,
 //   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...],
-//   isDevDocs: { verdict, method, score }, quickDevDocs, agentInstructions: [{ text, url }] } }
-// GET /sites/index lists indexed sites with an ETag (304 for If-None-Match).
+//   isDevDocs: { verdict, method, score }, quickDevDocs, agentInstructions: [{ text, url }],
+//   docs: { found, root, via, verdict } (/quick's docs field), llms: { url, verified, fullUrl, fullVerified },
+//   notDocs: true (listed in /sites/index notDocs) } }
+// GET /sites/index lists indexed sites and notDocs hosts with an ETag (304 for If-None-Match).
 // A crawl request moves one step per GET /crawl-requests/:id; at "complete"
 // the site becomes indexed. hold: true stays at the last step before it.
 
@@ -123,13 +125,14 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       const pageUrl = u.searchParams.get('url');
       const name = new URL(pageUrl).hostname;
       const s = site(name);
-      return json(200, { site: name, sources: s.quick ?? [], overview: s.overview ?? null, indexed: Boolean(s.indexed), pages: s.indexed ? s.pages ?? 12 : 0, isDevDocs: s.quickDevDocs ?? s.isDevDocs ?? null, agentInstructions: s.agentInstructions ?? [] });
+      return json(200, { site: name, sources: s.quick ?? [], overview: s.overview ?? null, indexed: Boolean(s.indexed), pages: s.indexed ? s.pages ?? 12 : 0, isDevDocs: s.quickDevDocs ?? s.isDevDocs ?? null, agentInstructions: s.agentInstructions ?? [], ...(s.docs ? { docs: s.docs } : {}), llms: s.llms ?? null });
     }
     if (req.method === 'GET' && u.pathname === '/v1/sites/index') {
       const list = Object.entries(sites).filter(([, s]) => s.indexed).map(([name, s]) => ({ site: name, pages: s.pages ?? 12 }));
-      const etag = `"${list.map((x) => `${x.site}:${x.pages}`).join(',')}"`;
+      const notDocs = Object.entries(sites).filter(([, s]) => s.notDocs).map(([name]) => name);
+      const etag = `"${list.map((x) => `${x.site}:${x.pages}`).join(',')}|${notDocs.join(',')}"`;
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
-      return json(200, list, { etag });
+      return json(200, { sites: list, notDocs }, { etag });
     }
     if (req.method === 'GET' && (m = u.pathname.match(/^\/v1\/sites\/([^/]+)\/topics$/))) {
       const s = site(decodeURIComponent(m[1]));

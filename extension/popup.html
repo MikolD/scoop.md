@@ -33,7 +33,7 @@
 
     <div id="pin-hint" class="intro pin-hint" hidden>
       <svg class="pin" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>
-      <span>Pin scoop.md to see how many docs we have for each site <span class="meta">(puzzle-piece menu › pin)</span></span>
+      <span>Pin scoop.md to see which sites have docs <span class="meta">(puzzle-piece menu › pin)</span></span>
       <button id="pin-ok" class="x" type="button" aria-label="Dismiss">×</button>
     </div>
 
@@ -63,7 +63,7 @@
     <p id="announce" class="sr" aria-live="polite"></p>
 
     <div id="tabs" class="tabs" role="tablist" aria-label="What to copy" hidden>
-      <button id="tab-page" class="tab" role="tab" type="button" aria-selected="true" aria-controls="content">This page</button>
+      <button id="tab-page" class="tab" role="tab" type="button" aria-selected="true" aria-controls="content">Quick Start</button>
       <button id="tab-overview" class="tab" role="tab" type="button" aria-selected="false" aria-controls="overview" tabindex="-1">Overview</button>
       <button id="tab-search" class="tab" role="tab" type="button" aria-selected="false" aria-controls="search" tabindex="-1">Search</button>
     </div>
@@ -74,13 +74,14 @@
         <p id="overview-off-status" class="meta"></p>
       </div>
       <div id="overview-on" hidden>
-        <p class="panel-title">Topics in the <span class="site-name"></span> docs</p>
+        <p class="panel-title"><span class="site-name"></span></p>
         <p id="overview-meta" class="meta"></p>
         <ul id="overview-topics" class="topics"></ul>
-        <p id="overview-llms-title" class="panel-sub" hidden>From the site's llms.txt</p>
+        <p id="overview-llms-title" class="panel-sub" hidden>llms.txt</p>
         <pre id="overview-llms" class="excerpt" hidden></pre>
         <p id="overview-status" class="meta" role="status"></p>
-        <button id="copy-overview" class="copy" type="button" disabled>Copy overview</button>
+        <button id="copy-overview" class="copy" type="button" disabled aria-label="Copy the overview">Copy</button>
+        <button id="copy-llms-full" class="link" type="button" hidden>Copy full llms.txt</button>
       </div>
     </section>
 
@@ -96,7 +97,7 @@
         <ul id="search-results" class="results"></ul>
         <div class="search-actions">
           <button id="copy-selected" class="copy" type="button" disabled>Copy selected</button>
-          <button id="copy-all" class="small" type="button" disabled>Copy all results</button>
+          <button id="copy-all" class="small" type="button" disabled aria-label="Copy all results">Copy all</button>
         </div>
       </div>
     </section>
@@ -104,42 +105,30 @@
     <div id="content" role="tabpanel" aria-labelledby="tab-page" hidden>
     <section class="card hero">
       <div class="verdict">
-        <span id="devdocs" class="chip" data-state="checking" role="img" aria-label="Checking whether this is developer docs"><span class="chip-icon" aria-hidden="true"></span><span id="devdocs-text">Checking…</span></span>
-        <p id="devdocs-why" class="meta" hidden>scoop.md copied just this page. Search and Overview are for developer docs.</p>
+        <span id="devdocs" class="chip" data-state="checking" role="img" aria-label="Checking whether this site has developer docs"><span class="chip-icon" aria-hidden="true"></span><span id="devdocs-text">Checking…</span></span>
       </div>
 
-      <div class="head">
-        <p id="status" class="busy" role="status">Scooping this page…</p>
-      </div>
+      <p id="status" class="busy" role="status">Scooping this page…</p>
 
-      <div id="page-meta" class="page-meta" hidden>
-        <p id="llms-line" class="meta" hidden>llms.txt verified · <a id="llms-link" href="#" target="_blank" rel="noopener"></a></p>
-        <div id="instructions" class="instructions" hidden>
-          <p class="panel-sub">What this site says to agents</p>
-          <ul id="instructions-list"></ul>
-          <button id="instructions-more" class="link" type="button" hidden>Show all</button>
-        </div>
-      </div>
+      <p id="llms-row" class="row meta" hidden>
+        <span id="llms-item" class="item"></span>
+        <span class="sep" aria-hidden="true">·</span>
+        <span id="llms-full-item" class="item"></span>
+      </p>
 
-      <p id="summary" class="meta" hidden></p>
-      <textarea id="preview" readonly spellcheck="false" aria-label="Text to paste into your agent" placeholder="The docs for this page will appear here."></textarea>
+      <details id="instructions" class="instructions" hidden>
+        <summary id="instructions-summary">Agent instructions</summary>
+        <ul id="instructions-list"></ul>
+      </details>
+      <p id="instructions-none" class="meta" hidden>Agent instructions: none</p>
+
+      <p id="usage" class="usage" hidden><strong id="tokens" class="tokens"></strong> <span id="size" class="meta"></span></p>
+      <textarea id="preview" rows="4" readonly spellcheck="false" aria-label="Text to paste into your agent" placeholder="The docs for this page will appear here."></textarea>
 
       <button id="copy" class="copy" type="button" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
-        <span id="copy-label">Copy for your agent</span>
+        <span id="copy-label">Copy</span>
       </button>
-
-      <section class="agents" aria-label="Works with">
-        <span class="meta">Paste into</span>
-        <ul>
-          <li title="Claude Code"><span class="logo logo-claude"></span><span class="sr">Claude Code</span></li>
-          <li title="Codex"><span class="logo logo-openai"></span><span class="sr">Codex</span></li>
-          <li title="Cursor"><span class="logo logo-cursor"></span><span class="sr">Cursor</span></li>
-          <li title="Copilot"><span class="logo logo-githubcopilot"></span><span class="sr">Copilot</span></li>
-          <li title="Windsurf"><span class="logo logo-windsurf"></span><span class="sr">Windsurf</span></li>
-          <li title="Gemini CLI"><span class="logo logo-googlegemini"></span><span class="sr">Gemini CLI</span></li>
-        </ul>
-      </section>
     </section>
 
     <section class="card foot">
