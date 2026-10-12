@@ -241,7 +241,7 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   const left = budget - (Date.now() - started);
   if (o.jev && Object.keys(questions).length && left >= JEV_MIN_MS) {
     try {
-      const r = await askJev({ page: pageUrl }, questions, { ...o.jev, timeoutMs: left, retries: 0 });
+      const r = await askJev({ page: pageUrl, task: 'Describe a documentation site for a developer and find the guidance it addresses to AI agents.' }, questions, { ...o.jev, timeoutMs: left, retries: 0 });
       jevTokens = r.tokens;
       const a = r.answers.overview;
       if (a?.type === 'choice') overview = options[Number(a.choice.slice(1))]?.source.url ?? overview;

@@ -16,7 +16,7 @@ import { HostLimiter } from '../src/crawl/polite.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET } from '../src/search/package.ts';
 import type { PackageChunk } from '../src/search/package.ts';
 import {
-  candidatesFromLlms, candidatesFromPage, dedupe, findRunInstructions, judgeCandidates, MIN_SCORE, nearDuplicate, siteInstructions, storeInstructions,
+  candidatesFromLlms, candidatesFromPage, dedupe, findRunInstructions, instructionQuestions, judgeCandidates, MIN_SCORE, nearDuplicate, siteInstructions, storeInstructions,
 } from '../src/agents/instructions.ts';
 import { quickDiscover } from '../src/search/quick.ts';
 import { verifyLlms } from '../src/crawl/discover.ts';
@@ -434,6 +434,9 @@ test('candidates: llms.txt blocks; page sections and paragraphs about agents; ne
   assert.deepEqual(candidatesFromLlms(index, 'https://x.dev/llms.txt').map((c) => c.text), [
     'Never use the legacy Charges API in new code.', 'General words about the product and its many features.',
   ]);
+  // The heading above a passage goes to Jev with it (an instruction reads as one only in its section).
+  assert.equal(candidatesFromLlms(index, 'https://x.dev/llms.txt')[0].section, 'X > Instructions for LLM agents');
+  assert.deepEqual((instructionQuestions(candidatesFromLlms(index, 'u').slice(0, 1)).a0.instructions as { section?: string }).section, 'X > Instructions for LLM agents');
   const page = `# Guide\n\nUnrelated paragraph about invoices and billing cycles.\n\nCoding agents should use our MCP server at https://mcp.stripe.com instead of scraping.\n\n## Building with LLMs\n\nPrefer the official SDKs over raw HTTP in generated code.\n`;
   assert.deepEqual(candidatesFromPage(page, 'https://docs.stripe.com/guide').map((c) => c.text), [
     'Coding agents should use our MCP server at https://mcp.stripe.com instead of scraping.',
