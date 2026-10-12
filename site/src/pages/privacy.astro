@@ -39,7 +39,7 @@ const events = [
     <ul>
       <li>The extension reads only the tab you're on, and only when you click the button or press its shortcut.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
+      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on and the page is public. Sharing can be turned off.</li>
       <li>
         Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
         path of public docs pages you scoop. The extension says so the first time you open it, with a button to turn
@@ -86,8 +86,8 @@ const events = [
     <h3>When the site's docs are indexed and the page is public</h3>
     <p>
       The page's address (without tracking parameters) goes to <code>api.scoop.md/v1/packages</code>, which answers with
-      the indexed docs arranged around that page. Never for a page that only renders signed in, or on your computer or
-      a private network.
+      the indexed docs arranged around that page, whatever the sharing setting. Never for a page that only renders
+      signed in, or on your computer or a private network.
     </p>
     <h3>When a docs site isn't indexed yet, sharing is on and the page is public</h3>
     <p>
@@ -220,7 +220,7 @@ const events = [
 
     <h2>Your choices</h2>
     <ul>
-      <li>Turn sharing off in the extension's options. Scooping still works; nothing is uploaded.</li>
+      <li>Turn sharing off in the extension's options. Scooping still works; nothing is uploaded and no crawl is requested. For a public page on a site whose docs are indexed, the page's address is still sent to look it up in the index.</li>
       <li>Turn usage statistics off in the extension's options. Scooping and sharing still work.</li>
       <li>Uninstalling the extension deletes its settings and install ID from your browser.</li>
       <li>

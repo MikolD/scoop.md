@@ -7,7 +7,7 @@
 
 import { createTelemetry, FLUSH_ALARM, getInstallId, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, telemetryEnabled, uninstallUrl } from './lib/telemetry.js';
 import { createLibrary, libraryUrl } from './lib/library.js';
-import { CRAWL_ALARM, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
+import { CRAWL_ALARM, PENDING_KEY, live, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
 const BROWSER_KEY = 'telemetryBrowserVersion';
@@ -33,8 +33,10 @@ async function activePing(t) {
 
 async function ensureAlarms() {
   if (!(await chrome.alarms.get(HOURLY_ALARM))) chrome.alarms.create(HOURLY_ALARM, { delayInMinutes: 1, periodInMinutes: 60 });
-  // A crawl still running when the browser closed: keep following it.
-  const pending = await loadPending(chrome);
+  // A crawl still running when the browser closed: keep following it. Finished
+  // ones nobody picked up expire, so the ✓ doesn't stick.
+  const pending = live(await loadPending(chrome));
+  await chrome.storage.local.set({ [PENDING_KEY]: pending });
   if (Object.values(pending).some((e) => !isTerminal(e.state)) && !(await chrome.alarms.get(CRAWL_ALARM))) {
     chrome.alarms.create(CRAWL_ALARM, { periodInMinutes: 0.5 });
   }

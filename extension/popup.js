@@ -165,16 +165,18 @@ async function revealAfterCopy(ok) {
     const reduced = reducedMotion();
     document.body.dataset.motion = reduced ? 'reduced' : 'full';
     setStage('copied');
-    $('announce').textContent = 'Copied to your clipboard.';
     if (!current?.private) track('copied_animation_shown', { reducedMotion: reduced });
     await sleep(reduced ? timing.reducedMs : timing.celebrateMs);
   }
   reveal();
 }
 
+// The content, announced with the status line, and focus on the Copy button.
 function reveal() {
   setStage('content');
   $('content').classList.add('reveal');
+  $('announce').textContent = $('status').textContent;
+  if (!$('copy').disabled) $('copy').focus();
 }
 
 // Copies and records the scoop; returns whether the clipboard took it.
@@ -270,6 +272,9 @@ async function waitForCrawl(scoop, initial) {
   $('wait-site').textContent = site;
   showProgress(initial);
   setStage('waiting');
+  // Phase changes are announced by #wait-phase (aria-live); this says what's going on.
+  $('announce').textContent = `Figuring out the docs for ${site}…`;
+  $('copy-now').disabled = false;
   waitingSince = Date.now();
   let stopped = false;
   let copyingNow = null;
@@ -301,6 +306,9 @@ async function waitForCrawl(scoop, initial) {
     $('copy-now').onclick = null;
     waitOutcome(req.state);
     if (req.state === 'complete') {
+      // Fetching the package can take a moment: back to the loader, no second copy.
+      $('copy-now').disabled = true;
+      showLoader();
       await forgetCrawl(chrome, site);
       if (await deliverIndexed(scoop)) return;
       return deliverLocal(scoop);
@@ -350,9 +358,11 @@ async function run({ skipLibrary = false } = {}) {
   const mayCrawl = pagePublic && settings.share;
 
   // 1. A crawl this install asked for earlier: deliver it, or keep waiting.
+  let askedIndex = false;
   if (pending && pagePublic) {
     if (pending.state === 'complete') {
       await forgetCrawl(chrome, site);
+      askedIndex = true;
       if (await deliverIndexed(scoop)) return;
     } else if (!isTerminal(pending.state)) {
       return waitForCrawl(scoop, { id: pending.requestId, state: pending.state, phase: pending.phase });
@@ -361,7 +371,7 @@ async function run({ skipLibrary = false } = {}) {
     }
   }
   // 2. The site is in the docs index.
-  if (index?.indexed && pagePublic && (await deliverIndexed(scoop))) return;
+  if (index?.indexed && pagePublic && !askedIndex && (await deliverIndexed(scoop))) return;
   const crawling = index && !index.indexed && index.crawling && index.request?.id;
   const unseen = index && !index.indexed && !index.crawling && index.status === 'new';
   // 3. The shared skill (when the site isn't indexed yet, ask for a crawl in the

@@ -82,6 +82,9 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       if (s.crawl === 'rejected') return json(200, { id: `cr_${next++}`, site: name, state: 'rejected', reason: 'not_devtool' });
       if (s.crawl === 'failed') return json(200, { id: `cr_${next++}`, site: name, state: 'failed', reason: 'fetch_failed' });
       if (s.crawl === 'complete') { s.indexed = true; return json(200, { id: `cr_${next++}`, site: name, state: 'complete' }); }
+      // The server dedupes: a site already being crawled gets that request back.
+      const running = Object.values(requests).find((r) => r.site === name && !['complete', 'rejected', 'failed'].includes(r.view().state));
+      if (running) return json(200, { id: running.view().id, site: name, state: running.view().state });
       const r = newRequest(name, url, s);
       return json(202, { id: r.view().id, site: name, state: 'queued', etaSeconds: 40 });
     }
@@ -92,7 +95,7 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
     }
     if (req.method === 'GET' && u.pathname === '/v1/packages') {
       const name = u.searchParams.get('site');
-      if (!site(name).indexed) return json(404, { error: { code: 'not_indexed', message: `${name} is not indexed` } });
+      if (!site(name).indexed || site(name).packages404) return json(404, { error: { code: 'not_indexed', message: `${name} is not indexed` } });
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(site(name).packageText ?? packageFor(name, u.searchParams.get('url')));
     }

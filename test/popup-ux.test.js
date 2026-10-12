@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs';
 import { parseHTML, DOMParser } from 'linkedom';
 import { startMockLibrary, packageFor } from './helpers/mock-library.js';
 import { stageLog, timing } from '../extension/lib/ux.js';
-import { PENDING_KEY, CRAWL_ALARM, progressText, pollPending, rememberCrawl, forgetCrawl } from '../extension/lib/crawl.js';
+import { PENDING_KEY, CRAWL_ALARM, READY_TTL_MS, live, progressText, pollPending, rememberCrawl, forgetCrawl, updateBadge } from '../extension/lib/crawl.js';
 import { createLibrary } from '../extension/lib/library.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -59,9 +59,19 @@ const waitFor = async (cond, ms = 3000) => {
 };
 
 // Opens the popup on `url`; returns at once (ready resolves when the scoop is done).
-async function openPopup(url, { local = {}, share = true, installType = 'development', reduced = false, sync = {} } = {}) {
+async function openPopup(url, { local = {}, share = true, installType = 'development', reduced = false, sync = {}, clipboardFails = false } = {}) {
   const { document } = parseHTML(read('../extension/popup.html'));
-  const clipboard = { text: null, writes: [], writeText: async (t) => { clipboard.text = t; clipboard.writes.push({ at: Date.now(), stage: document.body.dataset.stage }); } };
+  const clipboard = { text: null, writes: [], writeText: async (t) => {
+    if (clipboardFails) throw new Error('Document is not focused.');
+    clipboard.text = t; clipboard.writes.push({ at: Date.now(), stage: document.body.dataset.stage });
+  } };
+  // The execCommand fallback in a browser that refuses it too (linkedom has neither select nor execCommand).
+  Object.getPrototypeOf(document.createElement('textarea')).select ??= () => {};
+  document.execCommand ??= () => false;
+  globalThis.getSelection ??= () => null;
+  // linkedom has no activeElement: record focus calls instead.
+  const focused = [];
+  for (const id of ['copy', 'copy-now']) document.getElementById(id).focus = () => focused.push(id);
   const badge = { text: null, history: [] };
   const alarms = {};
   globalThis.document = document;
@@ -92,7 +102,7 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   const $ = (id) => document.getElementById(id);
-  return { $, clipboard, badge, alarms, local, document, ready: popup.ready };
+  return { $, clipboard, badge, alarms, local, document, focused, ready: popup.ready };
 }
 
 const posts = (path) => mock.log.filter((e) => e.method === 'POST' && e.path === path);
@@ -116,7 +126,8 @@ test('the loader stays at least loaderMs, the copy lands before the copied momen
   assert.equal(p.clipboard.writes[0].stage, 'loading', 'copied while the loader was still up');
   assert.ok(p.clipboard.writes[0].at <= copiedStage.at);
   assert.ok(content.at - copiedStage.at >= timing.celebrateMs - 10);
-  assert.equal(p.$('announce').textContent, 'Copied to your clipboard.');
+  assert.equal(p.$('announce').textContent, 'Copied. Paste it into your agent.', 'announced with the status text');
+  assert.deepEqual(p.focused, ['copy'], 'focus moves to the Copy button');
   assert.equal(p.$('content').hidden, false);
   assert.ok(p.$('content').classList.contains('reveal'));
   assert.equal(p.$('loader').hidden, true);
@@ -199,7 +210,9 @@ test('crawl lifecycle: queued → running → indexing → complete delivers the
   assert.equal(posts('/v1/crawl-requests').length, 1);
   assert.deepEqual(posts('/v1/crawl-requests')[0].body, { url: PAGE });
   assert.ok(posts('/v1/crawl-requests')[0].install, 'sent with the install ID');
-  assert.deepEqual(stages(), ['loading', 'waiting', 'copied', 'content']);
+  assert.deepEqual(stages(), ['loading', 'waiting', 'loading', 'copied', 'content'], 'back to the loader while the package is fetched');
+  assert.equal(p.$('copy-now').disabled, true, 'no second copy once the crawl completed');
+  assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
   for (const l of ['Waiting for a crawler (about a minute)', "Checking it's developer docs", 'Finding the docs', 'Reading 12 pages', 'Indexing 6/12']) {
     assert.ok(labels.includes(l), `showed "${l}" (saw ${JSON.stringify(labels)})`);
   }
@@ -384,4 +397,91 @@ test('library client: the index calls follow the contract', async () => {
   await lib.crawlRequest('cr_1');
   assert.equal(calls[2].url, `https://api.scoop.md/v1/sites/${SITE}/status`);
   assert.equal(calls[3].url, 'https://api.scoop.md/v1/crawl-requests/cr_1');
+});
+
+test('a failed copy is announced with the status text too, with no copied moment', () => withMock({ sites: { [SITE]: { status: 'not_devtool' } } }, async () => {
+  const p = await openPopup(PAGE, { clipboardFails: true });
+  await p.ready;
+  assert.equal(p.$('status').textContent, 'Ready. Click Copy to put it on your clipboard.');
+  assert.equal(p.$('announce').textContent, 'Ready. Click Copy to put it on your clipboard.');
+  assert.ok(!stages().includes('copied'));
+  assert.deepEqual(p.focused, ['copy']);
+}));
+
+test('waiting is announced once; phases are announced by the live phase line', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  const p = await openPopup(PAGE);
+  await waitFor(() => p.document.body.dataset.stage === 'waiting');
+  assert.equal(p.$('announce').textContent, 'Figuring out the docs for docs.example.com…');
+  assert.equal(p.$('wait-phase').getAttribute('aria-live'), 'polite');
+  p.$('copy-now').onclick();
+  await p.ready;
+}));
+
+test('a pending crawl that completed but whose package is missing asks /packages once, then builds here', () => withMock({ sites: { [SITE]: { indexed: true, packages404: true } } }, async () => {
+  const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_9', site: SITE, url: PAGE, state: 'complete', startedAt: Date.now(), updatedAt: Date.now() } } };
+  const p = await openPopup(PAGE, { local });
+  await p.ready;
+  assert.equal(gets('/v1/packages').length, 1);
+  assert.match(p.clipboard.text, /# Get started with Widgets/);
+}));
+
+test('two popups on one site: one crawl request, one tracked entry', () => withMock({ sites: { [SITE]: { hold: true } } }, async () => {
+  const first = await openPopup(PAGE);
+  await waitFor(() => first.document.body.dataset.stage === 'waiting');
+  first.$('copy-now').onclick();
+  await first.ready;
+  const second = await openPopup(PAGE, { local: first.local });
+  await waitFor(() => second.document.body.dataset.stage === 'waiting');
+  second.$('copy-now').onclick();
+  await second.ready;
+  assert.equal(posts('/v1/crawl-requests').length, 1, 'the second popup resumed the first one');
+  assert.deepEqual(Object.keys(second.local[PENDING_KEY]), [SITE]);
+  // And if both had asked, the server answers with the same request: still one entry.
+  const lib = createLibrary({ baseUrl: mock.url, installId: 'x', client: 't' });
+  const [a, b] = await Promise.all([lib.requestCrawl(PAGE), lib.requestCrawl(PAGE)]);
+  assert.equal(a.data.id, b.data.id);
+  const chromeApi = { storage: { local: { get: async (k) => ({ [k]: second.local[k] }), set: async (o) => Object.assign(second.local, structuredClone(o)) } }, alarms: { create() {} }, action: {} };
+  await rememberCrawl(chromeApi, { requestId: a.data.id, site: SITE, url: PAGE, state: a.data.state });
+  await rememberCrawl(chromeApi, { requestId: b.data.id, site: SITE, url: PAGE, state: b.data.state });
+  assert.equal(Object.keys(second.local[PENDING_KEY]).length, 1);
+}));
+
+test('a ✓ nobody picked up expires; a running request past its time is dropped', async () => {
+  const now = Date.now();
+  const pending = {
+    'a.example.com': { state: 'complete', updatedAt: now - READY_TTL_MS - 1 },
+    'b.example.com': { state: 'running', startedAt: now - 3 * 3_600_000 },
+    'c.example.com': { state: 'complete', updatedAt: now },
+  };
+  assert.deepEqual(Object.keys(live(pending, now)), ['c.example.com']);
+  const badge = [];
+  const chromeApi = { action: { setBadgeText: async ({ text }) => badge.push(text), setBadgeBackgroundColor: async () => {} } };
+  assert.equal(await updateBadge(chromeApi, { 'a.example.com': pending['a.example.com'] }, now), '');
+  assert.equal(await updateBadge(chromeApi, { 'c.example.com': pending['c.example.com'] }, now), '✓');
+});
+
+test('pollPending merges into what is stored now: an entry the popup delivered meanwhile stays gone', async () => {
+  const local = { [PENDING_KEY]: { 'a.example.com': { requestId: 'cr_a', site: 'a.example.com', state: 'running', startedAt: Date.now() } } };
+  const chromeApi = {
+    storage: { local: { get: async (k) => ({ [k]: structuredClone(local[k]) }), set: async (o) => Object.assign(local, structuredClone(o)) } },
+    alarms: { create() {}, clear: async () => true },
+    action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
+  };
+  const library = {
+    crawlRequest: async () => {
+      // The popup delivers the result while the service worker is still asking.
+      delete local[PENDING_KEY]['a.example.com'];
+      local[PENDING_KEY]['b.example.com'] = { requestId: 'cr_b', site: 'b.example.com', state: 'queued', startedAt: Date.now() };
+      return { ok: true, status: 200, data: { state: 'complete', phase: 'done' } };
+    },
+  };
+  await pollPending(chromeApi, library);
+  assert.deepEqual(Object.keys(local[PENDING_KEY]), ['b.example.com'], 'not resurrected, and the new entry kept');
+});
+
+test('settings explain that the index lookup still sends the page address with sharing off', () => {
+  assert.match(read('../extension/options.html'), /Turning this off stops uploads; looking up this page in the docs index still sends its address\./);
+  const privacy = read('../site/src/pages/privacy.astro');
+  assert.ok((privacy.match(/whatever the sharing setting/g) ?? []).length >= 2, 'the short version and the index section');
+  assert.match(privacy, /Turn sharing off[^<]*still sent to look it up in the index/);
 });

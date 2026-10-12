@@ -79,9 +79,19 @@ export async function forgetCrawl(chromeApi, site) {
   await updateBadge(chromeApi, pending);
 }
 
+// Entries still worth showing: a running request not yet given up on, a
+// finished one not yet expired (so a ✓ nobody picked up doesn't stay forever).
+export function live(pending, now = Date.now()) {
+  return Object.fromEntries(Object.entries(pending).filter(([, e]) => (e.state === 'complete'
+    ? now - (e.updatedAt ?? now) <= READY_TTL_MS
+    : isTerminal(e.state) || now - (e.startedAt ?? now) <= PENDING_TTL_MS)));
+}
+
 // "✓" when a finished crawl is waiting to be picked up, "…" while one runs.
-export async function updateBadge(chromeApi, pending) {
-  const entries = Object.values(pending ?? await loadPending(chromeApi));
+// One badge for the whole toolbar: knowing which tabs show a site would mean
+// watching every tab's navigation, which the extension doesn't do.
+export async function updateBadge(chromeApi, pending, now = Date.now()) {
+  const entries = Object.values(live(pending ?? await loadPending(chromeApi), now));
   const text = entries.some((e) => e.state === 'complete') ? '✓' : entries.some((e) => !isTerminal(e.state)) ? '…' : '';
   try {
     await chromeApi.action?.setBadgeBackgroundColor?.({ color: BADGE_COLOR });
@@ -95,23 +105,30 @@ export async function updateBadge(chromeApi, pending) {
 // complete ones stay until the popup delivers them or they expire. The alarm
 // stops when nothing is running.
 export async function pollPending(chromeApi, library, now = Date.now()) {
-  const pending = await loadPending(chromeApi);
-  for (const [site, e] of Object.entries(pending)) {
-    if (!isTerminal(e.state)) {
-      if (now - (e.startedAt ?? now) > PENDING_TTL_MS) {
-        e.state = 'failed';
-      } else {
-        const res = await library.crawlRequest(e.requestId);
-        if (res.ok && res.data?.state) Object.assign(e, { state: res.data.state, phase: res.data.phase, updatedAt: now });
-        else if (res.status === 404) e.state = 'failed';
-      }
+  const updates = {};
+  for (const [site, e] of Object.entries(await loadPending(chromeApi))) {
+    if (isTerminal(e.state)) continue;
+    if (now - (e.startedAt ?? now) > PENDING_TTL_MS) {
+      updates[site] = { requestId: e.requestId, state: 'failed' };
+      continue;
     }
-    if (e.state === 'rejected' || e.state === 'failed') delete pending[site];
-    else if (e.state === 'complete' && now - (e.updatedAt ?? now) > READY_TTL_MS) delete pending[site];
+    const res = await library.crawlRequest(e.requestId);
+    if (res.ok && res.data?.state) updates[site] = { requestId: e.requestId, state: res.data.state, phase: res.data.phase, updatedAt: now };
+    else if (res.status === 404) updates[site] = { requestId: e.requestId, state: 'failed' };
   }
-  await savePending(chromeApi, pending);
-  if (!Object.values(pending).some((e) => !isTerminal(e.state))) {
+  // The popup may have delivered or replaced an entry while we were asking:
+  // merge into what is stored now, per site and only for the same request.
+  const pending = await loadPending(chromeApi);
+  for (const [site, u] of Object.entries(updates)) {
+    if (pending[site]?.requestId === u.requestId) Object.assign(pending[site], u);
+  }
+  for (const [site, e] of Object.entries(pending)) {
+    if (e.state === 'rejected' || e.state === 'failed') delete pending[site];
+  }
+  const kept = live(pending, now);
+  await savePending(chromeApi, kept);
+  if (!Object.values(kept).some((e) => !isTerminal(e.state))) {
     try { await chromeApi.alarms?.clear(CRAWL_ALARM); } catch {}
   }
-  return updateBadge(chromeApi, pending);
+  return updateBadge(chromeApi, kept, now);
 }
