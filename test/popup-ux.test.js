@@ -55,6 +55,14 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end('# Shop\n\n- [Pricing](https://shop.example.net/pricing)\n');
     }
+    if (req.url === '/sub/llms-rel.txt') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      return res.end('# Example docs\n\n> The example docs, with site-relative links.\n\n- [Guide](/guide.md): getting started\n');
+    }
+    if (req.url === '/sub/home.md') {
+      res.writeHead(200, { 'content-type': 'text/markdown' });
+      return res.end('---\n"@context": https://schema.org\nheadline: "Home"\n---\n\n# Example home\n\nWelcome to the example docs. Start with the guide.\n');
+    }
     if (req.url === '/sub/llms-big.txt') {
       res.writeHead(200, { 'content-type': 'text/plain' });
       return res.end(`# Big docs\n\n${'- [A page](https://docs.example.org/guide.md): what it covers, in a few words\n'.repeat(800)}`);
@@ -1307,3 +1315,18 @@ test('the local guess: a marketing page with an llms.txt at the root is not deve
   assert.equal(p.$('devdocs').dataset.state, 'no');
   assert.equal(p.$('devdocs').title, 'No developer docs (guess)');
 }));
+
+test('docs entry point: site-relative links in the llms.txt become absolute; a .md home loses its front matter and gives its H1 as the title', async () => {
+  await withMock({ sites: { [SITE]: { docs: { found: true, root: `https://${SUB}/`, via: 'subdomain', verdict: 'no' }, llms: { url: `https://${SUB}/llms-rel.txt`, verified: true } } } }, async () => {
+    const p = await openPopup(`https://${SITE}/docs/links`);
+    await p.ready;
+    assert.match(p.clipboard.text, /\[Guide\]\(https:\/\/docs\.example\.org\/guide\.md\)/);
+    assert.ok(!p.clipboard.text.includes('](/guide.md)'));
+  });
+  await withMock({ sites: { [SITE]: { docs: { found: true, root: `https://${SUB}/home`, via: 'subdomain', verdict: 'no' } } } }, async () => {
+    const p = await openPopup(`https://${SITE}/docs/links`);
+    await p.ready;
+    assert.match(p.clipboard.text, /^# docs\.example\.org docs for Example home \(via scoop\.md\)$/m);
+    assert.ok(!p.clipboard.text.includes('"@context"'), 'no front matter');
+  });
+});

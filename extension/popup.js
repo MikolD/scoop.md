@@ -460,15 +460,19 @@ async function deliverDocsEntry(scoop, root) {
     const got = await fetchPublicText(llmsUrl);
     if (got?.content && verifyLlms(got.content)) {
       title = got.content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? '';
-      section = { kind: 'llms-entry', label: `Docs overview (${shortUrl(llmsUrl)})`, url: llmsUrl, content: cutAtLine(got.content, ENTRY_CHARS) };
+      // Site-relative links (/docs/x.md) made absolute, so the agent can follow them.
+      const content = cutAtLine(got.content, ENTRY_CHARS).replace(/\]\((\/[^)\s]*)\)/g, (all, path) => `](${new URL(path, llmsUrl).href})`);
+      section = { kind: 'llms-entry', label: `Docs overview (${shortUrl(llmsUrl)})`, url: llmsUrl, content };
     }
   }
   if (!section) {
     const home = await scoopPage(root, { parseHtml: (html) => new DOMParser().parseFromString(html, 'text/html') }).catch(() => null);
     const page = home?.sections.find((s) => s.kind === 'page-md' || s.kind === 'page-html');
     if (page?.content) {
-      title = home.title;
-      section = { kind: 'docs-home', label: `Docs home (${shortUrl(root)})`, url: page.url, content: cutAtLine(page.content, ENTRY_CHARS) };
+      // A .md twin may open with YAML front matter: left out, and its first H1 is the title.
+      const body = page.content.replace(/^---\n[\s\S]*?\n---\n+/, '');
+      title = home.title || body.match(/^#\s+(.+)$/m)?.[1]?.trim() || '';
+      section = { kind: 'docs-home', label: `Docs home (${shortUrl(root)})`, url: page.url, content: cutAtLine(body, ENTRY_CHARS) };
     }
   }
   if (!section) return false;

@@ -234,3 +234,8 @@ test('overview package: topics and the llms.txt within 16k, the llms.txt cut wit
   assert.ok(big.text.length <= PAGE_BUDGET, `${big.text.length}`);
   assert.match(big.text, /\[Truncated\. The full file is at https:\/\/hono\.dev\/llms\.txt\]$/m);
 });
+
+test('verifyLlms accepts site-relative links (twilio.com/docs/llms.txt has only those)', () => {
+  assert.equal(verifyLlms('# Twilio Documentation\n\n## Authy\n\n- [Authy](/docs/authy.md)\n'), true);
+  assert.equal(verifyLlms('# Docs\n\n- [x](relative.md)\n'), false, 'a bare relative path is not enough');
+});
