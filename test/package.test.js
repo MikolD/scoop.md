@@ -188,6 +188,7 @@ test('verifyLlms: starts with an H1 and has at least one link', () => {
 test('tokenEstimate: about four characters a token', () => {
   assert.equal(tokenEstimate('x'.repeat(3400)), '~850 tokens');
   assert.equal(tokenEstimate('x'.repeat(12_800)), '~3.2k tokens');
+  assert.equal(tokenEstimate('x'.repeat(16_000)), '~4k tokens');
   assert.equal(tokenEstimate('x'.repeat(64_000)), '~16k tokens');
 });
 

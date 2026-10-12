@@ -160,7 +160,7 @@ export function buildPagePackage({ site, title, pageUrl, llms = null, llmsFull =
 // ~4 characters a token: "~850 tokens", "~3.2k tokens".
 export function tokenEstimate(text) {
   const n = Math.ceil(String(text ?? '').length / 4);
-  return n < 1000 ? `~${n} tokens` : `~${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k tokens`;
+  return n < 1000 ? `~${n} tokens` : `~${(n / 1000).toFixed(n < 10_000 ? 1 : 0).replace(/\.0$/, '')}k tokens`;
 }
 
 // What a package says about itself (the library's index packages use the same
