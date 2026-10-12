@@ -6,7 +6,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { crawlCosts } from '../src/admin/queries.ts';
-import { runCosts } from '../src/db/crawl.ts';
+import { CrawlStore, runCosts } from '../src/db/crawl.ts';
+import { DEFAULT_E2B_DAILY_CAP_USD, e2bDailyCap } from '../src/crawl/e2b.ts';
 import type { CrawlRunRow } from '../src/db/crawl.ts';
 import type { Classified } from '../src/index/classify.ts';
 import { estimateTokens } from '../src/index/chunk.ts';
@@ -225,4 +226,27 @@ test('crawl runner: per-run total and per page once indexed, "indexing" until th
   assert.match(table(results), /x\.dev .* 0\.00400\s+0\.00100/);
   assert.match(summary(results), /cost: \$0\.00450 /);
   assert.match(summary(results), /per page: \$0\.00100 over 4 pages in 1 fully indexed runs/);
+});
+
+test('E2B daily cap: a browser crawl reserves its worst case, and one over the cap is refused', async () => {
+  const { d1, raw } = fakeD1();
+  const store = new CrawlStore(d1, fakeR2().r2);
+  const at = '2026-10-12T09:00:00.000Z';
+  const run = (id: string, cost = 0, started = at) =>
+    raw.prepare(`INSERT INTO crawl_runs (id, site, start_url, started_at, status, cost_usd) VALUES (?, 'x.dev', 'https://x.dev/', ?, 'running', ?)`).run(id, started, cost);
+  run('cr_old', 5, '2026-10-11T23:00:00.000Z'); // yesterday: doesn't count
+  run('cr_done', 1.5);
+  run('cr_a');
+  run('cr_b');
+  assert.deepEqual(await store.reserveBrowser('cr_a', 0.4, 2, NOW), { ok: true, spentUsd: 1.9 });
+  assert.equal((raw.prepare(`SELECT cost_usd FROM crawl_runs WHERE id = 'cr_a'`).get() as any).cost_usd, 0.4);
+  // 1.5 + 0.4 + 0.4 > 2: refused, nothing written.
+  assert.deepEqual(await store.reserveBrowser('cr_b', 0.4, 2, NOW), { ok: false, spentUsd: 1.9 });
+  assert.equal((raw.prepare(`SELECT cost_usd FROM crawl_runs WHERE id = 'cr_b'`).get() as any).cost_usd, 0);
+  // A retried step re-reserves its own run without counting itself twice.
+  assert.equal((await store.reserveBrowser('cr_a', 0.4, 2, NOW)).ok, true);
+  assert.equal(e2bDailyCap({}), DEFAULT_E2B_DAILY_CAP_USD);
+  assert.equal(DEFAULT_E2B_DAILY_CAP_USD, 2);
+  assert.equal(e2bDailyCap({ E2B_DAILY_CAP_USD: '5' }), 5);
+  assert.equal(e2bDailyCap({ E2B_DAILY_CAP_USD: 'nope' }), 2);
 });

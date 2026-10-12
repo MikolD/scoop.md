@@ -90,3 +90,8 @@ test('the reference server accepts the same event names as the backend', async (
     assert.deepEqual([...EVENT_NAMES[source]].sort(), names, source);
   }
 });
+
+test('the store zip leaves out store artwork, docs, types, tests and source maps', () => {
+  const pack = readFileSync(new URL('../scripts/pack-extension.js', import.meta.url), 'utf8');
+  for (const pattern of ["'store-assets/*'", "'*.md'", "'*.d.ts'", "'*.test.js'", "'*.map'"]) assert.ok(pack.includes(pattern), pattern);
+});

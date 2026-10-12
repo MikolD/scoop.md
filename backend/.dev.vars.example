@@ -14,8 +14,10 @@ ALLOW_ANY_EXTENSION=1
 # R2_ACCOUNT_ID=
 # Indexing (POST /v1/admin/index, the index-pages consumer). Never commit a real key.
 # OPENROUTER_API_KEY=<your OpenRouter key>
-# Admin console (admin.localhost:8787 locally): Basic auth user and passcode. Unset = no one gets in.
-ADMIN_UI_USER=admin
-ADMIN_UI_PASSCODE=local-admin-passcode
+# Admin console (admin.localhost:8787 locally): Basic auth user and passcode.
+# Unset, or a passcode under 32 characters, and no one gets in. Generate one:
+#   openssl rand -base64 32
+# ADMIN_UI_USER=admin
+# ADMIN_UI_PASSCODE=
 # Usage telemetry: salts the daily-rotating IP-subject hash and the website's visitor ID. Any random string locally.
 TELEMETRY_SALT=local-telemetry-salt

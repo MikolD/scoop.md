@@ -352,7 +352,7 @@ async function overview() {
         stat(fmtUsd(o.aiSpend.totalUsd), `AI of ${fmtUsd(o.aiSpend.totalCapUsd, 2)} daily cap`, meter(o.aiSpend.totalUsd, o.aiSpend.totalCapUsd)),
         stat(fmtUsd(o.gateCostUsd), 'of which devtool gate'),
         stat(`${fmtInt(Math.round(o.e2b.seconds))} s`, 'E2B sandbox time'),
-        stat(fmtUsd(o.e2b.costUsd), 'E2B cost')),
+        stat(fmtUsd(o.e2b.costUsd), `E2B of ${fmtUsd(o.e2bCapUsd, 2)} daily cap`, meter(o.e2b.costUsd, o.e2bCapUsd))),
       o.secrets.openrouter ? null : h('p', { class: 'warn small' }, 'OPENROUTER_API_KEY is not set: pages are indexed unclassified and the gate cannot ask the AI.'),
       table([
         { label: 'Site', get: (r) => siteLink(r.site) },

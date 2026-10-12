@@ -7,7 +7,7 @@ import { buildPackage, withCurrentPage } from '../../../extension/lib/package.js
 import { json, readJson } from '../api/http.ts';
 import { profileJson, runJson, searchDeps } from '../api/v1.ts';
 import { runPrefix } from '../crawl/collect.ts';
-import { E2BCrawler } from '../crawl/e2b.ts';
+import { E2BCrawler, e2bDailyCap } from '../crawl/e2b.ts';
 import { startCrawl } from '../crawl/start.ts';
 import { CrawlStore } from '../db/crawl.ts';
 import type { SiteProfileRow } from '../db/crawl.ts';
@@ -92,21 +92,26 @@ function profileFull(r: SiteProfileRow) {
   };
 }
 
-// Stops a crawl: terminates its Workflow, kills its tagged E2B sandboxes,
-// marks a run still queued/running as failed and clears its working files.
-// The site keeps its last finished crawl's outcome.
-export async function cancelRun(env: Env, runId: string): Promise<{ terminated: boolean; sandboxes: number; marked: boolean; notes: string[] }> {
+// Stops a crawl: terminates its Workflow, kills its tagged E2B sandboxes and
+// clears its working files. The run is marked failed (and the site's crawl
+// ended, keeping its last outcome) only once its Workflow is certainly
+// stopped: terminate() succeeded or the instance was already final. If not
+// (the instance can't be reached), the run is left as it is: ok is false.
+export async function cancelRun(env: Env, runId: string): Promise<{ ok: boolean; terminated: boolean; sandboxes: number; marked: boolean; notes: string[] }> {
   const crawls = crawlStore(env);
   const run = await crawls.getRun(runId);
   if (!run) throw notFound('No such crawl run');
   const notes: string[] = [];
   let terminated = false;
+  let stopped = false;
   try {
     const instance = await env.CRAWL_SITE.get(runId);
     const { status } = await instance.status();
-    if (!['complete', 'errored', 'terminated'].includes(status)) {
+    if (['complete', 'errored', 'terminated'].includes(status)) {
+      stopped = true;
+    } else {
       await instance.terminate();
-      terminated = true;
+      terminated = stopped = true;
     }
   } catch (e) {
     notes.push(`workflow: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200));
@@ -119,14 +124,19 @@ export async function cancelRun(env: Env, runId: string): Promise<{ terminated: 
       notes.push(`e2b: ${e instanceof Error ? e.message : String(e)}`.slice(0, 200));
     }
   }
-  const marked = run.status === 'queued' || run.status === 'running';
-  if (marked) {
+  const active = run.status === 'queued' || run.status === 'running';
+  if (active && !stopped) return { ok: false, terminated, sandboxes, marked: false, notes };
+  if (active) {
     await crawls.updateRun(runId, { status: 'failed', finished_at: new Date().toISOString(), error: 'cancelled by an admin' });
     await crawls.endCrawl(run.site);
   }
-  const list = await env.CRAWL.list({ prefix: runPrefix(runId) });
-  if (list.objects.length) await env.CRAWL.delete(list.objects.map((o) => o.key));
-  return { terminated, sandboxes, marked, notes };
+  let cursor: string | undefined;
+  do {
+    const list = await env.CRAWL.list({ prefix: runPrefix(runId), cursor });
+    if (list.objects.length) await env.CRAWL.delete(list.objects.map((o) => o.key));
+    cursor = list.truncated ? list.cursor : undefined;
+  } while (cursor);
+  return { ok: true, terminated, sandboxes, marked: active, notes };
 }
 
 async function profilesFor(db: D1Database, sites: string[]): Promise<Map<string, SiteProfileRow>> {
@@ -165,6 +175,7 @@ const routes: Route[] = [
         environment: env.ENVIRONMENT ?? 'dev',
         secrets: { openrouter: Boolean(env.OPENROUTER_API_KEY), e2b: Boolean(env.E2B_API_KEY) },
         ...(await q.overview(env.DB, { dailyCapUsd, totalCapUsd })),
+        e2bCapUsd: e2bDailyCap(env),
       });
     },
   },
@@ -203,7 +214,11 @@ const routes: Route[] = [
   {
     method: 'POST',
     pattern: /^\/api\/runs\/(cr_[0-9A-Z]{26})\/cancel$/,
-    handler: async ({ env, params }) => json(200, await cancelRun(env, params[0])),
+    handler: async ({ env, params }) => {
+      const r = await cancelRun(env, params[0]);
+      if (r.ok) return json(200, r);
+      return json(502, { error: { code: 'internal', message: 'Could not stop the crawl\'s Workflow; the run was left as it is. Try again.' }, ...r });
+    },
   },
   {
     method: 'POST',
@@ -276,6 +291,10 @@ const routes: Route[] = [
         const c = validateCrawl({ site: s.site, startUrl: s.startUrl, maxPages: (maxPages as number | null) ?? s.maxPages ?? DEFAULT_SEED_PAGES }, allowLocalhost(env));
         return { name: s.name, site: c.site, startUrl: c.startUrl, maxPages: c.maxPages };
       });
+      // One batch at a time: two would compete for the same sites and budget.
+      if (await env.DB.prepare(`SELECT 1 FROM crawl_batches WHERE status = 'running' LIMIT 1`).first()) {
+        throw new ApiError('conflict', 'A batch is already running; cancel it or wait for it to finish', 409);
+      }
       const id = newBatchId();
       await createBatch(env.DB, { id, concurrency: concurrency as number, maxPages: maxPages as number | null, force: body.force === true, jobs });
       try {
@@ -306,12 +325,15 @@ const routes: Route[] = [
       const inFlight = await cancelBatch(env.DB, params[0]);
       if (inFlight === null) throw new ApiError('conflict', 'This batch is not running', 409);
       let stopped = 0;
+      const notStopped: string[] = [];
       if (body.stopRuns === true) {
         for (const runId of inFlight) {
-          if ((await cancelRun(env, runId)).marked) stopped++;
+          const r = await cancelRun(env, runId);
+          if (r.marked) stopped++;
+          if (!r.ok) notStopped.push(runId);
         }
       }
-      return json(200, { cancelled: true, inFlight: inFlight.length, stopped });
+      return json(200, { cancelled: true, inFlight: inFlight.length, stopped, notStopped });
     },
   },
   {

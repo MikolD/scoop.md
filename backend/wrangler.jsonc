@@ -23,9 +23,12 @@
     "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
     "INDEX_DAILY_CAP_USD": "2",
     "INDEX_DAILY_TOTAL_CAP_USD": "10",
+    // Browser sandbox (E2B) spend per UTC day, USD.
+    "E2B_DAILY_CAP_USD": "2",
     // Share of API requests recorded as usage events (docs/TELEMETRY.md), 0-1.
     "TELEMETRY_API_SAMPLE": "1"
     // TELEMETRY_SALT (secret) salts the daily IP-subject hash; .dev.vars locally.
+    // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
     // OPENROUTER_API_KEY (indexing) also comes from .dev.vars locally.
@@ -96,6 +99,8 @@
         "ALLOW_ANY_EXTENSION": "1",
         "INDEX_DAILY_CAP_USD": "2",
         "INDEX_DAILY_TOTAL_CAP_USD": "10",
+        "E2B_DAILY_CAP_USD": "2",
+        "ADMIN_HOST": "admin-staging.scoop.md",
         "TELEMETRY_API_SAMPLE": "1"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
@@ -144,11 +149,14 @@
       },
       "vars": {
         "ENVIRONMENT": "production",
-        "EXTENSION_IDS": "",
+        // The Chrome Web Store build of the extension.
+        "EXTENSION_IDS": "ccfbndgiomnmpanklpmadpapkocihfpd",
         "CRAWL_BUCKET_NAME": "scoop-crawl-production",
         "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
         "INDEX_DAILY_CAP_USD": "2",
         "INDEX_DAILY_TOTAL_CAP_USD": "10",
+        "E2B_DAILY_CAP_USD": "2",
+        "ADMIN_HOST": "admin.scoop.md",
         "TELEMETRY_API_SAMPLE": "1"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },

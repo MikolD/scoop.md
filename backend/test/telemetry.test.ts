@@ -32,6 +32,7 @@ const ID2 = '9f1c2d3e-4b5a-4c6d-8e7f-0a1b2c3d4e5f';
 const NOW = new Date('2026-10-12T10:30:00Z');
 const T = NOW.getTime();
 const IP = '203.0.113.77';
+const ADMIN_PASS = 'a test passcode that is at least 32 characters long';
 const CF = { country: 'GH', region: 'Greater Accra', continent: 'AF', asOrganization: 'Example Telecom' };
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36';
 const CLIENT = { extVersion: '0.3.0', browser: 'Google Chrome', browserVersion: '130', os: 'mac', platformArch: 'arm', locale: 'en-GB', timezone: 'Africa/Accra' };
@@ -54,7 +55,7 @@ function setup(over: Partial<Env> = {}) {
     TELEMETRY_SALT: 'test-salt',
     RATE_KEY: 'rk',
     ADMIN_UI_USER: 'admin',
-    ADMIN_UI_PASSCODE: 'pass',
+    ADMIN_UI_PASSCODE: ADMIN_PASS,
     ENVIRONMENT: 'production',
     ...over,
   } as unknown as Env;
@@ -356,7 +357,7 @@ test('API usage: /v1/skills/best hit and miss per site, no IP or install ID; pri
 
 // ---- Admin -------------------------------------------------------------------
 
-const ADMIN = `Basic ${Buffer.from('admin:pass').toString('base64')}`;
+const ADMIN = `Basic ${Buffer.from(`admin:${ADMIN_PASS}`).toString('base64')}`;
 async function admin(env: Env, path: string, init: RequestInit = {}) {
   const headers = new Headers(init.headers);
   headers.set('authorization', ADMIN);

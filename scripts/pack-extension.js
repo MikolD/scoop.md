@@ -1,5 +1,6 @@
 // Zips extension/ for the Chrome Web Store: dist/scoop.md-extension-<version>.zip.
-// Leaves out tests, docs (STORE.md), type stubs (*.d.ts, for the backend) and OS litter.
+// Leaves out tests, docs (STORE.md), type stubs (*.d.ts, for the backend),
+// source maps, store artwork (store-assets/) and OS litter.
 
 import { execFileSync } from 'node:child_process';
 import { readFileSync, mkdirSync, rmSync } from 'node:fs';
@@ -11,6 +12,6 @@ const out = `${root}dist/scoop.md-extension-${version}.zip`;
 
 mkdirSync(`${root}dist`, { recursive: true });
 rmSync(out, { force: true });
-execFileSync('zip', ['-r', '-X', out, '.', '-x', '*.test.js', '*.d.ts', '*.md', '.DS_Store', '*/.DS_Store'], { cwd: `${root}extension`, stdio: ['ignore', 'ignore', 'inherit'] });
+execFileSync('zip', ['-r', '-X', out, '.', '-x', '*.test.js', '*.d.ts', '*.map', '*.md', 'store-assets/*', '.DS_Store', '*/.DS_Store'], { cwd: `${root}extension`, stdio: ['ignore', 'ignore', 'inherit'] });
 console.log(execFileSync('unzip', ['-l', out], { encoding: 'utf8' }));
 console.log(`Wrote ${out}`);
