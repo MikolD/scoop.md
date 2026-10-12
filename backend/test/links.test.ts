@@ -506,7 +506,7 @@ test('quick: isDevDocs by list, Jev or signals; llms verified or not; instructio
   assert.equal(jev.calls.length, 1, 'one Jev request');
   assert.ok('is_devtool_docs' in jev.calls[0].questions);
   assert.deepEqual(d.isDevDocs, { verdict: 'yes', method: 'jev', score: 0.9 });
-  assert.deepEqual(d.llms, { url: 'https://ex.dev/llms.txt', fullUrl: null, verified: true });
+  assert.deepEqual(d.llms, { url: 'https://ex.dev/llms.txt', verified: true, fullUrl: null, fullVerified: false });
   assert.deepEqual(d.agentInstructions, [{ text: PIN, url: 'https://ex.dev/llms.txt', kind: 'version-pin' }]);
 
   // A listed site: no Jev question about it, and not even its page fetched.
@@ -516,7 +516,7 @@ test('quick: isDevDocs by list, Jev or signals; llms verified or not; instructio
   // An llms.txt that isn't a verified index: no instructions from it.
   routes['https://ex.dev/llms.txt'] = () => new Response('just some words, no heading and no link at all here, only plain prose about the product', { headers: { 'content-type': 'text/plain' } });
   const unv = await quickDiscover('https://ex.dev/docs/a', { fetchImpl, jev: { apiKey: 'k', fetchImpl: jev.fetchImpl } });
-  assert.deepEqual(unv.llms, { url: 'https://ex.dev/llms.txt', fullUrl: null, verified: false });
+  assert.deepEqual(unv.llms, { url: 'https://ex.dev/llms.txt', verified: false, fullUrl: null, fullVerified: false });
   assert.deepEqual(unv.agentInstructions, []);
   assert.equal(verifyLlms('text/html', '# x [a](b)'), false);
   assert.equal(verifyLlms('text/markdown; charset=utf-8', '# Title\n\n- [a](https://a.b)'), true);

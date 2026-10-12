@@ -551,8 +551,11 @@ const routes: Route[] = [
         retryD1(() => siteStatus(env.DB, site)),
         instructionsAllowed(env.DB, site, pageUrl).catch(() => false),
       ]);
-      // Instructions for agents: only for an indexed, approved (or allowlisted) site.
+      // Instructions for agents: only for an indexed, approved (or allowlisted)
+      // site: this page's, or the site its docs were found on.
       const withInstructions = status.indexed && allowed;
+      const instructionsFor = async (s: string) =>
+        s === site ? withInstructions : (await instructionsAllowed(env.DB, s)) && (await retryD1(() => siteStatus(env.DB, s))).indexed;
       let found: Omit<QuickDiscovery, 'jevTokens'>;
       if (cached) {
         found = await cached.json();
@@ -563,7 +566,7 @@ const routes: Route[] = [
         const d = await quickDiscover(pageUrl, {
           allowLocalhost: allowLocalhost(env),
           probe,
-          instructions: withInstructions,
+          instructionsFor,
           jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
           siteCache: cache && {
             get: async (k) => (await cache.match(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`)).catch(() => undefined))?.json() ?? null,
@@ -581,11 +584,14 @@ const routes: Route[] = [
         })).catch(() => {});
       }
       Object.assign(usage, { results: found.sources.length, hit: found.overview !== null });
+      // Checked again when served from the cache: approval may have changed since.
+      const instrUrl = found.agentInstructions?.[0]?.url;
+      const showInstructions = instrUrl ? await instructionsFor(siteOf(instrUrl)).catch(() => false) : false;
       return json(
         200,
         {
           site, sources: found.sources, overview: found.overview, indexed: status.indexed, pages: status.pages,
-          isDevDocs: found.isDevDocs, llms: found.llms, agentInstructions: withInstructions ? found.agentInstructions : [],
+          docs: found.docs, isDevDocs: found.isDevDocs, llms: found.llms, agentInstructions: showInstructions ? found.agentInstructions : [],
         },
         { 'cache-control': CACHE_LIST, 'x-scoop-cache': cached ? 'hit' : 'miss' },
       );

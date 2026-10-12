@@ -384,8 +384,8 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.ok(site.hits.includes('https://hono.dev/robots.txt'));
   assert.ok(site.hits.includes('https://hono.dev/docs/api/routing'));
   assert.deepEqual(d.isDevDocs, { verdict: 'yes', method: 'jev', score: 0.9 });
-  // llms-full.txt here has no link: not a verified index, so no fullUrl.
-  assert.deepEqual(d.llms, { url: 'https://hono.dev/llms.txt', fullUrl: null, verified: true });
+  // llms-full.txt here has no link: found, but not a verified index (reported apart from llms.txt).
+  assert.deepEqual(d.llms, { url: 'https://hono.dev/llms.txt', verified: true, fullUrl: 'https://hono.dev/llms-full.txt', fullVerified: false });
 
   // Another page of the same site: only its own twins (and itself) are fetched.
   site.hits.length = 0;
@@ -401,7 +401,10 @@ test('quickDiscover: every candidate in parallel, labels and sizes, Jev picks th
   assert.equal(down.calls.length, 1, 'no retry inside the 1.5 s budget');
 
   const none = await quickDiscover('https://nothing.example/', { fetchImpl: quickSite({}).fetchImpl });
-  assert.deepEqual(none, { sources: [], overview: null, isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 }, llms: null, agentInstructions: [], jevTokens: 0 });
+  assert.deepEqual(none, {
+    sources: [], overview: null, isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 },
+    docs: { found: false, root: null, via: 'none', verdict: 'unknown', method: 'signals' }, llms: null, agentInstructions: [], jevTokens: 0,
+  });
 });
 
 test('quickDiscover: private addresses are never fetched, and a slow host is cut off by the budget', async () => {
@@ -581,7 +584,9 @@ test('GET /v1/quick: sources and overview with the index state; cached; private 
       pages: 2,
       // The page itself 404s here: no facts to judge it by.
       isDevDocs: { verdict: 'unknown', method: 'signals', score: 0 },
-      llms: { url: 'https://docs.example.dev/llms.txt', fullUrl: null, verified: true },
+      llms: { url: 'https://docs.example.dev/llms.txt', verified: true, fullUrl: null, fullVerified: false },
+      // A docs host whose own root llms.txt is verified: the docs are right here.
+      docs: { found: true, root: 'https://docs.example.dev', via: 'llms', verdict: 'yes', method: 'llms' },
       agentInstructions: [],
     });
     assert.equal(r.headers.get('x-scoop-cache'), 'miss');

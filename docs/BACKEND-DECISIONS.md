@@ -1426,3 +1426,27 @@ package surfaces it, from verified sources only.
   and requests from one client landed in different data centers (EWR, MIA,
   ATL), each with its own Cache API; so the vector side of a miss now gets
   1.2 s, then the answer is full-text only.
+
+## /v1/quick at the site level (`docs`)
+
+The Quick Start tab works from any page of a product, including its home
+page or pricing page, so /v1/quick also says where the site's docs are.
+Candidates are the usual docs homes (docs./developer./developers.<domain>,
+/docs, /developers, /developer, /api/docs), probed in parallel with their
+llms files within the existing 1.5 s budget and per-host probe limit, and
+skipped when the page is on a docs host or under a docs path already. The
+cheapest evidence decides first (a verified llms.txt, the gate's lists,
+the page's signals); Jev is asked only about candidates the signals can't
+place, at most 3, in the same request. llms.txt and llms-full.txt are now
+reported apart (Bun has only llms-full.txt; Hono's llms-full.txt isn't a
+verified index), and come from the docs root when the docs are elsewhere.
+Live (from a laptop, cold): stripe.com and /pricing → docs.stripe.com
+(0.9-1.4 s), vercel.com → vercel.com/docs, supabase.com → its root llms.txt
+or /docs, hono.dev and bun.sh → the page itself. Known gaps: a docs
+subdomain that redirects to another domain (docs.anthropic.com →
+docs.claude.com) isn't followed, since crawlFetch keeps redirects on site;
+and a home page over the 512 KB read cap with a Content-Length (twilio.com)
+gives no signals to judge.
+A call in which any fetch timed out or failed to connect caches nothing at
+the site level: on a cold local workerd the first stripe.com call timed out
+everywhere and its empty answer was then served for an hour.
