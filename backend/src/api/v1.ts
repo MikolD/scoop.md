@@ -30,7 +30,7 @@ import type { PackageInput } from '../search/package.ts';
 import { instructionsAllowed, siteInstructions } from '../agents/instructions.ts';
 import { addRefs, checkLinks, extractLinks, linkStates, normalizeLink, queueLinks, rewriteLinks, saveLinks, statesFor } from '../links/links.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
-import { cachedQueryEmbed } from '../search/embedcache.ts';
+import { cachedQueryEmbed, normalizeQuery } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
 import type { QuickDiscovery } from '../search/quick.ts';
 import { search } from '../search/search.ts';
@@ -187,6 +187,34 @@ async function referenced(db: D1Database, urls: string[]): Promise<string[]> {
     out.push(...results.map((r) => r.url));
   }
   return out;
+}
+
+// The index version for a site (or every site): indexed page count and last
+// index time. Any page indexed changes it, so cached answers follow the index.
+async function indexVersion(db: D1Database, site?: string): Promise<string> {
+  const v = await retryD1(() => (site
+    ? db.prepare('SELECT COUNT(*) AS n, MAX(indexed_at) AS v FROM page_index WHERE site = ?').bind(site)
+    : db.prepare('SELECT COUNT(*) AS n, MAX(indexed_at) AS v FROM page_index')).first<{ n: number; v: string | null }>());
+  return `${v?.n ?? 0}:${v?.v ?? ''}`;
+}
+
+// /v1/search and /v1/packages?q=: a 10-minute Cache API entry per kind, site,
+// normalised query, other parameters and index version. `build` runs on a miss.
+const QUERY_CACHE_SECONDS = 600;
+async function cachedQuery(
+  db: D1Database, kind: 'search' | 'package', site: string | undefined, q: string, params: string, build: () => Promise<string>,
+): Promise<{ body: string; hit: boolean }> {
+  const cache = edgeCache();
+  if (!cache) return { body: await build(), hit: false };
+  const v = await indexVersion(db, site);
+  const key = new Request(
+    `https://query-cache.scoop.md/${kind}?site=${encodeURIComponent(site ?? '*')}&q=${encodeURIComponent(normalizeQuery(q))}&${params}&v=${encodeURIComponent(v)}`,
+  );
+  const hit = await cache.match(key).catch(() => undefined);
+  if (hit) return { body: await hit.text(), hit: true };
+  const body = await build();
+  await cache.put(key, new Response(body, { headers: { 'cache-control': `public, max-age=${QUERY_CACHE_SECONDS}` } })).catch(() => {});
+  return { body, hit: false };
 }
 
 // The Cache API (absent outside Workers, e.g. in the node tests).
@@ -732,27 +760,30 @@ const routes: Route[] = [
     name: '/v1/search',
     handler: async ({ env, url, ip, usage }) => {
       const q = queryParam(url);
-      await limitSearch(env, ip);
       const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
       Object.assign(usage, { q, site });
       const slot = slotParam(url);
       const limit = intParam(url, 'limit', 10, 1, 50);
-      const hits = await search(searchDeps(env), { q, site, slot, limit });
-      Object.assign(usage, { results: hits.length, hit: hits.length > 0 });
-      // Snippets keep only links known to be ok.
-      const states = await statesFor(env.DB, site ?? null, hits.map((h) => ({ text: h.snippet, base: h.url })), []);
-      return json(
-        200,
-        {
+      // Cached per site, query, filters and index version; the search limit applies on a miss.
+      const cached = await cachedQuery(env.DB, 'search', site, q, `slot=${slot ?? ''}&limit=${limit}`, async () => {
+        await limitSearch(env, ip);
+        const hits = await search(searchDeps(env), { q, site, slot, limit });
+        // Snippets keep only links known to be ok.
+        const states = await statesFor(env.DB, site ?? null, hits.map((h) => ({ text: h.snippet, base: h.url })), []);
+        return JSON.stringify({
           query: q,
           site: site ?? null,
           slot: slot ?? null,
           hits: hits.map((h) => ({
             id: h.id, url: h.url, title: h.title, heading_path: h.heading_path, snippet: rewriteLinks(h.snippet, h.url, states).text, slot: h.slot, topic_path: h.topic_path, score: h.score,
           })),
-        },
-        { 'cache-control': CACHE_LIST },
-      );
+        });
+      });
+      const hits = (JSON.parse(cached.body) as { hits: unknown[] }).hits;
+      Object.assign(usage, { results: hits.length, hit: hits.length > 0 });
+      return new Response(cached.body, {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE_LIST, 'x-scoop-cache': cached.hit ? 'hit' : 'miss' },
+      });
     },
   },
   {
@@ -854,8 +885,19 @@ const routes: Route[] = [
       } else {
         label = queryParam(url);
         usage.q = label;
-        await limitSearch(env, ip);
-        chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
+        const q = label;
+        const cached = await cachedQuery(env.DB, 'package', site, q, `budget=${budget}`, async () => {
+          await limitSearch(env, ip);
+          const found = await search(searchDeps(env), { q, site, limit: 40 });
+          if (!found.length) throw notFound('Nothing indexed matches');
+          return renderPackage(env.DB, { site, label: q, chunks: found, budget });
+        });
+        Object.assign(usage, { hit: true });
+        return new Response(cached.body, {
+          headers: {
+            'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff', 'x-scoop-cache': cached.hit ? 'hit' : 'miss',
+          },
+        });
       }
       Object.assign(usage, { results: chunks.length, hit: chunks.length > 0 });
       if (!chunks.length) throw notFound('Nothing indexed matches');

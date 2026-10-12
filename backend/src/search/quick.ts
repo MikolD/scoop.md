@@ -16,7 +16,7 @@ import type { JevOptions } from '../lib/jev.ts';
 import { normalizeSite } from '../lib/ssrf.ts';
 import { isMultiTenant, registrable } from '../lib/domains.ts';
 import { fetchRobots, robotsFrom } from '../crawl/site.ts';
-import { looksLikeText, twinUrl, verifyLlms } from '../crawl/discover.ts';
+import { isLlmsFile, looksLikeText, twinUrl, verifyLlms } from '../crawl/discover.ts';
 import { gateSummary, listVerdict, pageSignals, scoreSignals } from '../crawl/gate.ts';
 import { candidatesFromLlms, dedupe, instructionAnswers, instructionQuestions, MAX_SHOWN, safeCandidates } from '../agents/instructions.ts';
 import type { Candidate } from '../agents/instructions.ts';
@@ -163,6 +163,9 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
     cands.map(async (c): Promise<Found | null> => {
       const r = await get(c.url, c.kind === 'llms-full' ? FULL_CAP : LLMS_CAP);
       if (!r.ok || r.notModified || !(r.over || looksLikeText(r.contentType, r.text))) return null;
+      // A redirect to some other page (a home page answering in Markdown) is not the file.
+      if (c.kind !== 'page-md' && !isLlmsFile(r.url, c.kind === 'llms-txt' ? 'llms.txt' : 'llms-full.txt')) return null;
+      if (c.kind === 'page-md' && !/\.md$/i.test(new URL(r.url).pathname)) return null;
       const source: QuickSource = {
         kind: c.kind,
         url: r.url,

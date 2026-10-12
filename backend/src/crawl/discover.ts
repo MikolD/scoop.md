@@ -26,6 +26,11 @@ export function llmsBases(origin: string, docsRoot: string, max = 3): string[] {
 
 // SPA hosts often answer any path with 200 + their HTML shell, so status alone
 // is not evidence the file exists (same rule as extension/lib/discover.js).
+// Where an llms file fetch ended must still be that file: a site that
+// redirects unknown paths to its home page (which may answer in Markdown)
+// has no llms.txt there.
+export const isLlmsFile = (url: string, name: 'llms.txt' | 'llms-full.txt') => new URL(url).pathname.toLowerCase().endsWith(`/${name}`);
+
 // An llms.txt that really is a docs index for agents: plain text or Markdown,
 // starting with an H1, with at least one link.
 export function verifyLlms(contentType: string, body: string): boolean {

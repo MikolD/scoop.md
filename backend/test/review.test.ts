@@ -270,3 +270,51 @@ test('M1: live checks are capped per target host; unreferenced live rows are pru
     'https://x.example/crawled', 'https://x.example/fresh', 'https://x.example/linked',
   ]);
 });
+
+test('staging: an llms.txt or .md twin that redirects to another page (a home page answering in Markdown) is not that file', async () => {
+  const home = () => new Response('# Home\n\n- [Docs](https://ex.dev/docs)\n' + 'text '.repeat(20), { headers: { 'content-type': 'text/markdown' } });
+  const fetchImpl = async (url: string) => {
+    if (url === 'https://ex.dev/') return home();
+    if (url.endsWith('/llms.txt') || url.endsWith('.md')) return new Response(null, { status: 301, headers: { location: 'https://ex.dev/' } });
+    return new Response('nf', { status: 404 });
+  };
+  const d = await quickDiscover('https://ex.dev/guide/start', { fetchImpl });
+  assert.equal(d.llms, null);
+  assert.deepEqual(d.sources, []);
+});
+
+test('q mode: /v1/search and /v1/packages?q= are cached per site, normalised query and index version; the search limit only on a miss', async () => {
+  const { d1, raw } = fakeD1();
+  const store = new Map<string, Response>();
+  (globalThis as { caches?: unknown }).caches = {
+    default: { match: async (r: Request) => store.get(r.url)?.clone(), put: async (r: Request, res: Response) => { store.set(r.url, res.clone()); } },
+  };
+  let searches = 0;
+  const e = {
+    DB: d1, READ_LIMITER: { limit: async () => ({ success: true }) },
+    SEARCH_LIMITER: { limit: async () => { searches++; return { success: true }; } },
+    TELEMETRY_INGEST: 'off', ENVIRONMENT: 'production',
+  } as unknown as Env;
+  const page = raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, model, cost_usd, indexed_at) VALUES (?, 'docs.example.dev', 'h', ?, 'guide', 'm', 0, ?)`);
+  page.run('https://docs.example.dev/a', 'Webhooks', '2026-10-12T00:00:00Z');
+  raw.prepare(`INSERT INTO chunks (id, url, site, ord, heading_path, title, text) VALUES (?, 'https://docs.example.dev/a', 'docs.example.dev', 0, 'Webhooks', 'Webhooks', 'Verify webhook signatures with your secret.')`).run(`${'a'.repeat(32)}-0`);
+  const get = async (path: string) => {
+    const res = await worker.fetch(new Request(`https://api.scoop.md${path}`, { headers: { 'cf-connecting-ip': '203.0.113.9' } }), e);
+    return { status: res.status, cache: res.headers.get('x-scoop-cache'), body: await res.text() };
+  };
+  try {
+    for (const path of ['/v1/search?site=docs.example.dev&q=webhook%20secret', '/v1/packages?site=docs.example.dev&q=webhook%20secret']) {
+      const before = searches;
+      const a = await get(path);
+      assert.deepEqual([a.status, a.cache], [200, 'miss'], path);
+      const b = await get(path.replace('webhook%20secret', '%20Webhook%20%20SECRET'));
+      assert.deepEqual([b.status, b.cache, b.body], [200, 'hit', a.body], path);
+      assert.equal(searches, before + 1, 'the search limit counted once');
+    }
+    // A page indexed since: a fresh answer.
+    page.run('https://docs.example.dev/b', 'More', '2026-10-12T01:00:00Z');
+    assert.equal((await get('/v1/search?site=docs.example.dev&q=webhook%20secret')).cache, 'miss');
+  } finally {
+    delete (globalThis as { caches?: unknown }).caches;
+  }
+});

@@ -1401,3 +1401,13 @@ package surfaces it, from verified sources only.
   the state is the host; the overview options are kinds, labels and first
   lines (a page's `.md` twin URL would give its path away); the
   is-it-docs question gets the origin, title, description and navigation.
+
+- **Follow-ups found on staging (d75080f).** An llms.txt probe that
+  redirects to another page is not an llms.txt: docs.convex.dev sends
+  unknown paths to its home page, which answers `Accept: text/markdown`
+  with Markdown (an H1 and links), so /understanding/llms.txt "verified" as
+  the home page. Discovery and /v1/quick now require the fetch to end at a
+  path named llms.txt / llms-full.txt (and a `.md` twin at a `.md` path).
+  And `q` mode had no cache (0.7-11 s on staging): `/v1/search` and
+  `/v1/packages?q=` are now cached 10 minutes per site, normalised query,
+  parameters and index version, like the `url` mode.

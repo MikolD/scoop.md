@@ -16,6 +16,7 @@ import {
   sample,
   twinUrl,
   underRoot,
+  isLlmsFile,
   verifyLlms,
 } from './discover.ts';
 import type { TwinPattern } from './discover.ts';
@@ -161,7 +162,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     if (!out.llmsUrl && allowed(`${base}/llms.txt`)) {
       const r = await get(`${base}/llms.txt`);
       // Recorded where it ended up: /docs/llms.txt often redirects to /llms.txt.
-      if (r.ok && !r.notModified && !r.over && looksLikeText(r.contentType, r.text)) {
+      if (r.ok && !r.notModified && !r.over && looksLikeText(r.contentType, r.text) && isLlmsFile(r.url, 'llms.txt')) {
         out.llmsUrl = r.url;
         out.llmsVerified = verifyLlms(r.contentType, r.text);
         links = llmsLinks(r.text, out.llmsUrl);
@@ -170,7 +171,7 @@ export async function discoverSite(startUrl: string, robotsFile: RobotsFile, o: 
     if (!out.llmsFullUrl && allowed(`${base}/llms-full.txt`)) {
       // Only existence matters here; the page fetch reads it in full later.
       const r = await get(`${base}/llms-full.txt`, 64_000);
-      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text))) {
+      if (r.ok && !r.notModified && (r.over || looksLikeText(r.contentType, r.text)) && isLlmsFile(r.url, 'llms-full.txt')) {
         out.llmsFullUrl = r.url;
         out.llmsFullVerified = verifyLlms(r.contentType, r.text);
       }
