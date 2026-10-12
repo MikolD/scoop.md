@@ -4,6 +4,8 @@ export interface Env {
   DB: D1Database;
   SKILLS: R2Bucket;
   READ_LIMITER: RateLimit;
+  // Search and query packages embed the query: 60/min per IP on top of READ_LIMITER.
+  SEARCH_LIMITER: RateLimit;
   // Indexing and search (M4): embeddings, chunk vectors, the index-pages queue.
   AI: Ai;
   VECTORS: Vectorize;

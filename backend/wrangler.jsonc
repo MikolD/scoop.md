@@ -33,7 +33,9 @@
   ],
   "ratelimits": [
     // Reads: 600 per minute per IP (docs/BACKEND.md §8). Hourly write limits live in D1.
-    { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } }
+    { "name": "READ_LIMITER", "namespace_id": "4100", "simple": { "limit": 600, "period": 60 } },
+    // Search: 60 per minute per IP; each query costs a Workers AI embedding unless cached.
+    { "name": "SEARCH_LIMITER", "namespace_id": "4103", "simple": { "limit": 60, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -75,7 +77,8 @@
         { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" }
       ],
       "ratelimits": [
-        { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } }
+        { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
+        { "name": "SEARCH_LIMITER", "namespace_id": "4104", "simple": { "limit": 60, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
@@ -110,7 +113,8 @@
         { "binding": "SKILLS", "bucket_name": "scoop-skills-production" }
       ],
       "ratelimits": [
-        { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } }
+        { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } },
+        { "name": "SEARCH_LIMITER", "namespace_id": "4105", "simple": { "limit": 60, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [

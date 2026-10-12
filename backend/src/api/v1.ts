@@ -15,6 +15,7 @@ import { installId, validateFeedback, validateReport, validateSkill } from '../l
 import { fetchSource, verifyAll } from '../lib/verify.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
+import { cachedQueryEmbed } from '../search/embedcache.ts';
 import { search } from '../search/search.ts';
 import type { SearchDeps } from '../search/search.ts';
 import { topicTree } from '../search/topics.ts';
@@ -68,7 +69,20 @@ async function loadLive(store: Store, row: SkillRow) {
   throw new Error(`R2 object missing for ${row.id}`);
 }
 
-const searchDeps = (env: Env): SearchDeps => ({ db: env.DB, vectors: env.VECTORS, embed: workersAiEmbed(env.AI) });
+const searchDeps = (env: Env): SearchDeps => ({
+  db: env.DB,
+  vectors: env.VECTORS,
+  embed: cachedQueryEmbed(workersAiEmbed(env.AI), typeof caches === 'undefined' ? undefined : caches.default),
+});
+
+// Queries that embed text get a stricter per-IP limit than other reads.
+async function limitSearch(env: Env, ip: string): Promise<void> {
+  if (env.SEARCH_LIMITER && !(await env.SEARCH_LIMITER.limit({ key: ipSubject(ip) })).success) {
+    const err = new ApiError('rate_limited', 'Too many searches; try again later', 429);
+    err.retryAfter = 60;
+    throw err;
+  }
+}
 
 const MAX_QUERY = 200;
 const TOPIC = /^[\p{L}\p{N}._-]+(\/[\p{L}\p{N}._-]+){0,3}$/u;
@@ -237,8 +251,9 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/search$/,
     name: '/v1/search',
-    handler: async ({ env, url }) => {
+    handler: async ({ env, url, ip }) => {
       const q = queryParam(url);
+      await limitSearch(env, ip);
       const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
       const slot = slotParam(url);
       const limit = intParam(url, 'limit', 10, 1, 50);
@@ -272,7 +287,7 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/packages$/,
     name: '/v1/packages',
-    handler: async ({ env, url }) => {
+    handler: async ({ env, url, ip }) => {
       const site = siteParam(url.searchParams.get('site') ?? '');
       const topic = url.searchParams.get('topic');
       const budget = intParam(url, 'budget', DEFAULT_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET);
@@ -285,6 +300,7 @@ const routes: Route[] = [
         chunks = await topicChunks(env.DB, site, label);
       } else {
         label = queryParam(url);
+        await limitSearch(env, ip);
         chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
       }
       if (!chunks.length) throw notFound('Nothing indexed matches');

@@ -15,6 +15,7 @@ import { sha256Hex } from '../src/lib/ids.ts';
 import { buildIndexPackage, fenced, safeUrl } from '../src/search/package.ts';
 import type { PackageChunk } from '../src/search/package.ts';
 import { siteTopics, topicChunks } from '../src/search/queries.ts';
+import { cachedQueryEmbed, normalizeQuery } from '../src/search/embedcache.ts';
 import { rrf } from '../src/search/rrf.ts';
 import { ftsQuery, search } from '../src/search/search.ts';
 import { topicTree } from '../src/search/topics.ts';
@@ -561,4 +562,32 @@ test('consumer acks indexed and invalid messages, retries failures with backoff'
   // URLs are normalised: fragment dropped, host lowercased, path percent-encoded.
   assert.equal(parseMessage({ site: 'ex.com', url: 'HTTPS://EX.com/a b#frag', contentHash: 'b'.repeat(64) }).url, 'https://ex.com/a%20b');
   assert.throws(() => parseMessage({ site: 'ex.com', url: 'ftp://ex.com/a', contentHash: 'b'.repeat(64) }), /http/);
+});
+
+test('topic prefixes with non-BMP characters match (SQLite counts characters, not UTF-16 units)', async () => {
+  const { deps, put, d1 } = await setup([cls('guide', ['𝒜pi', 'keys']), cls('guide', ['𝒜pi', 'errors'])]);
+  await indexPage(deps, await put('https://ex.com/1', '# One'));
+  await indexPage(deps, await put('https://ex.com/2', '# Two'));
+  assert.deepEqual((await siteTopics(d1, 'ex.com')).rows.map((r) => `${r.path}:${r.count}`).sort(), ['𝒜pi/errors:1', '𝒜pi/keys:1', '𝒜pi:2']);
+  assert.deepEqual((await topicChunks(d1, 'ex.com', '𝒜pi')).map((c) => c.url).sort(), ['https://ex.com/1', 'https://ex.com/2']);
+});
+
+test('query embeddings are cached by normalised text; documents are never cached', async () => {
+  const store = new Map<string, string>();
+  const cache = {
+    async match(req: Request) { const v = store.get(req.url); return v === undefined ? undefined : new Response(v); },
+    async put(req: Request, res: Response) { store.set(req.url, await res.text()); },
+  } as unknown as Cache;
+  const calls: string[][] = [];
+  const embed = cachedQueryEmbed(async (texts) => { calls.push(texts); return texts.map((t) => [t.length]); }, cache);
+  assert.deepEqual(await embed(['  Verify   Webhook signature '], 'query'), [[24]]);
+  assert.deepEqual(await embed(['verify webhook SIGNATURE'], 'query'), [[24]]);
+  assert.deepEqual(calls, [['verify webhook signature']]);
+  await embed(['a', 'b'], 'document');
+  await embed(['a', 'b'], 'document');
+  assert.equal(calls.length, 3);
+  assert.equal(normalizeQuery(' A\tB '), 'a b');
+  // A broken cache only costs a call.
+  const broken = cachedQueryEmbed(async (t) => t.map(() => [1]), { match: async () => { throw new Error('x'); }, put: async () => { throw new Error('y'); } } as unknown as Cache);
+  assert.deepEqual(await broken(['q'], 'query'), [[1]]);
 });

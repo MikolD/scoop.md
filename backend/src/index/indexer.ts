@@ -157,7 +157,8 @@ export async function indexPage(deps: IndexDeps, msg: IndexMessage): Promise<Ind
       `INSERT INTO topics (site, path, count)
        SELECT ?, ?, COUNT(*) FROM page_index WHERE site = ? AND (topic = ? OR substr(topic, 1, ?) = ?)
        ON CONFLICT (site, path) DO UPDATE SET count = excluded.count`,
-    ).bind(site, p, site, p, p.length + 1, `${p}/`));
+    // SQLite's substr counts characters, not UTF-16 units: count code points.
+    ).bind(site, p, site, p, [...p].length + 1, `${p}/`));
   }
   stmts.push(db.prepare('DELETE FROM topics WHERE site = ? AND count = 0').bind(site));
   await db.batch(stmts);

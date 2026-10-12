@@ -23,7 +23,8 @@ export async function topicChunks(db: D1Database, site: string, topic: string): 
        WHERE pi.site = ? AND (pi.topic = ? OR substr(pi.topic, 1, ?) = ?)
        ORDER BY pi.topic, pi.url, c.ord LIMIT ${TOPIC_CHUNKS}`,
     )
-    .bind(site, topic, prefix.length, prefix)
+    // substr counts characters; [...s] counts code points, as SQLite does (JS length counts UTF-16 units).
+    .bind(site, topic, [...prefix].length, prefix)
     .all<PackageChunk>();
   return results;
 }

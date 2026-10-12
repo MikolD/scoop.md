@@ -342,7 +342,9 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   `page_index` upsert, and deletes zero rows; counts are never adjusted by ±1,
   so concurrent consumers or a drifted row can't leave them wrong. `page_index.topic`
   holds the joined path for prefix queries (`substr`, not `LIKE`, since `_` is a
-  valid topic character).
+  valid topic character). The prefix length passed to `substr` is counted in
+  code points (`[...s].length`), since SQLite counts characters and JS
+  `length` counts UTF-16 units: a topic with a non-BMP letter would mismatch.
 - **Packages** (`GET /v1/packages`): `q` runs the hybrid search (top 40 chunks
   for the site); `topic` takes the chunks of every page under that topic.
   Pages are ordered by their best chunk, chunks within a page by document
@@ -359,6 +361,14 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   `text/markdown; charset=utf-8`, 404 when nothing matches.
 - **Public reads** (`/v1/search`, `/v1/sites/:site/topics`, `/v1/packages`) go
   through the read rate limiter and send `public, max-age=60, s-maxage=60`.
+- **Query embeddings:** every search (and `?q=` package) embeds the query, and
+  a flood could use up the account's Workers AI rate limit, which indexing
+  needs too. So `/v1/search` and `/v1/packages?q=` also go through
+  `SEARCH_LIMITER` (60/min per IP, namespaces 4103-4105), and query vectors
+  are cached in `caches.default` for 10 minutes keyed by the model and a
+  sha256 of the normalised query (lowercased, whitespace collapsed). The vector
+  doesn't depend on `site` or `slot`, so those share one entry. A cache error
+  only costs the embedding call.
   `q` is required and at most 200 characters, `limit` 1-50 (default 10), `slot`
   must be in the enum, `site` must look like a hostname.
 - **`POST /v1/admin/index {url, queue?}`** fetches the page with the same
