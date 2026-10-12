@@ -56,6 +56,6 @@ export const ALLOW: string[] = [
   'docs.langchain.com', 'huggingface.co/docs', 'git-scm.com/docs', 'docs.github.com', 'docs.docker.com', 'kubernetes.io/docs',
   'developer.hashicorp.com', 'vite.dev', 'vitejs.dev', 'webpack.js.org', 'eslint.org/docs', 'prettier.io/docs', 'jestjs.io',
   'vitest.dev', 'playwright.dev', 'pnpm.io', 'tailwindcss.com/docs', 'ui.shadcn.com', 'radix-ui.com',
-  'developers.google.com', 'cloud.google.com/docs', 'firebase.google.com/docs', 'learn.microsoft.com', 'docs.npmjs.com',
+  'developers.google.com', 'cloud.google.com/docs', 'docs.cloud.google.com', 'firebase.google.com/docs', 'learn.microsoft.com', 'docs.npmjs.com',
   'docs.gitlab.com', 'readthedocs.io', 'readthedocs.org',
 ];
