@@ -814,7 +814,7 @@ test('N1: collectResult writes batches then a manifest; a retry after the sandbo
   const t = collectSetup();
   const first = await collectResult(t.input);
   assert.deepEqual(first, { pages: 23, batches: 3, skipped: 1, error: null } satisfies Manifest);
-  assert.equal(JSON.parse(t.objects.get(batchKey('cr_1', 2))!).length, 3);
+  assert.equal(JSON.parse(t.objects.get(batchKey('cr_1', 2)) as string).length, 3);
   assert.ok(t.objects.has(manifestKey('cr_1')));
   // The step is retried after the sandbox was stopped: nothing is lost.
   t.kill();

@@ -49,8 +49,9 @@ export function withCors(res: Response, req: Request, env: Env): Response {
   return new Response(res.body, { status: res.status, headers: h });
 }
 
-export async function readJson(req: Request): Promise<unknown> {
-  if (Number(req.headers.get('content-length')) > MAX_BODY) throw new ApiError('too_large', 'Request body is over 6 MB', 413);
+export async function readJson(req: Request, max = MAX_BODY): Promise<unknown> {
+  const tooLarge = () => new ApiError('too_large', `Request body is over ${max >= 1_000_000 ? `${max / 1_000_000} MB` : `${max / 1024} KB`}`, 413);
+  if (Number(req.headers.get('content-length')) > max) throw tooLarge();
   let text = '';
   if (req.body) {
     const reader = req.body.getReader();
@@ -60,9 +61,9 @@ export async function readJson(req: Request): Promise<unknown> {
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_BODY) {
+      if (size > max) {
         await reader.cancel();
-        throw new ApiError('too_large', 'Request body is over 6 MB', 413);
+        throw tooLarge();
       }
       text += decoder.decode(value, { stream: true });
     }

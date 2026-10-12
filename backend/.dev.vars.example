@@ -17,3 +17,5 @@ ALLOW_ANY_EXTENSION=1
 # Admin console (admin.localhost:8787 locally): Basic auth user and passcode. Unset = no one gets in.
 ADMIN_UI_USER=admin
 ADMIN_UI_PASSCODE=local-admin-passcode
+# Usage telemetry: salts the daily-rotating IP-subject hash and the website's visitor ID. Any random string locally.
+TELEMETRY_SALT=local-telemetry-salt

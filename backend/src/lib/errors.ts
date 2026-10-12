@@ -10,6 +10,7 @@ export type ErrorCode =
   | 'site_mismatch'
   | 'rate_limited'
   | 'conflict'
+  | 'forbidden'
   | 'internal';
 
 export class ApiError extends Error {

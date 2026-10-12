@@ -1,6 +1,7 @@
 import type { CrawlParams } from './crawl/workflow.ts';
 import type { IndexMessage } from './index/indexer.ts';
 import type { BatchParams } from './admin/batch-workflow.ts';
+import type { TelemetryMessage } from './telemetry/ingest.ts';
 
 export interface Env {
   DB: D1Database;
@@ -19,6 +20,13 @@ export interface Env {
   ASSETS: Fetcher;
   CRAWL_BATCH: Workflow<BatchParams>;
   ADMIN_AUTH_LIMITER: RateLimit;
+  // Usage telemetry (docs/TELEMETRY.md): POST /v1/events limit (per install and per IP subject),
+  // the telemetry-events queue, and the raw-event archive bucket (scoop-telemetry-<env>).
+  EVENTS_LIMITER: RateLimit;
+  TELEMETRY_QUEUE: Queue<TelemetryMessage>;
+  TELEMETRY: R2Bucket;
+  // Salt for the daily-rotating IP-subject hash and the website's visitor ID. Unset: neither is kept.
+  TELEMETRY_SALT?: string;
   // Secrets.
   ADMIN_TOKEN?: string;
   // Admin console Basic auth: user name and passcode. Unset means no one gets in.
@@ -42,4 +50,6 @@ export interface Env {
   // Classifier spend caps per UTC day, in USD: per site (default 2) and for the account (default 10).
   INDEX_DAILY_CAP_USD?: string;
   INDEX_DAILY_TOTAL_CAP_USD?: string;
+  // Share of API requests recorded as usage events, 0–1 (default 1).
+  TELEMETRY_API_SAMPLE?: string;
 }

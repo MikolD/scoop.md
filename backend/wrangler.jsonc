@@ -22,7 +22,10 @@
     "CRAWL_BUCKET_NAME": "scoop-crawl-dev",
     "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
     "INDEX_DAILY_CAP_USD": "2",
-    "INDEX_DAILY_TOTAL_CAP_USD": "10"
+    "INDEX_DAILY_TOTAL_CAP_USD": "10",
+    // Share of API requests recorded as usage events (docs/TELEMETRY.md), 0-1.
+    "TELEMETRY_API_SAMPLE": "1"
+    // TELEMETRY_SALT (secret) salts the daily IP-subject hash; .dev.vars locally.
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
     // OPENROUTER_API_KEY (indexing) also comes from .dev.vars locally.
@@ -35,7 +38,9 @@
   ],
   "r2_buckets": [
     { "binding": "SKILLS", "bucket_name": "scoop-skills-dev" },
-    { "binding": "CRAWL", "bucket_name": "scoop-crawl-dev" }
+    { "binding": "CRAWL", "bucket_name": "scoop-crawl-dev" },
+    // Raw telemetry archive: telemetry/raw/dt=…/hour=…/*.ndjson.gz and deletion tombstones (src/telemetry/archive.ts).
+    { "binding": "TELEMETRY", "bucket_name": "scoop-telemetry-dev" }
   ],
   "workflows": [
     { "name": "crawl-site-dev", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
@@ -48,7 +53,9 @@
     // Search: 60 per minute per IP; each query costs a Workers AI embedding unless cached.
     { "name": "SEARCH_LIMITER", "namespace_id": "4110", "simple": { "limit": 60, "period": 60 } },
     // Admin console: failed Basic auth attempts, 10 per minute per IP, then a lockout (src/admin/auth.ts).
-    { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4120", "simple": { "limit": 10, "period": 60 } }
+    { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4120", "simple": { "limit": 10, "period": 60 } },
+    // POST /v1/events: 120 requests per minute per install ID and per IP subject (src/telemetry/ingest.ts).
+    { "name": "EVENTS_LIMITER", "namespace_id": "4130", "simple": { "limit": 120, "period": 60 } }
   ],
   // Workers AI and Vectorize have no local simulation, so `wrangler dev` uses the
   // real `scoop-chunks-dev` index (needs `wrangler login`). `wrangler dev --local`
@@ -59,10 +66,12 @@
   ],
   // The crawler sends one message per changed page; the consumer indexes it (src/index/).
   "queues": {
-    "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }],
-    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" }]
+    "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-dev" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-dev" }],
+    "consumers": [{ "queue": "index-pages-dev", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-dev" },
+      { "queue": "telemetry-events-dev", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-dev" }]
   },
-  // Daily: re-enqueue pages still waiting for a classification (src/index/reclassify.ts).
+  // Daily: prune raw telemetry past 180 days (src/telemetry/consumer.ts) and re-enqueue
+  // pages still waiting for a classification (src/index/reclassify.ts).
   "triggers": { "crons": ["17 4 * * *"] },
 
   "env": {
@@ -86,7 +95,8 @@
         "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
         "ALLOW_ANY_EXTENSION": "1",
         "INDEX_DAILY_CAP_USD": "2",
-        "INDEX_DAILY_TOTAL_CAP_USD": "10"
+        "INDEX_DAILY_TOTAL_CAP_USD": "10",
+        "TELEMETRY_API_SAMPLE": "1"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -94,7 +104,9 @@
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-staging" },
-        { "binding": "CRAWL", "bucket_name": "scoop-crawl-staging" }
+        { "binding": "CRAWL", "bucket_name": "scoop-crawl-staging" },
+        // Raw telemetry archive: telemetry/raw/dt=…/hour=…/*.ndjson.gz and deletion tombstones (src/telemetry/archive.ts).
+        { "binding": "TELEMETRY", "bucket_name": "scoop-telemetry-staging" }
       ],
       "workflows": [
         { "name": "crawl-site-staging", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
@@ -103,15 +115,17 @@
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4101", "simple": { "limit": 600, "period": 60 } },
         { "name": "SEARCH_LIMITER", "namespace_id": "4111", "simple": { "limit": 60, "period": 60 } },
-        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4121", "simple": { "limit": 10, "period": 60 } }
+        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4121", "simple": { "limit": 10, "period": 60 } },
+        { "name": "EVENTS_LIMITER", "namespace_id": "4131", "simple": { "limit": 120, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
         { "binding": "VECTORS", "index_name": "scoop-chunks-staging" }
       ],
       "queues": {
-        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }],
-        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" }]
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-staging" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-staging" }],
+        "consumers": [{ "queue": "index-pages-staging", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-staging" },
+          { "queue": "telemetry-events-staging", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-staging" }]
       },
       "triggers": { "crons": ["17 4 * * *"] }
     },
@@ -134,7 +148,8 @@
         "CRAWL_BUCKET_NAME": "scoop-crawl-production",
         "E2B_TEMPLATE_ID": "qj0i8b1c3ndy70ksd7ze",
         "INDEX_DAILY_CAP_USD": "2",
-        "INDEX_DAILY_TOTAL_CAP_USD": "10"
+        "INDEX_DAILY_TOTAL_CAP_USD": "10",
+        "TELEMETRY_API_SAMPLE": "1"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -142,7 +157,9 @@
       ],
       "r2_buckets": [
         { "binding": "SKILLS", "bucket_name": "scoop-skills-production" },
-        { "binding": "CRAWL", "bucket_name": "scoop-crawl-production" }
+        { "binding": "CRAWL", "bucket_name": "scoop-crawl-production" },
+        // Raw telemetry archive: telemetry/raw/dt=…/hour=…/*.ndjson.gz and deletion tombstones (src/telemetry/archive.ts).
+        { "binding": "TELEMETRY", "bucket_name": "scoop-telemetry-production" }
       ],
       "workflows": [
         { "name": "crawl-site", "binding": "CRAWL_SITE", "class_name": "CrawlSite" },
@@ -151,15 +168,17 @@
       "ratelimits": [
         { "name": "READ_LIMITER", "namespace_id": "4102", "simple": { "limit": 600, "period": 60 } },
         { "name": "SEARCH_LIMITER", "namespace_id": "4112", "simple": { "limit": 60, "period": 60 } },
-        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4122", "simple": { "limit": 10, "period": 60 } }
+        { "name": "ADMIN_AUTH_LIMITER", "namespace_id": "4122", "simple": { "limit": 10, "period": 60 } },
+        { "name": "EVENTS_LIMITER", "namespace_id": "4132", "simple": { "limit": 120, "period": 60 } }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
         { "binding": "VECTORS", "index_name": "scoop-chunks-production" }
       ],
       "queues": {
-        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-production" }],
-        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" }]
+        "producers": [{ "binding": "INDEX_QUEUE", "queue": "index-pages-production" }, { "binding": "TELEMETRY_QUEUE", "queue": "telemetry-events-production" }],
+        "consumers": [{ "queue": "index-pages-production", "max_batch_size": 3, "max_batch_timeout": 10, "max_retries": 6, "max_concurrency": 3, "dead_letter_queue": "index-pages-dlq-production" },
+          { "queue": "telemetry-events-production", "max_batch_size": 50, "max_batch_timeout": 30, "max_retries": 10, "max_concurrency": 2, "dead_letter_queue": "telemetry-events-dlq-production" }]
       },
       "triggers": { "crons": ["17 4 * * *"] }
     }

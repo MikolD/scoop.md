@@ -242,7 +242,7 @@ const HASH = 'a'.repeat(64);
 const MD = '# Webhooks\n\nVerify the signature header before trusting the payload.\n';
 
 // Two sites, three runs, one indexed page with chunks and topics, AI spend.
-function seed(raw: ReturnType<typeof fakeD1>['raw'], objects: Map<string, string>) {
+function seed(raw: ReturnType<typeof fakeD1>['raw'], objects: Map<string, string | Uint8Array>) {
   const run = (id: string, site: string, status: string, extra = '') =>
     raw.prepare(`INSERT INTO crawl_runs (id, site, start_url, started_at, status, path, pages_new, browser_seconds, cost_usd, gate_decision, gate_method, gate_cost_usd${extra ? ', error' : ''})
       VALUES (?, ?, ?, ?, ?, 'markdown', 1, 12, 0.0005, ?, 'allowlist', 0.001${extra ? ', ?' : ''})`)

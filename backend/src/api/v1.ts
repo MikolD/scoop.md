@@ -18,6 +18,8 @@ import { normalizePageUrl } from '../lib/urls.ts';
 import { installId, validateCrawl, validateFeedback, validateReport, validateSkill } from '../lib/validate.ts';
 import { withServerText } from '../lib/skilltext.ts';
 import { fetchSource, verifyAll } from '../lib/verify.ts';
+import { ingestEvents } from '../telemetry/ingest.ts';
+import type { ApiUsage } from '../telemetry/ingest.ts';
 import { buildIndexPackage, DEFAULT_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET } from '../search/package.ts';
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed } from '../search/embedcache.ts';
@@ -44,6 +46,8 @@ interface Ctx {
   params: string[];
   store: Store;
   ip: string;
+  // Filled in by the handler for usage telemetry (src/telemetry/ingest.ts).
+  usage: ApiUsage;
 }
 
 type Handler = (c: Ctx) => Promise<Response>;
@@ -203,20 +207,26 @@ const routes: Route[] = [
     name: '/v1/health',
     // Whether the secrets are set (never their values), so a deploy smoke test can catch a missing one.
     handler: async ({ env }) =>
-      json(200, { ok: true, version: env.VERSION || VERSION, secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY) } }),
+      json(200, {
+        ok: true,
+        version: env.VERSION || VERSION,
+        secrets: { admin: Boolean(env.ADMIN_TOKEN), rateKey: Boolean(env.RATE_KEY), openrouter: Boolean(env.OPENROUTER_API_KEY), telemetrySalt: Boolean(env.TELEMETRY_SALT) },
+      }),
   },
   {
     method: 'GET',
     pattern: /^\/v1\/skills\/best$/,
     name: '/v1/skills/best',
-    handler: async ({ url, store }) => {
-      const row = await store.bestRow(normalizeSite(url.searchParams.get('site')));
+    handler: async ({ url, store, usage }) => {
+      usage.site = normalizeSite(url.searchParams.get('site'));
+      const row = await store.bestRow(usage.site);
       let skill = null;
       try {
         skill = row && (await loadLive(store, row));
       } catch (e) {
         if (!(e instanceof ApiError && e.code === 'removed')) throw e;
       }
+      usage.hit = Boolean(skill);
       return json(200, { skill }, { 'cache-control': CACHE_BEST });
     },
   },
@@ -263,10 +273,11 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/sites$/,
     name: '/v1/sites',
-    handler: async ({ url, store }) => {
+    handler: async ({ url, store, usage }) => {
       const limit = Math.min(100, Math.max(1, Math.trunc(Number(url.searchParams.get('limit'))) || 50));
       const offset = Math.max(0, Math.trunc(Number(url.searchParams.get('cursor'))) || 0);
       const { rows, more } = await store.sites(limit, offset);
+      usage.results = rows.length;
       return json(
         200,
         { sites: rows.map((r) => ({ site: r.site, best: summary(r) })), next: more ? String(offset + limit) : null },
@@ -278,11 +289,13 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/sites\/([^/]+)$/,
     name: '/v1/sites/:site',
-    handler: async ({ params, store }) => {
+    handler: async ({ params, store, usage }) => {
       let raw: string;
       try { raw = decodeURIComponent(params[0]); } catch { throw notFound('No skills for this site'); }
       const site = normalizeSite(raw);
-      if (!(await store.hasSite(site))) throw notFound('No skills for this site');
+      usage.site = site;
+      usage.hit = await store.hasSite(site);
+      if (!usage.hit) throw notFound('No skills for this site');
       const [best, recent] = await Promise.all([store.bestRow(site), store.recent(site)]);
       return json(200, { site, best: best && summary(best), recent: recent.map(summary) }, { 'cache-control': CACHE_LIST });
     },
@@ -302,6 +315,13 @@ const routes: Route[] = [
       await store.report(report, install);
       return json(202, { ok: true });
     },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/v1\/events$/,
+    name: '/v1/events',
+    // Usage telemetry from the extension and scoop.md (docs/TELEMETRY.md): 202 once queued.
+    handler: async ({ req, env, ip }) => ingestEvents(req, env, ip),
   },
   {
     method: 'DELETE',
@@ -350,10 +370,12 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/sites\/([^/]+)\/profile$/,
     name: '/v1/sites/:site/profile',
-    handler: async ({ params, env }) => {
+    handler: async ({ params, env, usage }) => {
       let raw: string;
       try { raw = decodeURIComponent(params[0]); } catch { throw notFound('No profile for this site'); }
-      const row = await new CrawlStore(env.DB, env.SKILLS).getProfile(normalizeSite(raw));
+      usage.site = normalizeSite(raw);
+      const row = await new CrawlStore(env.DB, env.SKILLS).getProfile(usage.site);
+      usage.hit = Boolean(row && FINAL_PROFILE.has(row.status));
       // Only profiles of finished crawls are public.
       if (!row || !FINAL_PROFILE.has(row.status)) throw notFound('No profile for this site');
       return json(200, { profile: profileJson(row) }, { 'cache-control': CACHE_LIST });
@@ -372,13 +394,15 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/search$/,
     name: '/v1/search',
-    handler: async ({ env, url, ip }) => {
+    handler: async ({ env, url, ip, usage }) => {
       const q = queryParam(url);
       await limitSearch(env, ip);
       const site = url.searchParams.get('site') ? siteParam(url.searchParams.get('site')!) : undefined;
+      Object.assign(usage, { q, site });
       const slot = slotParam(url);
       const limit = intParam(url, 'limit', 10, 1, 50);
       const hits = await search(searchDeps(env), { q, site, slot, limit });
+      Object.assign(usage, { results: hits.length, hit: hits.length > 0 });
       return json(
         200,
         {
@@ -397,9 +421,10 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/sites\/([^/]+)\/topics$/,
     name: '/v1/sites/:site/topics',
-    handler: async ({ env, params }) => {
+    handler: async ({ env, params, usage }) => {
       const site = siteParam(params[0]);
       const { pages, rows } = await siteTopics(env.DB, site);
+      Object.assign(usage, { site, results: pages, hit: pages > 0 });
       if (!pages) throw notFound('No indexed pages for this site');
       return json(200, { site, pages, topics: topicTree(rows) }, { 'cache-control': CACHE_LIST });
     },
@@ -408,8 +433,9 @@ const routes: Route[] = [
     method: 'GET',
     pattern: /^\/v1\/packages$/,
     name: '/v1/packages',
-    handler: async ({ env, url, ip }) => {
+    handler: async ({ env, url, ip, usage }) => {
       const site = siteParam(url.searchParams.get('site') ?? '');
+      usage.site = site;
       const topic = url.searchParams.get('topic');
       const budget = intParam(url, 'budget', DEFAULT_PACKAGE_BUDGET, MIN_PACKAGE_BUDGET, MAX_PACKAGE_BUDGET);
       let label: string;
@@ -418,12 +444,15 @@ const routes: Route[] = [
         if (url.searchParams.has('q')) throw bad('Pass q or topic, not both');
         label = topic.trim().toLowerCase();
         if (!TOPIC.test(label)) throw bad('topic must be a path like webhooks/signatures');
+        usage.topic = label;
         chunks = await topicChunks(env.DB, site, label);
       } else {
         label = queryParam(url);
+        usage.q = label;
         await limitSearch(env, ip);
         chunks = await search(searchDeps(env), { q: label, site, limit: 40 });
       }
+      Object.assign(usage, { results: chunks.length, hit: chunks.length > 0 });
       if (!chunks.length) throw notFound('Nothing indexed matches');
       return new Response(buildIndexPackage({ site, label, chunks, budget }), {
         headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': CACHE_LIST, 'x-content-type-options': 'nosniff' },
@@ -462,6 +491,7 @@ const routes: Route[] = [
 export interface Matched {
   name: string;
   run: () => Promise<Response>;
+  usage: ApiUsage;
 }
 
 // Finds the route for a request. Unknown routes (including admin routes hit with
@@ -472,7 +502,8 @@ export function match(req: Request, env: Env, url: URL, ip: string): Matched | n
     const m = r.pattern.exec(url.pathname);
     if (!m) continue;
     const store = new Store(env.DB, env.SKILLS);
-    return { name: r.name, run: () => r.handler({ req, env, url, params: m.slice(1), store, ip }) };
+    const usage: ApiUsage = {};
+    return { name: r.name, usage, run: () => r.handler({ req, env, url, params: m.slice(1), store, ip, usage }) };
   }
   return null;
 }

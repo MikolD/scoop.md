@@ -12,13 +12,15 @@ import { handleIndexBatch } from './index/consumer.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { ApiError, notFound } from './lib/errors.ts';
+import { handleTelemetryBatch, pruneEvents } from './telemetry/consumer.ts';
+import { API_ROUTES, recordApiUsage } from './telemetry/ingest.ts';
 import type { Env } from './env.ts';
 
 export { CrawlSite } from './crawl/workflow.ts';
 export { CrawlBatch } from './admin/batch-workflow.ts';
 
 export default {
-  async fetch(req: Request, env: Env): Promise<Response> {
+  async fetch(req: Request, env: Env, ctx?: ExecutionContext): Promise<Response> {
     const started = Date.now();
     const url = new URL(req.url);
     const ip = req.headers.get('cf-connecting-ip') ?? 'unknown';
@@ -70,16 +72,28 @@ export default {
       ms: Date.now() - started,
       client: req.headers.get('x-scoop-client'),
     }));
+    // API usage telemetry, after the response (ctx.waitUntil); awaited without a ctx (tests).
+    if (matched && API_ROUTES[matched.name]) {
+      const recorded = recordApiUsage(env, req, matched.name, { status: res.status, latencyMs: Date.now() - started, usage: matched.usage })
+        .catch((e) => console.error(JSON.stringify({ route, telemetry: e instanceof Error ? e.message : String(e) })));
+      if (ctx) ctx.waitUntil(recorded);
+      else await recorded;
+    }
     return withCors(res, req, env);
   },
 
   // index-pages: one message per changed page from the crawler (src/index/consumer.ts).
+  // telemetry-events: usage events from POST /v1/events and API usage (src/telemetry/consumer.ts).
   async queue(batch: MessageBatch<unknown>, env: Env): Promise<void> {
-    await handleIndexBatch(batch, indexDeps(env));
+    if (batch.queue.startsWith('telemetry-events')) await handleTelemetryBatch(batch, env);
+    else await handleIndexBatch(batch, indexDeps(env));
   },
 
-  // Daily: re-enqueue a bounded batch of pages still waiting for a classification.
+  // Daily: prune raw telemetry past 180 days, and re-enqueue a bounded batch of
+  // pages still waiting for a classification.
   async scheduled(_controller: ScheduledController, env: Env): Promise<void> {
+    const pruned = await pruneEvents(env.DB);
+    console.log(JSON.stringify({ cron: 'telemetry-prune', pruned }));
     if (!env.OPENROUTER_API_KEY) return;
     const { totalCapUsd, dailyCapUsd } = indexDeps(env);
     const queued = await reclassify(env.DB, env.INDEX_QUEUE, { totalCapUsd, dailyCapUsd });

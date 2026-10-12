@@ -25,6 +25,7 @@ import { topicTree } from '../search/topics.ts';
 import type { Env } from '../env.ts';
 import { batchInstanceId, cancelBatch, createBatch, getBatch, listBatches, MAX_CONCURRENCY, newBatchId } from './batch.ts';
 import * as q from './queries.ts';
+import { telemetryRoutes } from './telemetry.ts';
 
 interface Seed {
   name: string;
@@ -545,6 +546,8 @@ const routes: Route[] = [
       return json(200, { days: byDay, crawls, siteCapUsd: dailyCapUsd, totalCapUsd });
     },
   },
+  // Usage telemetry (src/admin/telemetry.ts).
+  ...telemetryRoutes,
 ];
 
 export async function adminApi(req: Request, env: Env, url: URL): Promise<Response> {

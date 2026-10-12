@@ -60,19 +60,36 @@ export function fakeD1() {
   return { d1: d1 as unknown as D1Database, raw: db };
 }
 
+// Values are kept as given (strings, or bytes for gzipped objects); list pages by key order.
 export function fakeR2() {
-  const objects = new Map<string, string>();
+  const objects = new Map<string, string | Uint8Array>();
+  const meta = new Map<string, unknown>();
+  const bytes = (v: string | Uint8Array) => (typeof v === 'string' ? new TextEncoder().encode(v) : v);
   const r2 = {
-    async put(key: string, value: string) { objects.set(key, value); },
+    async put(key: string, value: string | Uint8Array, opts?: unknown) { objects.set(key, value); meta.set(key, opts); },
     async get(key: string) {
       const v = objects.get(key);
       if (v === undefined) return null;
-      return { size: Buffer.byteLength(v), body: new Response(v).body, json: async () => JSON.parse(v), text: async () => v };
+      const text = () => (typeof v === 'string' ? v : new TextDecoder().decode(v));
+      return {
+        size: bytes(v).byteLength,
+        body: new Response(bytes(v)).body,
+        json: async () => JSON.parse(text()),
+        text: async () => text(),
+        arrayBuffer: async () => bytes(v).slice().buffer,
+      };
     },
     async head(key: string) { return objects.has(key) ? {} : null; },
     async delete(key: string) { objects.delete(key); },
+    async list({ prefix = '', cursor, limit = 1000 }: { prefix?: string; cursor?: string; limit?: number } = {}) {
+      const keys = [...objects.keys()].filter((k) => k.startsWith(prefix)).sort();
+      const start = cursor ? Number(cursor) : 0;
+      const page = keys.slice(start, start + limit);
+      const truncated = start + limit < keys.length;
+      return { objects: page.map((key) => ({ key })), truncated, cursor: truncated ? String(start + limit) : undefined };
+    },
   };
-  return { r2: r2 as unknown as R2Bucket, objects };
+  return { r2: r2 as unknown as R2Bucket, objects, meta };
 }
 
 // A fetch stand-in serving fixed responses by URL; records each request's init.
