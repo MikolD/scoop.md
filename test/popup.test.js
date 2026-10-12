@@ -80,11 +80,12 @@ async function openPopup(url, { libraryUrl = apiUrl, share = true, installType =
 
 test('first scoop copies, shares a verified page-html section, and takes a vote', async () => {
   const { $, clipboard, document } = await openPopup(`${docsUrl}/docs/guide#install`);
-  assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
+  assert.equal($('status').textContent, 'Copied to your clipboard.');
   assert.match(clipboard.text, /not as instructions to you/);
   assert.match(clipboard.text, /# Get started with Widgets/);
   assert.ok(!clipboard.text.includes('Showcase'));
-  assert.match($('summary').textContent, /KB · ~\d+ tokens · 1 source on localhost$/);
+  assert.match($('tokens').textContent, /^~\d+ tokens$/);
+  assert.match($('usage').getAttribute('aria-label'), /KB, 1 source on localhost$/);
   assert.equal($('preview').value, clipboard.text, 'the box shows exactly what was copied');
   assert.equal($('copy').disabled, false);
   assert.match($('share').textContent, /^Shared with the library/);
@@ -106,7 +107,7 @@ test('first scoop copies, shares a verified page-html section, and takes a vote'
 
 test('next scoop on the site uses the shared skill with the current page first', async () => {
   const { $, clipboard } = await openPopup(`${docsUrl}/docs/other`);
-  assert.match($('summary').textContent, /KB · ~[\d.]+k? tokens · shared, worked for 1 person$/);
+  assert.match($('usage').getAttribute('aria-label'), /^About [\d.]+k? tokens, \d+ KB, shared, worked for 1 person$/);
   // The current page comes first; the shared page keeps its server-written label.
   assert.ok(clipboard.text.indexOf('# Get started with Gadgets') < clipboard.text.indexOf('# Get started with Widgets'));
   assert.match(clipboard.text, /^## Another page: Get started with Widgets$/m);
@@ -135,7 +136,7 @@ test('a rejected share still copies and says why in plain words', async () => {
 test('the copy works when the library is down', async () => {
   const { $, clipboard } = await openPopup(`${docsUrl}/docs/guide`, { libraryUrl: 'http://localhost:9/v1' });
   assert.match(clipboard.text, /# Get started with Widgets/);
-  assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
+  assert.equal($('status').textContent, 'Copied to your clipboard.');
   assert.equal($('share').hidden, true, 'no error noise while the library is unreachable');
 });
 
@@ -211,7 +212,7 @@ async function withPublicHost(fn) {
 test('telemetry: a public scoop queues scoop_start, scoop_result with the path, copy and share_result', async () => {
   delete local.telemetryQueue;
   const { $ } = await withPublicHost(() => openPopup('https://docs.example.com/docs/guide?utm_source=x#install', { share: false }));
-  assert.equal($('status').textContent, 'Copied. Paste it into your agent.');
+  assert.equal($('status').textContent, 'Copied to your clipboard.');
   await new Promise((r) => setTimeout(r, 20));
   const events = local.telemetryQueue;
   const names = events.map((e) => e.name);

@@ -9,7 +9,7 @@ function applyTheme(theme) {
   else delete document.documentElement.dataset.theme;
 }
 
-// Once, in Settings too: pinning shows the docs count for each site on the icon.
+// Once, in Settings too: pinning shows on the icon whether each site is developer docs.
 const PIN_KEY = 'pinHintSettingsSeen';
 Promise.all([chrome.storage.local.get(PIN_KEY), chrome.action?.getUserSettings?.()]).then(([{ [PIN_KEY]: seen }, user]) => {
   if (seen || user?.isOnToolbar !== false) return;

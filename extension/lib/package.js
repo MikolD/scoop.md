@@ -130,6 +130,7 @@ export function buildPagePackage({ site, title, pageUrl, devDocs = true, llms = 
   const top = devDocs ? `# ${site} docs for ${name} (via scoop.md)` : `# ${name} (${site}, via scoop.md)`;
   let head = `${top}\n\n${SAFETY(site, devDocs)}\n`;
   if (llms?.url) head += `\nDocs index for agents: ${llms.url}${llmsFull?.url ? ` (full text: ${llmsFull.url})` : ''}\n`;
+  else if (llmsFull?.url) head += `\nFull docs for agents: ${llmsFull.url}\n`;
   // What the site says to agents is quoted, never presented as instructions,
   // and left out for a page that isn't developer docs.
   const rules = devDocs ? instructions.filter((i) => i?.text).slice(0, MAX_INSTRUCTIONS) : [];
@@ -172,7 +173,28 @@ export function tokenEstimate(text) {
 // lines): its verified llms.txt and the site's instructions for agents.
 export function packageMeta(text) {
   const llms = String(text ?? '').match(/^Docs index for agents: (\S+)/m)?.[1] ?? null;
+  const llmsFull = String(text ?? '').match(/^(?:Docs index for agents: \S+ \(full text: (\S+)\)|Full docs for agents: (\S+))/m)?.slice(1).find(Boolean) ?? null;
   const block = String(text ?? '').split(/^## What this site says to AI agents\s*$/m)[1]?.split(/^## /m)[0] ?? '';
-  const instructions = [...block.matchAll(/^> - (.+?)(?: \(\[source\]\((https?:\/\/[^)\s]+)\)\))?$/gm)].map((m) => ({ text: m[1].trim(), url: m[2] ?? null }));
-  return { llms, instructions };
+  // Items end with their source: " ([source](url))" here, " (url)" from the server.
+  const instructions = [...block.matchAll(/^> - (.+?)(?: \((?:\[source\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^)\s]+))\))?$/gm)].map((m) => ({ text: m[1].trim(), url: m[2] ?? m[3] ?? null }));
+  return { llms, llmsFull, instructions };
+}
+
+// The Overview tab's package: the topics the docs index has for the site and
+// its llms.txt, within the same budget as a page; the llms.txt is cut with a
+// pointer when it doesn't fit (the popup then offers the whole file).
+export function buildOverviewPackage({ site, topics = [], pages = 0, llms = null, budget = PAGE_BUDGET }) {
+  let head = `# ${site} docs overview (via scoop.md)\n\n${SAFETY(site, true)}\n`;
+  if (llms?.url) head += `\nDocs index for agents: ${llms.url}\n`;
+  if (topics.length) head += `\n## Topics in the scoop.md index${pages ? ` (${pages} pages)` : ''}\n\n${topics.join('\n')}\n`;
+  head = head.slice(0, budget);
+  if (!llms?.content) return { text: head, truncated: false };
+  const top = `\n## llms.txt\n\nSource: ${llms.url}\n\n`;
+  const cut = `\n\n[Truncated. The full file is at ${llms.url}]`;
+  let body = compact(llms.content);
+  const room = budget - head.length - top.length - 1;
+  if (room - cut.length < 200) return { text: head, truncated: true };
+  const truncated = body.length > room;
+  if (truncated) body = body.slice(0, room - cut.length) + cut;
+  return { text: `${head}${top}${body}\n`, truncated };
 }
