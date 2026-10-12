@@ -263,7 +263,6 @@ async function deliverIndexed(scoop, { fresh = false } = {}) {
   return true;
 }
 
-const REJECTED_NOTE = "This doesn't look like developer docs, so we copied just this page.";
 const backgroundNote = (site) => `Indexing all of ${site}'s docs in the background. The icon shows ✓ when it's ready.`;
 
 // Instant: the local build plus what the library finds for the page right

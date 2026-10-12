@@ -11,7 +11,7 @@ import { createApp } from '../server/app.js';
 import { timing } from '../extension/lib/ux.js';
 
 // The loader and the copied moment are covered in popup-ux.test.js; here they only cost time.
-Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0, pollMs: 5 });
+Object.assign(timing, { loaderMs: 0, celebrateMs: 0, reducedMs: 0, followMs: 5 });
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
 const MANIFEST = JSON.parse(read('../extension/manifest.json'));

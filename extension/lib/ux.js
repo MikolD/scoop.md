@@ -6,15 +6,9 @@ export const timing = {
   loaderMs: 600,
   celebrateMs: 900,
   reducedMs: 450,
-  pollMs: 2_000,
-  // The popup stops waiting for a crawl after this and copies the page; the
-  // service worker keeps following the request.
-  maxWaitMs: 10 * 60_000,
   // Retries of the page's package right after a crawl completes.
   packageRetryMs: [1_500, 3_000, 6_000],
   packageRetryTimeoutMs: 4_000,
-  // Indexing with no progress for this long: try the index for this page.
-  stallMs: 60_000,
   // While the popup is open, how often the background crawl is checked.
   followMs: 5_000,
   searchDebounceMs: 300,
