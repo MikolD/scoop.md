@@ -643,3 +643,14 @@ test('admin rebuild (Basic auth): a registered host checked again now; unknown h
   }
   assert.equal((await post('/api/llms/nothing.example/rebuild')).status, 404);
 });
+
+test('full stage: a docs path with almost nothing under it widens to the whole host, without its writing', async () => {
+  const { d1, raw } = fakeD1();
+  for (const [u, slot] of [['/docs/', 'quickstart'], ['/attributes/hx-get/', 'api-reference'], ['/reference/', 'api-reference'], ['/examples/click-to-edit/', 'guide'], ['/extensions/sse/', 'guide'], ['/headers/hx-trigger/', 'api-reference'], ['/essays/hypermedia/', 'other']]) {
+    raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, summary, model, cost_usd, indexed_at) VALUES (?, 'hx.example', 'h', ?, ?, '', 'm', 0, 'x')`).run(`https://hx.example${u}`, u, slot);
+    raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) VALUES (?, 1, 200, NULL, 'x', 'crawl')`).run(`https://hx.example${u}`);
+  }
+  const b = await buildFull(d1, 'https://hx.example/docs', 'hx');
+  assert.equal(b!.pages, 6);
+  assert.ok(!b!.text.includes('essays'));
+});

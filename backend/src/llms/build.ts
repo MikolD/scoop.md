@@ -398,7 +398,10 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
     .bind(host)
     .all<{ url: string; title: string | null; summary: string | null; slot: string | null; content_hash: string; source_url: string | null; source_kind: string | null }>();
   // One version of versioned docs, as in the instant stage (jestjs.io/docs/29.7/… and /docs/30.4/…).
-  const rows = oneVersion(results.filter((r) => underRoot(r.url, rootPath || '/') && !/\/llms(-full)?\.txt$/i.test(r.url)), root);
+  // A docs path with almost nothing under it widens to the whole host, as in the instant stage (htmx.org/docs).
+  const notLlms = results.filter((r) => !/\/llms(-full)?\.txt$/i.test(r.url));
+  const scoped = notLlms.filter((r) => underRoot(r.url, rootPath || '/'));
+  const rows = oneVersion(scoped.length >= MIN_SCOPED ? scoped : notLlms.filter((r) => !WRITING.test(new URL(r.url).pathname)), root);
   if (!rows.length) return null;
   // Descriptions from the stored page itself (its first paragraph's first
   // sentence); a stored summary only when it reads like the page's own words.
