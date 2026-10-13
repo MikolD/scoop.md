@@ -118,7 +118,8 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
   }
   if (versions.size <= 1) return links;
   const keys = [...versions.keys()];
-  const alias = keys.find((k) => k && /^(latest|stable|current)$/i.test(k));
+  // Of latest/stable/current, the one with the most pages (Celery's /en/latest/ is one page, /en/stable/ the docs).
+  const alias = keys.filter((k) => k && /^(latest|stable|current)$/i.test(k)).sort((a, b) => versions.get(b)!.length - versions.get(a)!.length)[0];
   const numbered = keys.filter((k): k is string => k !== null && /\d/.test(k)).sort((a, b) => {
     const pa = a.replace(/^v/i, '').split('.').map(Number);
     const pb = b.replace(/^v/i, '').split('.').map(Number);

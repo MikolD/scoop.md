@@ -82,6 +82,8 @@ test('helpers: names, sections, titles, versions', () => {
   assert.equal(linkTitle('Routing &amp; middleware ¶', 'https://x.dev/r'), 'Routing & middleware');
   const v = ['https://x.dev/docs/29.7/a', 'https://x.dev/docs/30.4/a', 'https://x.dev/docs/30.4/b', 'https://x.dev/docs/next/a'].map((url) => ({ url }));
   assert.deepEqual(oneVersion(v, 'https://x.dev/docs').map((l) => l.url), ['https://x.dev/docs/30.4/a', 'https://x.dev/docs/30.4/b']);
+  const celery = ['https://c.dev/en/latest/', 'https://c.dev/en/v5.6.0/', 'https://c.dev/en/stable/a.html', 'https://c.dev/en/stable/b.html', 'https://c.dev/en/3.1/'].map((url) => ({ url }));
+  assert.deepEqual(oneVersion(celery, 'https://c.dev').map((l) => l.url), ['https://c.dev/en/stable/a.html', 'https://c.dev/en/stable/b.html'], 'the alias with the most pages');
   const sample = '# Stripe Documentation\n\n- [A](https://a.dev/a.md)\n- [B](https://a.dev/b)\n';
   assert.deepEqual(describeLlms(sample), { title: 'Stripe Documentation', pages: 2, tokens: Math.ceil(sample.length / 4) });
 });
