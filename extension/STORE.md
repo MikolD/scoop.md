@@ -77,13 +77,13 @@ Certifications to tick:
 
 ## Store artwork
 
-In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real 0.6.0 extension against the library and composed with the popup at the top right (1280×800, light theme). Sources: scratchpad/ux-evidence/060/store/.
+In `store-assets/` (copies in `dist/store/`), taken in Chrome with the released 0.6.0 zip against production (api.scoop.md) and composed with the popup at the top right (1280×800, light theme). Sources: scratchpad/ux-evidence/060-prod/store/.
 
 | File | Size | Shows |
 |---|---|---|
-| `1-stripe.png` | 1280×800 | stripe.com: the llms.txt field (docs.stripe.com/llms.txt, "513 pages · checked today · found in 0.2s"), Instructions for agents (Stripe's, collapsed with "Show all ⌄") and "Copied ✓"; the toolbar shows "2" |
+| `1-stripe.png` | 1280×800 | docs.stripe.com/webhooks: the llms.txt field (docs.stripe.com/llms.txt, "513 pages · checked today · found in 0.3s"), Instructions for agents (Stripe's, collapsed with "Show all ⌄") and "Copied ✓" |
 | `2-twilio.png` | 1280×800 | twilio.com: www.twilio.com/docs/llms.txt with Twilio's instructions for agents, copied |
-| `3-python.png` | 1280×800 | docs.python.org: an llms.txt prepared by scoop.md ("by scoop.md" badge) with install instructions, copied |
+| `3-python.png` | 1280×800 | docs.python.org: scoop.md/docs.python.org/llms.txt, prepared by scoop.md ("by scoop.md" badge, 322 pages) with install instructions, copied |
 | `4-hono.png` | 1280×800 | hono.dev: an llms.txt only (no instructions): "Copy llms.txt", copied; the toolbar shows "1" |
 | `5-not-developer.png` | 1280×800 | example.com: "This isn't a developer website. scoop.md is for developer docs." and nothing else |
 | `6-badge.png` | 1280×800 | The toolbar badge close-ups: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
