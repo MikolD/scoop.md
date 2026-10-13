@@ -1,15 +1,13 @@
 // Service worker: install, update and browser-update events, the daily active
 // ping, the uninstall page's URL, sending queued usage statistics
-// (lib/telemetry.js), following crawl requests in the background (lib/crawl.js:
-// polled every 30 s), and the per-tab toolbar badge (lib/badge.js): the
-// indexed-docs count for the tab's site, looked up in a list downloaded every
-// 6 hours, never per visit. It reads tab URLs (host permission), never page
+// (lib/telemetry.js), and the per-tab toolbar badge (lib/badge.js): "1" or "2"
+// for sites with an llms.txt, looked up in a list downloaded every 6 hours,
+// never per visit. It reads tab URLs (host permission), never page
 // content. Listeners are registered synchronously, as MV3 requires.
 
 import { createTelemetry, FLUSH_ALARM, getInstallId, HOURLY_ALARM, QUEUE_KEY, RETRY_KEY, telemetryEnabled, uninstallUrl } from './lib/telemetry.js';
 import { createLibrary, libraryUrl } from './lib/library.js';
-import { CRAWL_ALARM, PENDING_KEY, live, loadPending, isTerminal, pollPending, updateBadge } from './lib/crawl.js';
-import { countShown, loadSites, refreshSites, setTabBadge, SITES_ALARM, SITES_PERIOD_MINUTES, takeShownCounts } from './lib/badge.js';
+import { countShown, loadSites, refreshSites, refreshTabs, setTabBadge, SITES_ALARM, SITES_PERIOD_MINUTES, takeShownCounts } from './lib/badge.js';
 import { siteKey } from './lib/discover.js';
 
 const LAST_ACTIVE_KEY = 'telemetryLastActiveDay';
@@ -37,14 +35,12 @@ async function activePing(t) {
 async function ensureAlarms() {
   if (!(await chrome.alarms.get(HOURLY_ALARM))) chrome.alarms.create(HOURLY_ALARM, { delayInMinutes: 1, periodInMinutes: 60 });
   if (!(await chrome.alarms.get(SITES_ALARM))) chrome.alarms.create(SITES_ALARM, { periodInMinutes: SITES_PERIOD_MINUTES });
-  // A crawl still running when the browser closed: keep following it. Finished
-  // ones nobody picked up expire, so the ✓ doesn't stick.
-  const pending = live(await loadPending(chrome));
-  await chrome.storage.local.set({ [PENDING_KEY]: pending });
-  if (Object.values(pending).some((e) => !isTerminal(e.state)) && !(await chrome.alarms.get(CRAWL_ALARM))) {
-    chrome.alarms.create(CRAWL_ALARM, { periodInMinutes: 0.5 });
-  }
-  await updateBadge(chrome, pending);
+  // 0.5.x followed crawl requests: their state and alarm are no longer used.
+  try {
+    await chrome.alarms.clear('crawl-poll');
+    await chrome.storage.local.remove(['crawlPending', 'popupView', 'introSeen']);
+  } catch {}
+  await refreshTabs(chrome);
 }
 
 async function library() {
@@ -91,13 +87,9 @@ chrome.runtime.onStartup.addListener(() => {
 });
 
 chrome.alarms.onAlarm.addListener(({ name }) => {
-  if (name === CRAWL_ALARM) {
-    (async () => pollPending(chrome, await library()))().catch(() => {});
-    return;
-  }
   if (name === SITES_ALARM) {
     (async () => {
-      if (await refreshSites(chrome, await library())) await updateBadge(chrome);
+      if (await refreshSites(chrome, await library())) await refreshTabs(chrome);
     })().catch(() => {});
     return;
   }
@@ -106,7 +98,6 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
     const t = createTelemetry({ beacon: null });
     if (name === HOURLY_ALARM) {
       await activePing(t);
-      // Expires finished crawls nobody picked up, so their ✓ clears.
       await ensureAlarms();
       // How often each badge ("1", "2") was shown this hour: two numbers, no sites.
       for (const [level, count] of Object.entries(await takeShownCounts(chrome))) {

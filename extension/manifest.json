@@ -19,7 +19,7 @@
   },
   "options_page": "options.html",
   "background": { "service_worker": "background.js", "type": "module" },
-  "permissions": ["activeTab", "scripting", "clipboardWrite", "storage", "alarms"],
+  "permissions": ["clipboardWrite", "storage", "alarms"],
   "host_permissions": ["<all_urls>"],
   "commands": {
     "_execute_action": {

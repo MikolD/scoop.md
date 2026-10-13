@@ -23,11 +23,6 @@ Promise.all([chrome.storage.local.get(PIN_KEY), chrome.action?.getUserSettings?.
 // The library URL is no longer a setting.
 chrome.storage.sync.remove('libraryUrl');
 
-chrome.storage.sync.get({ share: true }).then(({ share }) => { $('share').checked = share; });
-$('share').onchange = () => {
-  telemetry.track('settings_change', { key: 'share', value: String($('share').checked) });
-  return chrome.storage.sync.set({ share: $('share').checked });
-};
 
 // Off sends one telemetry_opt_out event, then nothing (lib/telemetry.js).
 telemetryEnabled(chrome).then((on) => { $('telemetry').checked = on; });

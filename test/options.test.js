@@ -48,11 +48,11 @@ test('an unknown stored theme falls back to System', async () => {
   assert.equal(document.documentElement.dataset.theme, undefined);
 });
 
-test('options: theme, sharing, shortcut and the old library URL', async () => {
+test('options: theme, shortcut, no sharing switch (0.6.0 shares nothing), and the old library URL', async () => {
   const { document, checkedTheme, sync, opened } = await openOptions({ theme: 'dark', sync: { libraryUrl: 'http://x/v1', share: false } });
   assert.equal(checkedTheme(), 'dark');
   assert.equal(document.documentElement.dataset.theme, 'dark');
-  assert.equal(document.getElementById('share').checked, false);
+  assert.equal(document.getElementById('share'), null, 'no sharing switch');
   assert.equal(sync.libraryUrl, undefined, 'old setting removed');
   assert.equal(document.getElementById('shortcut').textContent, '⌥⇧C opens scoop.md');
   document.getElementById('shortcuts').onclick();
