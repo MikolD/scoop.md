@@ -180,7 +180,9 @@ export async function scoopExcerpt(b: BuiltLlms, o: ExcerptOptions = {}): Promis
         continue;
       }
       if (f) { fence = f[1]; continue; }
-      if (!heading(line) && line.trim() && line.length <= MAX_LINE && /\b(install|api key|set up|configure|mcp)\b/i.test(line)) lines.push({ text: line.trim(), anchor: null });
+      // Prose about setting up; not navigation (a list item that is only a link).
+      const navItem = /^\s*([-*+]|\d+[.)])\s+\[[^\]]*\]\([^)]*\)\s*$/.test(line);
+      if (!heading(line) && !navItem && line.trim() && line.length <= MAX_LINE && /\b(install|api key|set up|configure|mcp)\b/i.test(line)) lines.push({ text: line.trim(), anchor: null });
     }
     const kept = await keepable(lines, p.url, o);
     if (kept.length) return { text: capped(kept.slice(0, 12)), source: p.url, method: 'section' };
