@@ -267,8 +267,10 @@ test('/v1/llms, not docs: the lists and verdicts answer nothing, and nothing is 
   assert.equal(w.fetched.length, 0, 'the denylist answers without a request');
   const ex = await resolveLlms('https://example.com/', d);
   assert.deepEqual([ex.docs.found, ex.llms, ex.prompt], [false, null, null]);
+  // A crawl's not_devtool verdict (about the page it started from) doesn't stop discovery: here it finds nothing either.
   raw.prepare(`INSERT INTO site_profiles (site, status, updated_at) VALUES ('shop.example', 'not_devtool', 'x')`).run();
-  assert.equal(await knownNotDocs(d.db, 'shop.example'), true);
+  assert.equal(await knownNotDocs(d.db, 'shop.example'), false);
+  assert.equal(await knownNotDocs(d.db, 'amazon.com'), true);
   assert.equal((await resolveLlms('https://shop.example/p', d)).docs.found, false);
   assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM llms_registry').get()!.n, 0);
   assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM llms_aliases').get()!.n, 0);
@@ -279,8 +281,7 @@ test('registry: aliases, the public list (docs only, ready only), answers from r
   const old = new Date('2026-10-10T00:00:00Z');
   await upsertRow(d.db, { host: 'docs.stripe.example', docs_root: 'https://docs.stripe.example', llms_url: 'https://docs.stripe.example/llms.txt', source: 'site', status: 'ready', title: 'Stripe Documentation', pages: 2 }, old);
   await upsertRow(d.db, { host: 'prep.example', docs_root: 'https://prep.example', llms_url: 'https://scoop.md/prep.example/llms.txt', source: 'scoop', status: 'preparing' });
-  await upsertRow(d.db, { host: 'shop.example', docs_root: 'https://shop.example', llms_url: 'https://scoop.md/shop.example/llms.txt', source: 'scoop', status: 'ready' });
-  raw.prepare(`INSERT INTO site_profiles (site, status, updated_at) VALUES ('shop.example', 'not_devtool', 'x')`).run();
+  await upsertRow(d.db, { host: 'amazon.com', docs_root: 'https://amazon.com', llms_url: 'https://scoop.md/amazon.com/llms.txt', source: 'scoop', status: 'ready' });
   await setAlias(d.db, 'stripe.example', 'docs.stripe.example');
   assert.deepEqual((await listRegistry(d.db, 10, 0)).rows.map((r) => r.host), ['docs.stripe.example']);
   const row = (await getRow(d.db, 'docs.stripe.example'))!;

@@ -153,24 +153,24 @@ export async function setAlias(db: D1Database, pageHost: string, host: string, n
     .run();
 }
 
-// Not docs, by the lists or by an earlier crawl's verdict: nothing is stored for these.
-export async function knownNotDocs(db: D1Database, host: string): Promise<boolean> {
-  if (denylistHosts().includes(host) || denylistHosts().includes(`www.${host}`)) return true;
-  const p = await db.prepare('SELECT status FROM site_profiles WHERE site = ?').bind(host).first<{ status: string }>();
-  return p?.status === 'not_devtool';
+// Not docs by the gate's denylist: answered at once, nothing stored. (A
+// crawl's not_devtool verdict is about the page it started from: twilio.com
+// was rejected for its home page while its docs live at twilio.com/docs, so
+// such hosts still go through discovery.)
+export async function knownNotDocs(_db: D1Database, host: string): Promise<boolean> {
+  const hosts = denylistHosts();
+  return hosts.includes(host) || hosts.includes(`www.${host}`);
 }
 
 // The public list (the site's Library page): docs sites only.
 export async function listRegistry(db: D1Database, limit: number, offset: number): Promise<{ rows: RegistryRow[]; more: boolean }> {
+  // Every row is a docs site (only discovery that found docs registers one); the denylist is checked again all the same.
+  const deny = new Set(denylistHosts());
   const { results } = await db
-    .prepare(
-      `SELECT r.* FROM llms_registry r LEFT JOIN site_profiles s ON s.site = r.host
-       WHERE r.status = 'ready' AND COALESCE(s.status, '') != 'not_devtool'
-       ORDER BY r.scoops DESC, r.host LIMIT ? OFFSET ?`,
-    )
+    .prepare(`SELECT * FROM llms_registry WHERE status = 'ready' ORDER BY scoops DESC, host LIMIT ? OFFSET ?`)
     .bind(limit + 1, offset)
     .all<RegistryRow>();
-  return { rows: results.slice(0, limit), more: results.length > limit };
+  return { rows: results.slice(0, limit).filter((r) => !deny.has(r.host)), more: results.length > limit };
 }
 
 // ---- Building and storing ---------------------------------------------------------------------
