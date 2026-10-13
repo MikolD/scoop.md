@@ -1,6 +1,6 @@
 // The v1 API (docs/BACKEND.md §5). Each route names its pattern for the request log.
 
-import { checkHourly, ipSubject } from '../db/ratelimit.ts';
+import { adjustDaily, checkHourly, dailyCount, ipSubject } from '../db/ratelimit.ts';
 import { CrawlStore, runCosts, STALE_RUN_HOURS } from '../db/crawl.ts';
 import type { CrawlRunRow, SiteProfileRow } from '../db/crawl.ts';
 import { Store, summary } from '../db/store.ts';
@@ -16,7 +16,7 @@ import { ApiError, bad, notFound } from '../lib/errors.ts';
 import { safeEqual, sha256Hex } from '../lib/ids.ts';
 import { assertFetchable, normalizeSite, siteOf } from '../lib/ssrf.ts';
 import { startCrawl } from '../crawl/start.ts';
-import { DEFAULT_REQUESTS_DAILY_MAX, ondemandShare, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
+import { DEFAULT_REQUESTS_DAILY_MAX, ondemandShare, REQUEST_MAX_MINUTES, REQUEST_MAX_PAGES, requestCrawl, requestView, siteStatus } from '../crawl/requests.ts';
 import { e2bDailyCap } from '../crawl/e2b.ts';
 import { anchoredChunks, anchorLookup } from '../search/anchor.ts';
 import { normalizePageUrl } from '../lib/urls.ts';
@@ -254,20 +254,36 @@ function llmsDeps(env: Env, ip: string, waitUntil?: (p: Promise<unknown>) => voi
       jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
       siteCache: quickSiteCache(),
     },
-    startCrawl: env.CRAWL_SITE && env.RATE_KEY
-      ? async (root, host) => {
-        // A crawl request on the user's behalf, under the usual daily limits (per IP subject; 429s just leave the instant file).
-        await requestCrawl(
-          {
-            db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE, rateKey: env.RATE_KEY, dailyMax: requestsDailyMax(env),
-            e2bCapUsd: e2bDailyCap(env), indexTotalCapUsd: indexDeps(env).totalCapUsd,
-            e2bShare: ondemandShare(env.ONDEMAND_E2B_SHARE), indexShare: ondemandShare(env.ONDEMAND_INDEX_SHARE),
-          },
-          { pageUrl: root, site: host, install: `llms:${ipSubject(ip)}`, ip },
-        );
-      }
-      : undefined,
+    startCrawl: env.CRAWL_SITE && env.RATE_KEY ? (root, host) => llmsCrawl(env, ip, root, host) : undefined,
   };
+}
+
+// The full stage of a scoop-built llms.txt needs the site crawled: from its
+// docs root (so the gate judges the docs, not a marketing home page), at most
+// once a week per site, LLMS_CRAWLS_PER_IP a day per IP subject and
+// LLMS_CRAWLS_DAILY_MAX a day overall. Past any of them the instant file stays.
+const LLMS_CRAWLS_PER_IP = 10;
+const LLMS_CRAWLS_DAILY_MAX = 100;
+async function llmsCrawl(env: Env, ip: string, root: string, host: string): Promise<void> {
+  const week = new Date(Date.now() - 7 * 86_400_000).toISOString();
+  const recent = await env.DB
+    .prepare(`SELECT 1 AS x FROM crawl_runs WHERE site = ? AND (status IN ('queued', 'running') OR (status = 'complete' AND started_at > ?)) LIMIT 1`)
+    .bind(host, week)
+    .first();
+  if (recent) return;
+  const subject = ipSubject(ip);
+  const [mine, all] = await Promise.all([
+    dailyCount(env.DB, env.RATE_KEY, 'llms-crawl:ip', subject),
+    dailyCount(env.DB, env.RATE_KEY, 'llms-crawl', '*'),
+  ]);
+  if (mine >= LLMS_CRAWLS_PER_IP || all >= LLMS_CRAWLS_DAILY_MAX) return;
+  const runId = await startCrawl(
+    { db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE },
+    { site: host, startUrl: root, maxPages: REQUEST_MAX_PAGES, maxMinutes: REQUEST_MAX_MINUTES, force: false, requested: true, priorityUrl: root },
+  );
+  if (!runId) return;
+  await adjustDaily(env.DB, env.RATE_KEY, 'llms-crawl:ip', subject, 1);
+  await adjustDaily(env.DB, env.RATE_KEY, 'llms-crawl', '*', 1);
 }
 
 // A site the API may talk about: a public hostname (400 for IP literals,
