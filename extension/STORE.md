@@ -19,7 +19,7 @@ Scoop any doc. One click copies the docs page you're on as Markdown your coding 
 >
 > scoop.md gives your coding agent the docs of the site you're on, the way agents read them best: the site's llms.txt. Click it on any documentation site and a short prompt with the llms.txt link is on your clipboard, ready to paste into Claude Code, Codex, Cursor or any other coding agent. Your agent reads the index and fetches only the pages it needs.
 >
-> • One button: "Copy llms.txt". The site's own llms.txt when it has one; when it doesn't, scoop.md prepares one and hosts it at scoop.md/<site>/llms.txt.
+> • The site's llms.txt and its instructions for agents (how to install, set up and use it), with one button to copy both. The site's own llms.txt when it has one; when it doesn't, scoop.md prepares one, getting-started first, and hosts it at scoop.md/<site>/llms.txt.
 > • Works from anywhere on the site: on stripe.com it finds the docs at docs.stripe.com.
 > • Not a documentation site? It says so, and copies nothing.
 > • The toolbar icon shows whether the site you're on is developer docs (a check, or "!" when it isn't), looked up in lists kept on your device.

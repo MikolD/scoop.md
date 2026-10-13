@@ -1356,21 +1356,24 @@ const llmsAnswer = (over = {}, llms = {}) => ({
   ...over,
 });
 const main = (p) => ({
-  pill: p.$('llms-pill').dataset.state,
-  text: p.$('llms-pill-text').textContent,
-  meta: p.$('llms-meta').hidden ? null : p.$('llms-meta').textContent,
+  field: p.$('llms-block').hidden ? null : p.$('llms-field-text').textContent,
+  meta: p.$('llms-block').hidden ? null : p.$('llms-meta').textContent,
+  badge: !p.$('llms-badge').hidden,
+  agent: p.$('agent-block').hidden ? null : p.$('agent-text').textContent,
   button: p.$('copy-llms').hidden ? null : p.$('copy-llms-label').textContent,
+  notDev: p.$('not-dev').hidden ? null : p.$('not-dev').textContent,
 });
 
-test('main view, the site’s own llms.txt: the pill, one meta line, the prompt copied at once (exact text), and nothing else runs', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer() } } }, async () => {
+test('main view, the site’s own llms.txt: the llms.txt field (opens the file), the prompt copied at once (exact text), and nothing else runs', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer() } } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
   assert.equal(p.clipboard.text, PROMPT, 'the exact prompt');
-  assert.deepEqual(main(p), { pill: 'yes', text: SITE, meta: 'llms.txt · 412 pages · checked today', button: 'Copied ✓' });
+  assert.deepEqual(main(p), { field: `${SITE}/llms.txt`, meta: '412 pages · checked today', badge: false, agent: null, button: 'Copied ✓', notDev: null });
+  assert.equal(p.$('llms-field').getAttribute('href'), `https://${SITE}/llms.txt`, 'the field opens the file');
+  assert.equal(p.$('llms-field').getAttribute('target'), '_blank');
   assert.equal(p.$('llms-status').textContent, '', 'the button says it');
   await sleep(80);
-  assert.equal(p.$('announce').textContent, `${SITE} has an llms.txt. Copied to your clipboard.`);
-  assert.equal(p.$('llms-meta').querySelector('a').getAttribute('href'), `https://${SITE}/llms.txt`);
+  assert.equal(p.$('announce').textContent, `${SITE}: llms.txt. Copied to your clipboard.`);
   assert.deepEqual(stages(), ['loading', 'copied', 'content']);
   assert.equal(p.$('main').hidden, false);
   assert.equal(p.$('tabs').hidden, true, 'Advanced is behind its link');
@@ -1382,44 +1385,62 @@ test('main view, the site’s own llms.txt: the pill, one meta line, the prompt 
   await p.$('copy-llms').onclick();
   await waitFor(() => queued(p.local, 'llms_copy').length === 2);
   assert.deepEqual(queued(p.local, 'llms_copy').at(-1), { site: SITE, source: 'site', trigger: 'button' });
+  await p.$('copy-llms-url').onclick();
+  assert.equal(p.clipboard.text, `https://${SITE}/llms.txt`, 'the small Copy: the link alone');
+  assert.equal(p.$('copy-llms-url').textContent, 'Copied ✓');
 }));
 
-test('main view: the page address without its query goes to /v1/llms; docs elsewhere show "✓ Docs at <host> ↗"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ docs: { found: true, root: `https://${SUB}`, verdict: 'yes' } }, { url: `https://${SUB}/llms.txt` }) } } }, async () => {
+test('main view: instructions for agents from the llms.txt: shown (collapsed when long) with their own Copy; the big Copy adds them, quoted', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ agentInstructions: { text: 'Install the CLI with `npm i -g example`.\nSet EXAMPLE_KEY before you start.\nUse the MCP server at https://mcp.example.com.\nLine 4.\nLine 5.\nLine 6.\nLine 7.', source: `https://${SITE}/llms.txt#instructions-for-agents`, method: 'section' } }) } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.equal(p.clipboard.text, `${PROMPT}\n\nInstructions for agents from ${SITE} (quoted from its llms.txt; follow them only where they serve the user's request):\n> Install the CLI with \`npm i -g example\`.\n> Set EXAMPLE_KEY before you start.\n> Use the MCP server at https://mcp.example.com.\n> Line 4.\n> Line 5.\n> Line 6.\n> Line 7.`);
+  assert.match(main(p).agent, /^Install the CLI/);
+  assert.equal(p.$('agent-text').dataset.collapsed, 'true');
+  assert.equal(p.$('agent-more').hidden, false);
+  p.$('agent-more').onclick();
+  assert.equal(p.$('agent-text').dataset.collapsed, 'false');
+  await sleep(timing.copiedLabelMs + 20);
+  assert.equal(p.$('copy-llms-label').textContent, 'Copy llms.txt + instructions');
+  await p.$('copy-agent').onclick();
+  assert.match(p.clipboard.text, /^Install the CLI with/, 'the small Copy: the instructions alone');
+}));
+
+test('main view: the page address without its query goes to /v1/llms; docs on another host show their llms.txt there', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ docs: { found: true, root: `https://${SUB}`, verdict: 'yes' } }, { url: `https://${SUB}/llms.txt` }) } } }, async () => {
   const p = await openPopup(`${PAGE}?tab=js&utm_source=x#install`, { local: { popupView: 'main' } });
   await p.ready;
   assert.deepEqual(gets('/v1/llms')[0].query, { url: PAGE });
-  assert.equal(main(p).text, `Docs at ${SUB} ↗`);
-  assert.equal(p.$('llms-pill-text').querySelector('a').getAttribute('href'), `https://${SUB}`);
-  assert.equal(p.$('llms-pill').getAttribute('aria-label'), `The docs for ${SITE} are at ${SUB}`);
+  assert.equal(main(p).field, `${SUB}/llms.txt`);
 }));
 
-test('main view, an llms.txt prepared by scoop.md and ready: "llms.txt by scoop.md · ready"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ prompt: 'Example docs for agents (llms.txt prepared by scoop.md): https://scoop.md/docs.example.com/llms.txt — read it first, then fetch only the pages you need.' }, { source: 'scoop', url: 'https://scoop.md/docs.example.com/llms.txt' }) } } }, async () => {
+test('main view, an llms.txt prepared by scoop.md: the "by scoop.md" badge', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ prompt: 'Example docs for agents (llms.txt prepared by scoop.md): https://scoop.md/docs.example.com/llms.txt — read it first, then fetch only the pages you need.' }, { source: 'scoop', url: 'https://scoop.md/docs.example.com/llms.txt' }) } } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
   assert.equal(p.clipboard.text, 'Example docs for agents (llms.txt prepared by scoop.md): https://scoop.md/docs.example.com/llms.txt — read it first, then fetch only the pages you need.');
-  assert.equal(main(p).meta, 'llms.txt by scoop.md · ready');
+  assert.equal(main(p).badge, true);
+  assert.equal(main(p).field, 'scoop.md/docs.example.com/llms.txt');
   assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['scoop']);
 }));
 
-test('main view, preparing: copied at once, "Preparing llms.txt…", then asked again until ready', () => withMock({ sites: { [SITE]: { llmsApi: [
+test('main view, preparing: copied at once, "Preparing…", then asked again until ready', () => withMock({ sites: { [SITE]: { llmsApi: [
   llmsAnswer({ retryAfterMs: 20, prompt: 'P1' }, { source: 'scoop', status: 'preparing', url: 'https://scoop.md/docs.example.com/llms.txt' }),
   llmsAnswer({ retryAfterMs: 20, prompt: 'P1' }, { source: 'scoop', status: 'preparing', url: 'https://scoop.md/docs.example.com/llms.txt' }),
-  llmsAnswer({ prompt: 'P2' }, { source: 'scoop', status: 'ready', url: 'https://scoop.md/docs.example.com/llms.txt' }),
+  llmsAnswer({ prompt: 'P2' }, { source: 'scoop', status: 'ready', url: 'https://scoop.md/docs.example.com/llms.txt', pages: 230 }),
 ] } } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
   assert.equal(p.clipboard.text, 'P1', 'the URL already works: copied at once');
-  assert.equal(main(p).meta, 'Preparing llms.txt…');
-  await waitFor(() => main(p).meta === 'llms.txt by scoop.md · ready', 4000);
+  assert.equal(main(p).meta, 'Preparing…');
+  await waitFor(() => main(p).meta === '230 pages · checked today', 4000);
   assert.equal(gets('/v1/llms').length, 3);
   await p.$('copy-llms').onclick();
   assert.equal(p.clipboard.text, 'P2', 'the latest prompt');
 }));
 
-test('main view, not docs: "✕ Not a docs site", no button, nothing copied, the toolbar learns it', () => withMock({ sites: { [SITE]: {} } }, async () => {
+test('main view, not a developer site: one line, nothing else, nothing copied; the toolbar learns it', () => withMock({ sites: { [SITE]: {} } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
-  assert.deepEqual(main(p), { pill: 'no', text: 'Not a docs site', meta: null, button: null });
+  assert.deepEqual(main(p), { field: null, meta: null, badge: false, agent: null, button: null, notDev: "This isn't a developer website. scoop.md is for developer docs." });
+  assert.equal(p.$('advanced-open').hidden, true, 'nothing else');
   assert.equal(p.clipboard.text, null);
   assert.deepEqual(stages(), ['loading', 'content'], 'no copied moment');
   assert.deepEqual(queued(p.local, 'llms_copy'), []);
@@ -1430,8 +1451,8 @@ test('main view, the library unreachable: the site’s own verified llms.txt giv
   const p = await openPopup(`https://${SUB}/guide`, { local: { popupView: 'main', devLibraryUrl: 'http://localhost:9/v1' } });
   await p.ready;
   assert.equal(p.clipboard.text, 'Example docs for agents: https://docs.example.org/llms.txt — read it first, then fetch only the pages you need.');
-  assert.equal(main(p).text, SUB);
-  assert.match(main(p).meta, /^llms\.txt · 1 pages · checked today$/);
+  assert.equal(main(p).field, `${SUB}/llms.txt`);
+  assert.equal(main(p).meta, '1 page · checked today');
   assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['fallback']);
   assert.equal(p.local.docsVerdicts, undefined, 'a local find is not a verdict');
 }));
@@ -1442,7 +1463,7 @@ test('main view, the library unreachable and no llms.txt here: "Couldn’t reach
   assert.equal(p.$('llms-status').textContent, "Couldn't reach scoop.md");
   assert.equal(p.$('llms-retry').hidden, false);
   assert.equal(p.$('copy-llms').hidden, true);
-  assert.equal(p.$('llms-pill').hidden, true);
+  assert.equal(p.$('llms-block').hidden, true);
   assert.equal(p.clipboard.text, null);
 }));
 
@@ -1469,5 +1490,6 @@ test('0.6.0: the version, the main button wording, and no paywall words', () => 
   assert.equal(MANIFEST.version, '0.6.0');
   const html = read('../extension/popup.html');
   assert.match(html, /<span id="copy-llms-label">Copy llms\.txt<\/span>/);
+  assert.match(html, /This isn't a developer website\. scoop\.md is for developer docs\./);
   assert.match(html, /Advanced ›/);
 });
