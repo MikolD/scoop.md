@@ -1367,6 +1367,9 @@ test('main view, the site’s own llms.txt: the pill, one meta line, the prompt 
   await p.ready;
   assert.equal(p.clipboard.text, PROMPT, 'the exact prompt');
   assert.deepEqual(main(p), { pill: 'yes', text: SITE, meta: 'llms.txt · 412 pages · checked today', button: 'Copied ✓' });
+  assert.equal(p.$('llms-status').textContent, '', 'the button says it');
+  await sleep(80);
+  assert.equal(p.$('announce').textContent, `${SITE} has an llms.txt. Copied to your clipboard.`);
   assert.equal(p.$('llms-meta').querySelector('a').getAttribute('href'), `https://${SITE}/llms.txt`);
   assert.deepEqual(stages(), ['loading', 'copied', 'content']);
   assert.equal(p.$('main').hidden, false);

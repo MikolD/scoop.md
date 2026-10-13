@@ -232,7 +232,8 @@ const ANNOUNCE_DELAY_MS = 50;
 function reveal() {
   if (view === 'main') {
     setStage('content');
-    announce(`${$('llms-pill').getAttribute('aria-label')}. ${$('llms-status').textContent}`.trim());
+    announce(`${$('llms-pill').getAttribute('aria-label')}. ${llmsCopiedNow ? 'Copied to your clipboard.' : $('llms-status').textContent}`.trim());
+    llmsCopiedNow = false;
     if (!$('copy-llms').hidden) $('copy-llms').focus();
     return;
   }
@@ -1070,6 +1071,7 @@ $('report').onsubmit = (e) => { e.preventDefault(); return report($('reason').va
 // library unreachable or slow (5 s): the site's own llms.txt, if verified
 // here, gives the same prompt; otherwise "Couldn't reach scoop.md" and Retry.
 let llmsPrompt = '';
+let llmsCopiedNow = false;
 let llmsSource = null;
 let llmsPoll = null;
 let mainStarted = false;
@@ -1108,7 +1110,9 @@ async function showLlms(data, { fallback, privateHost }) {
   setLlms({ state: 'yes', data });
   const ok = await writeClipboard(llmsPrompt);
   if (ok && !privateHost) track('llms_copy', { site: siteKey(tab.url), source: llmsSource, trigger: 'auto' });
-  $('llms-status').textContent = ok ? 'Copied to your clipboard.' : 'Press Copy llms.txt to put it on your clipboard.';
+  // Success shows on the button ("Copied ✓") and is announced; the line is for problems.
+  $('llms-status').textContent = ok ? '' : 'Press Copy llms.txt to put it on your clipboard.';
+  llmsCopiedNow = ok;
   await revealAfterCopy(ok);
   if (llms.status === 'preparing' && !fallback) pollPreparing(data.retryAfterMs, 0);
 }
@@ -1213,8 +1217,9 @@ function flashLlmsCopied() {
 $('copy-llms').onclick = async () => {
   if (!llmsPrompt) return;
   const ok = await writeClipboard(llmsPrompt);
-  $('llms-status').textContent = ok ? 'Copied to your clipboard.' : "Couldn't copy. Try again.";
+  $('llms-status').textContent = ok ? '' : "Couldn't copy. Try again.";
   if (!ok) return;
+  announce('Copied to your clipboard.');
   flashLlmsCopied();
   if (!isPrivateHost(new URL(tab.url).hostname)) track('llms_copy', { site: siteKey(tab.url), source: llmsSource, trigger: 'button' });
 };
