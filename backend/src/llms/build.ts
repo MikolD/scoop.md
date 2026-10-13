@@ -83,10 +83,14 @@ export const humanize = (slug: string) => {
 // Path segments that name a version of the docs, not a section: 29.7, v2, next, latest, stable.
 export const VERSION_SEGMENT = /^(v?\d+(\.\d+)*(\.x)?|next|latest|stable|current|dev|main|master)$/i;
 
-// The path segments of a URL below the docs root, without version segments.
+// A locale first below the root (Read the Docs' /en/stable/…).
+const LOCALE_SEGMENT = /^[a-z]{2}(-[a-z]{2,4})?$/i;
+
+// The path segments of a URL below the docs root, without version and locale segments.
 const below = (url: string, root: string) => {
   const rootPath = new URL(root).pathname.replace(/\/+$/, '');
-  return new URL(url).pathname.slice(rootPath.length).split('/').filter(Boolean).filter((seg) => !VERSION_SEGMENT.test(seg));
+  return new URL(url).pathname.slice(rootPath.length).split('/').filter(Boolean)
+    .filter((seg, i) => !VERSION_SEGMENT.test(seg) && !(i === 0 && LOCALE_SEGMENT.test(seg)));
 };
 
 // The section a URL belongs to: its first path segment below the docs root.

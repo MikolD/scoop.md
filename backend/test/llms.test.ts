@@ -77,6 +77,7 @@ test('helpers: names, sections, titles, versions', () => {
   assert.equal(sectionOf('https://x.dev/docs/guides/routing', 'https://x.dev/docs'), 'Guides');
   assert.equal(sectionOf('https://x.dev/docs/intro', 'https://x.dev/docs'), 'Overview');
   assert.equal(sectionOf('https://x.dev/docs/30.4/guides/a', 'https://x.dev/docs'), 'Guides', 'a version is not a section');
+  assert.equal(sectionOf('https://docs.celery.example/en/stable/getting-started/intro.html', 'https://docs.celery.example'), 'Getting started', 'nor a locale');
   assert.equal(linkTitle('next', 'https://x.dev/docs/routing'), 'Routing');
   assert.equal(linkTitle('Routing &amp; middleware ¶', 'https://x.dev/r'), 'Routing & middleware');
   const v = ['https://x.dev/docs/29.7/a', 'https://x.dev/docs/30.4/a', 'https://x.dev/docs/30.4/b', 'https://x.dev/docs/next/a'].map((url) => ({ url }));
