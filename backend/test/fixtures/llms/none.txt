@@ -1,0 +1,8 @@
+# Plain Docs
+
+> A library.
+
+## Docs
+
+- [Guide](https://plain.example/guide.md): The guide
+- [API](https://plain.example/api.md): The API

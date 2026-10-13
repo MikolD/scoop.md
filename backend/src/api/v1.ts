@@ -33,7 +33,7 @@ import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed, normalizeQuery } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
 import type { QuickSiteCache } from '../search/quick.ts';
-import { listRegistry, resolveLlms, serveLlms } from '../llms/registry.ts';
+import { listRegistry, llmsFlags, resolveLlms, serveLlms } from '../llms/registry.ts';
 import type { LlmsDeps } from '../llms/registry.ts';
 import { denylistHosts } from '../crawl/gate.ts';
 import type { QuickDiscovery } from '../search/quick.ts';
@@ -543,7 +543,9 @@ const routes: Route[] = [
             `SELECT site FROM site_profiles WHERE status = 'not_devtool' AND COALESCE(source, 'admin') != 'requested' ORDER BY site`,
           ).all<{ site: string }>());
         const notDocs = [...new Set([...rejected.map((r) => r.site), ...denylistHosts()])].sort();
-        body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })), notDocs });
+        // The badge: 1 when a docs site has an llms.txt, 2 with instructions for agents too.
+        const llms = await llmsFlags(env.DB);
+        body = JSON.stringify({ sites: results.map((r) => ({ site: r.site, pages: r.pages })), notDocs, llms });
         etag = `"${(await sha256Hex(body)).slice(0, 32)}"`;
         await cache?.put(key, new Response(body, { headers: { etag, 'cache-control': `public, max-age=${SITES_INDEX_SECONDS}` } })).catch(() => {});
       }

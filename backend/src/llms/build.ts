@@ -19,6 +19,7 @@ import { ALLOW_ALL, DISALLOW_ALL } from '../crawl/robots.ts';
 import { skipLowValue } from '../crawl/skip.ts';
 import { checkLinks, linkStates, normalizeLink, saveLinks } from '../links/links.ts';
 import { decodeHTML } from 'entities';
+import { firstParagraph } from '../index/jevclassify.ts';
 
 export interface LlmsLink {
   title: string;
@@ -45,6 +46,8 @@ export interface BuildOptions {
   fetchImpl?: FetchImpl;
   allowLocalhost?: boolean;
   db?: D1Database;
+  // Stored page Markdown (pages/<hash>.md), for the full stage's descriptions.
+  bucket?: R2Bucket;
   // Wall-clock budget for the whole build, ms.
   budgetMs?: number;
   maxLinks?: number;
@@ -321,6 +324,16 @@ export function groupBySection(links: LlmsLink[], root: string): LlmsSection[] {
 
 // ---- Full stage -------------------------------------------------------------------------------
 
+// A one-line description in the page's own words: its first sentence,
+// trimmed to about 100 characters. Never a summary about the page ("This
+// page serves as…").
+export function shortDescription(text: string | null | undefined): string | null {
+  const s = (text ?? '').replace(/\s+/g, ' ').trim();
+  if (!s || /^(this|the) (page|document|section|article|guide|index)\b/i.test(s)) return null;
+  const first = /^(.{20,}?[.!?])(\s|$)/.exec(s)?.[1] ?? s;
+  return first.length <= 100 ? first : `${first.slice(0, 99).replace(/\s+\S*$/, '')}…`;
+}
+
 const SLOT_SECTION: Record<string, string> = {
   install: 'Getting started', quickstart: 'Getting started', auth: 'Getting started',
   concepts: 'Guides', guide: 'Guides', examples: 'Guides', migration: 'Guides',
@@ -337,18 +350,29 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
   const rootPath = r0.pathname.replace(/\/+$/, '');
   const { results } = await db
     .prepare(
-      `SELECT pi.url AS url, pi.title AS title, pi.summary AS summary, pi.slot AS slot, p.source_url AS source_url, p.source_kind AS source_kind
+      `SELECT pi.url AS url, pi.title AS title, pi.summary AS summary, pi.slot AS slot, pi.content_hash AS content_hash,
+              p.source_url AS source_url, p.source_kind AS source_kind
        FROM page_index pi LEFT JOIN pages p ON p.url = pi.url
        WHERE pi.site = ? ORDER BY pi.url LIMIT 2000`,
     )
     .bind(host)
-    .all<{ url: string; title: string | null; summary: string | null; slot: string | null; source_url: string | null; source_kind: string | null }>();
+    .all<{ url: string; title: string | null; summary: string | null; slot: string | null; content_hash: string; source_url: string | null; source_kind: string | null }>();
   const rows = results.filter((r) => underRoot(r.url, rootPath || '/') && !/\/llms(-full)?\.txt$/i.test(r.url));
   if (!rows.length) return null;
-  let links: (LlmsLink & { slot: string })[] = rows.map((r) => ({
+  // Descriptions from the stored page itself (its first paragraph's first
+  // sentence); a stored summary only when it reads like the page's own words.
+  const described = await Promise.all(rows.slice(0, o.maxLinks ?? 1000).map(async (r) => {
+    let description: string | null = null;
+    if (o.bucket) {
+      const obj = await o.bucket.get(`pages/${r.content_hash}.md`).catch(() => null);
+      if (obj) description = shortDescription(firstParagraph(await obj.text()));
+    }
+    return description ?? shortDescription(r.summary);
+  }));
+  let links: (LlmsLink & { slot: string })[] = rows.slice(0, o.maxLinks ?? 1000).map((r, i) => ({
     title: r.title || humanize(new URL(r.url).pathname.split('/').filter(Boolean).pop() ?? '') || r.url,
     url: r.source_kind === 'page-md' && r.source_url && /\.md$/i.test(new URL(r.source_url).pathname) ? r.source_url : r.url,
-    description: r.summary ?? undefined,
+    description: described[i] ?? undefined,
     slot: r.slot ?? 'other',
   }));
   links = links.slice(0, o.maxLinks ?? 1000);

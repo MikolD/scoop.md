@@ -11,7 +11,7 @@
 import { askJev } from '../lib/jev.ts';
 import type { JevOptions, JevQuestion } from '../lib/jev.ts';
 import { unsafePassage } from '../agents/instructions.ts';
-import { checkLinks, extractLinks, linkStates, normalizeLink, saveLinks } from '../links/links.ts';
+import { checkLinks, extractLinks, linkStates, normalizeLink, rewriteLinks, saveLinks } from '../links/links.ts';
 import { crawlFetch, HostLimiter } from '../crawl/polite.ts';
 import type { FetchImpl } from '../crawl/polite.ts';
 import { looksLikeText } from '../crawl/discover.ts';
@@ -101,7 +101,10 @@ async function keepable(lines: Line[], sourceUrl: string, o: ExcerptOptions): Pr
     if (o.db) await saveLinks(o.db, checked, 'check').catch(() => {});
     for (const r of checked) states.set(r.url, r.ok ? 'ok' : 'bad');
   }
-  return safe.filter((l) => extractLinks(l.text, sourceUrl).every((u) => states.get(normalizeLink(u) ?? u) === 'ok'));
+  // Every link in a kept line exists; each is written absolute (/docs/x.md → https://host/docs/x.md).
+  return safe
+    .filter((l) => extractLinks(l.text, sourceUrl).every((u) => states.get(normalizeLink(u) ?? u) === 'ok'))
+    .map((l) => ({ ...l, text: rewriteLinks(l.text, sourceUrl, states).text }));
 }
 
 const join = (lines: Line[]) => lines.map((l) => l.text).join('\n').replace(/\n{3,}/g, '\n\n').trim();

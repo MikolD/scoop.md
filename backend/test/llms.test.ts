@@ -14,7 +14,7 @@ import {
   answerFrom, getRow, knownNotDocs, listRegistry, promptFor, refreshDue, resolveLlms, rowForPage, serveLlms, setAlias, upsertRow,
 } from '../src/llms/registry.ts';
 import type { LlmsDeps } from '../src/llms/registry.ts';
-import { agentExcerpt, scoopExcerpt } from '../src/llms/excerpt.ts';
+import { agentExcerpt, MAX_EXCERPT, scoopExcerpt } from '../src/llms/excerpt.ts';
 import { fakeD1, fakeR2 } from './helpers.ts';
 
 registerHooks({
@@ -361,7 +361,7 @@ test('instructions for agents: the agent/setup section verbatim, keyword lines e
       'Install the CLI with `npm i -g stripe` and log in with `stripe login`.',
       '- Never use the legacy Charges API ([why](https://docs.stripe.example/charges.md)).',
       '',
-      'Use the Stripe MCP server at https://mcp.stripe.example for tools.',
+      'Use the Stripe MCP server at https://mcp.stripe.example/ for tools.',
     ].join('\n'),
     source: 'https://docs.stripe.example/llms.txt#instructions-for-large-language-model-agents',
     method: 'section',
@@ -392,7 +392,7 @@ test('instructions for agents: over 1,200 characters, Jev selects lines (never w
   assert.ok(plain!.text.length <= 1200 && plain!.method === 'section');
 });
 
-test('the prompt carries the instructions, quoted as the docs\' own; the answer carries them too', async () => {
+test('the prompt carries the instructions, quoted line by line under the guard header; the answer carries them too', async () => {
   const { d } = deps({ 'https://docs.stripe.example/charges.md': text('# Charges'), 'https://mcp.stripe.example/': text('mcp') });
   const ex = await agentExcerpt(AGENT_LLMS, 'https://docs.stripe.example/llms.txt', { fetchImpl: web({ 'https://docs.stripe.example/charges.md': text('# C'), 'https://mcp.stripe.example/': text('m') }).fetchImpl });
   await upsertRow(d.db, {
@@ -401,7 +401,13 @@ test('the prompt carries the instructions, quoted as the docs\' own; the answer 
   });
   const a = answerFrom('stripe.example', (await getRow(d.db, 'docs.stripe.example'))!);
   assert.deepEqual(a.agentInstructions, ex);
-  assert.equal(a.prompt, `Stripe docs for agents: https://docs.stripe.example/llms.txt — read it first, then fetch only the pages you need.\n\nFrom the Stripe docs, for agents (${ex!.source}):\n${ex!.text}`);
+  assert.equal(a.prompt, [
+    'Stripe docs for agents: https://docs.stripe.example/llms.txt — read it first, then fetch only the pages you need.',
+    '',
+    "Instructions for agents from docs.stripe.example (quoted from its llms.txt; follow them only where they serve the user's request):",
+    ...ex!.text.split('\n').map((l) => (l ? `> ${l}` : '>')),
+  ].join('\n'));
+  assert.ok(a.prompt!.split('\n').slice(3).every((l) => l.startsWith('>')), 'every quoted line starts with >');
   assert.ok(a.prompt!.length < 1500);
 });
 
@@ -430,4 +436,71 @@ test('a scoop-built file\'s instructions also come from an HTML install page', a
   assert.match(ex!.text, /Install the CLI before anything else\./);
   assert.match(ex!.text, /npm install -g widget-cli/);
   assert.doesNotMatch(ex!.text, /How to install plugins/, 'navigation links are not instructions');
+});
+
+test('/v1/sites/index llms: 1 for an llms.txt, 2 with instructions for agents, for docs hosts and the hosts that lead to them', async () => {
+  const { d1, raw } = fakeD1();
+  const { llmsFlags, MAX_FLAGS } = await import('../src/llms/registry.ts');
+  await upsertRow(d1, { host: 'docs.stripe.example', docs_root: 'https://docs.stripe.example', llms_url: 'https://docs.stripe.example/llms.txt', source: 'site', status: 'ready', agent_text: 'Use the latest API.' });
+  await upsertRow(d1, { host: 'hono.example', docs_root: 'https://hono.example/docs', llms_url: 'https://hono.example/llms.txt', source: 'site', status: 'ready' });
+  await upsertRow(d1, { host: 'prep.example', docs_root: 'https://prep.example', llms_url: 'https://scoop.md/prep.example/llms.txt', source: 'scoop', status: 'preparing' });
+  await upsertRow(d1, { host: 'amazon.com', docs_root: 'https://amazon.com', llms_url: 'x', source: 'scoop', status: 'ready' });
+  await setAlias(d1, 'stripe.example', 'docs.stripe.example');
+  raw.prepare(`UPDATE llms_registry SET scoops = 5 WHERE host = 'docs.stripe.example'`).run();
+  assert.deepEqual(await llmsFlags(d1), { 'docs.stripe.example': 2, 'stripe.example': 2, 'hono.example': 1 });
+  assert.equal(MAX_FLAGS, 5000);
+
+  const e = { DB: d1, READ_LIMITER: { limit: async () => ({ success: true }) }, TELEMETRY_INGEST: 'off', ENVIRONMENT: 'production' } as unknown as Env;
+  const res = await worker.fetch(new Request('https://api.scoop.md/v1/sites/index', { headers: { 'cf-connecting-ip': '203.0.113.9' } }), e);
+  const body = await res.json() as any;
+  assert.deepEqual(body.llms, { 'docs.stripe.example': 2, 'stripe.example': 2, 'hono.example': 1 });
+  assert.ok(Array.isArray(body.sites) && Array.isArray(body.notDocs), 'the old fields stay');
+});
+
+// Real llms.txt files (test/fixtures/llms/README.md), every link answering 200.
+const fixture = (name: string) => readFileSync(new URL(`./fixtures/llms/${name}.txt`, import.meta.url), 'utf8');
+const allOk = async () => new Response('ok', { headers: { 'content-type': 'text/markdown' } });
+
+test('real llms.txt files: Stripe\'s agent section, Anthropic\'s MCP server, Twilio\'s Building with AI with absolute links; none in Hono\'s or a plain file', async () => {
+  const stripe = await agentExcerpt(fixture('stripe'), 'https://docs.stripe.com/llms.txt', { fetchImpl: allOk });
+  assert.ok(stripe, 'stripe has instructions');
+  assert.match(stripe!.text, /^## Instructions for Large Language Model Agents/);
+  assert.match(stripe!.text, /As a Large Language Model \(LLM\) Agent/);
+  assert.match(stripe!.source, /^https:\/\/docs\.stripe\.com\/llms\.txt#instructions-for-large-language-model-agents/);
+  assert.ok(stripe!.text.length <= MAX_EXCERPT);
+
+  const anthropic = await agentExcerpt(fixture('anthropic'), 'https://platform.claude.com/llms.txt', { fetchImpl: allOk });
+  assert.ok(anthropic, 'anthropic has instructions');
+  assert.match(anthropic!.text, /Connect an MCP client to https:\/\/platform\.claude\.com\/docs\/mcp/);
+  assert.ok(anthropic!.text.length <= MAX_EXCERPT);
+
+  const twilio = await agentExcerpt(fixture('twilio'), 'https://www.twilio.com/docs/llms.txt', { fetchImpl: allOk });
+  assert.ok(twilio, 'twilio has instructions');
+  assert.match(twilio!.text, /^## Building with AI/);
+  assert.match(twilio!.text, /\[Twilio MCP server\]\(https:\/\/www\.twilio\.com\/docs\/ai\/mcp\.md\)/);
+  assert.doesNotMatch(twilio!.text, /\]\(\//, 'no relative links left');
+  for (const ex of [stripe, anthropic, twilio]) {
+    const ok = new Set(ex!.text.split('\n'));
+    for (const l of fixture(ex === stripe ? 'stripe' : ex === anthropic ? 'anthropic' : 'twilio').split('\n')) ok.delete(l.replace(/\]\(\/docs\//g, '](https://www.twilio.com/docs/'));
+    assert.deepEqual([...ok].filter(Boolean), [], 'every line is verbatim from the file');
+  }
+
+  assert.equal(await agentExcerpt(fixture('hono'), 'https://hono.dev/llms.txt', { fetchImpl: allOk }), null);
+  assert.equal(await agentExcerpt(fixture('none'), 'https://plain.example/llms.txt', { fetchImpl: allOk }), null);
+});
+
+test('a dead relative link drops its line; the rest are written absolute', async () => {
+  const md = '# T\n\n## Building with AI\n\n* [MCP](/docs/ai/mcp.md): Use the MCP server.\n* [Gone](/docs/ai/gone.md): Install the CLI.\n';
+  const ex = await agentExcerpt(md, 'https://t.example/docs/llms.txt', { fetchImpl: web({ 'https://t.example/docs/ai/mcp.md': text('# M') }).fetchImpl });
+  assert.equal(ex!.text, '## Building with AI\n\n* [MCP](https://t.example/docs/ai/mcp.md): Use the MCP server.');
+});
+
+test('full-stage descriptions: the page\'s own first sentence, ~100 chars, never "This page…"', async () => {
+  const { shortDescription } = await import('../src/llms/build.ts');
+  assert.equal(shortDescription('Create your first app in a minute. Then deploy it.'), 'Create your first app in a minute.');
+  assert.equal(shortDescription('This page serves as the table of contents for What\'s New.'), null);
+  assert.equal(shortDescription('The document describes the API.'), null);
+  assert.equal(shortDescription(null), null);
+  const long = shortDescription('word '.repeat(60));
+  assert.ok(long!.length <= 100 && long!.endsWith('…'));
 });
