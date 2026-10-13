@@ -14,6 +14,7 @@ import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { processLinkQueue, pruneLiveLinks } from './links/links.ts';
 import { refreshDue } from './llms/registry.ts';
+import { llmsBaseDeps } from './llms/deps.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import { handleTelemetryBatch, pruneTelemetry } from './telemetry/consumer.ts';
 import { API_ROUTES, recordApiUsage } from './telemetry/ingest.ts';
@@ -110,7 +111,7 @@ export default {
       // llms.txt registry: a day old (six hours for sites scooped often) is checked again.
       console.log(JSON.stringify({
         cron: 'llms-refresh',
-        refreshed: await refreshDue({ db: env.DB, bucket: env.SKILLS, allowLocalhost, publicBase: env.LLMS_PUBLIC_BASE || undefined }, 10),
+        refreshed: await refreshDue(llmsBaseDeps(env)),
       }));
       return;
     }

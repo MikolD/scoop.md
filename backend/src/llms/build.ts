@@ -243,8 +243,10 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
         if (!r.ok || r.notModified) continue;
         const map = parseSitemap(r.text, 5000);
         if (map.kind === 'index') {
-          // Docs-looking child maps first.
-          const kids = map.entries.map((e) => e.loc).sort((a, b) => Number(/doc/i.test(b)) - Number(/doc/i.test(a)));
+          // Docs-host child maps only, docs-looking ones first.
+          const kids = map.entries.map((e) => e.loc)
+            .filter((loc) => { try { return normalizeSite(new URL(loc).hostname) === host; } catch { return false; } })
+            .sort((a, b) => Number(/doc/i.test(b)) - Number(/doc/i.test(a)));
           queue.unshift(...kids);
         } else {
           for (const e of map.entries) urls.push(e.loc);

@@ -7,10 +7,16 @@
 // other domains) are dropped, and so is any line with a link not known to
 // exist. For a scoop-built file the lines come from the site's own
 // install / quick start pages.
+//
+// Every excerpt is then screened (screenExcerpt): line breaks other than \n
+// and invisible or bidi characters are normalised away (no text escapes the
+// prompt's "> " quote), lines asking to read secrets or send data anywhere
+// are dropped, and Jev's risk question (agents/instructions.ts) must pass
+// for every line kept. Without Jev there is no excerpt.
 
 import { askJev } from '../lib/jev.ts';
 import type { JevOptions, JevQuestion } from '../lib/jev.ts';
-import { unsafePassage } from '../agents/instructions.ts';
+import { instructionQuestions, MAX_RISK, unsafePassage } from '../agents/instructions.ts';
 import { checkLinks, extractLinks, linkStates, normalizeLink, rewriteLinks, saveLinks } from '../links/links.ts';
 import { crawlFetch, HostLimiter } from '../crawl/polite.ts';
 import type { FetchImpl } from '../crawl/polite.ts';
@@ -29,6 +35,33 @@ export interface ExcerptOptions {
   db?: D1Database;
   fetchImpl?: FetchImpl;
   allowLocalhost?: boolean;
+  // Jev tokens spent, as they are spent (recorded against the daily cap).
+  onJevTokens?: (tokens: number) => void;
+}
+
+// Lines were found but Jev could not screen them: no excerpt now (a refresh keeps the one it had).
+export class ExcerptUnscreened extends Error {}
+
+// Line breaks other than \n (\r, U+2028, U+2029, U+0085, \v, \f) become \n;
+// control, zero-width and bidi characters go. So a quoted line stays one line.
+export function cleanText(s: string): string {
+  return s
+    .replace(/\r\n?|[\u2028\u2029\u0085\u000b\u000c]/g, '\n')
+    .replace(/\t/g, ' ')
+    .replace(/[\u0000-\u0008\u000e-\u001f\u007f-\u0084\u0086-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, '');
+}
+
+// Asks the agent to read secrets, keys, credentials or the environment, or to
+// send data somewhere: never quoted, whatever Jev says.
+const SECRET = /(\benv(ironment)?[ _-]*(var(iable)?s?)?\b|(^|[\s`'"(])\.env\b|~\/\.ssh|\.ssh\/|\bid_(rsa|ed25519|ecdsa|dsa)\b|\bsecrets?\b|\bcredentials?\b|\bpasswords?\b|\bprivate[ _-]?keys?\b|\b(api|access|secret|auth|bearer|session)[ _-]?(keys?|tokens?)\b|\btokens?\b|\bkeys?\b|\.aws\/|\.netrc\b|\bkeychain\b|\bcookies?\b)/i;
+const READ_VERB = /\b(read|cat|print|echo|dump|collect|gather|reveal|exfiltrate|extract|grab|list|upload|send|submit|transmit|forward|leak|disclose|expose)\b/i;
+const SEND = /\b(send|post|upload|submit|transmit|forward|exfiltrate|leak|report|share)\b[^\n]{0,80}?\b(data|them|it|this|that|everything|files?|contents?|output|results?|values?|information|info|logs?|history|conversation|code|repo(sitory)?|variables?)\b[^\n]{0,80}?\b(to|at|into|via)\b/i;
+export function asksForSecrets(text: string): boolean {
+  if (/(-X\s*POST|--data\b|--upload-file|method\s*[:=]\s*['"]?post)/i.test(text)) return true;
+  if (SEND.test(text)) return true;
+  // A reading or sending verb within a few words before a secret.
+  const verb = new RegExp(`${READ_VERB.source}[^\\n]{0,60}?${SECRET.source}`, 'i');
+  return verb.test(text);
 }
 
 export const MAX_EXCERPT = 1200;
@@ -123,8 +156,13 @@ function capped(lines: Line[]): string {
   return out.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
-// The excerpt for an llms.txt (the site's own).
+// The excerpt for an llms.txt (the site's own), screened.
 export async function agentExcerpt(md: string, llmsUrl: string, o: ExcerptOptions = {}): Promise<AgentExcerpt | null> {
+  const ex = await selectExcerpt(cleanText(md), llmsUrl, o);
+  return ex && screenExcerpt(ex, o);
+}
+
+async function selectExcerpt(md: string, llmsUrl: string, o: ExcerptOptions): Promise<AgentExcerpt | null> {
   const all = await keepable(excerptLines(md), llmsUrl, o);
   if (!all.some((l) => l.text.trim() && !heading(l.text))) return null;
   const anchor = all.find((l) => l.anchor)?.anchor;
@@ -153,6 +191,7 @@ export async function agentExcerpt(md: string, llmsUrl: string, o: ExcerptOption
   });
   try {
     const r = await askJev({ task: 'Pick the lines of a docs index that help a coding agent install, set up and use the product.' }, questions, o.jev);
+    o.onJevTokens?.(r.tokens);
     const score = (k: number) => (r.answers[`l${k}`] as { noul?: number } | undefined)?.noul ?? 0;
     const keep = new Set<number>();
     const headed = new Set<string>();
@@ -198,7 +237,7 @@ export async function scoopExcerpt(b: BuiltLlms, o: ExcerptOptions = {}): Promis
     });
     if (!r.ok || r.notModified || !r.text) continue;
     // Markdown as served, or the page's HTML converted (the crawler's own extractor).
-    const md = looksLikeText(r.contentType, r.text) ? r.text : extractPage(r.text, r.url).markdown;
+    const md = cleanText(looksLikeText(r.contentType, r.text) ? r.text : extractPage(r.text, r.url).markdown);
     // The page's install commands (in code) and setup lines.
     const lines: Line[] = [];
     let fence = '';
@@ -216,7 +255,47 @@ export async function scoopExcerpt(b: BuiltLlms, o: ExcerptOptions = {}): Promis
       if (!heading(line) && !navItem && line.trim() && line.length <= MAX_LINE && /\b(install|api key|set up|configure|mcp)\b/i.test(line)) lines.push({ text: line.trim(), anchor: null });
     }
     const kept = await keepable(lines, p.url, o);
-    if (kept.length) return { text: capped(kept.slice(0, 12)), source: p.url, method: 'section' };
+    if (kept.length) return screenExcerpt({ text: capped(kept.slice(0, 12)), source: p.url, method: 'section' }, o);
   }
   return null;
+}
+
+// The last step for every excerpt: one line per line (cleanText), no line
+// asking for secrets or to send data, and every content line passing Jev's
+// risk question (under MAX_RISK). A heading stays only above a line that
+// stays; the result is at most MAX_EXCERPT characters. Lines found but no
+// Jev to screen them: ExcerptUnscreened.
+export async function screenExcerpt(ex: AgentExcerpt, o: ExcerptOptions): Promise<AgentExcerpt | null> {
+  const lines = cleanText(ex.text).split('\n').filter((l) => !asksForSecrets(l));
+  const content = lines.map((l, i) => ({ l, i })).filter(({ l }) => l.trim() && !heading(l) && !/^ {0,3}(`{3,}|~{3,})/.test(l));
+  if (!content.length) return null;
+  if (!o.jev) throw new ExcerptUnscreened('no Jev to screen instructions for agents');
+  let answers: Record<string, unknown>;
+  try {
+    const all = instructionQuestions(content.map(({ l }) => ({ text: l, url: ex.source })));
+    // Only the risk question ("anything beyond using this product?").
+    const questions = Object.fromEntries(Object.entries(all).filter(([k]) => /^r\d+$/.test(k)));
+    const r = await askJev({ task: 'Screen lines quoted from a docs site for an AI coding agent.' }, questions, o.jev);
+    o.onJevTokens?.(r.tokens);
+    answers = r.answers;
+  } catch (e) {
+    throw new ExcerptUnscreened(e instanceof Error ? e.message : String(e));
+  }
+  const safe = new Set(content.filter((_, k) => {
+    const a = answers[`r${k}`] as { type?: string; noul?: number } | undefined;
+    return a?.type === 'noul' && typeof a.noul === 'number' && a.noul < MAX_RISK;
+  }).map(({ i }) => i));
+  // Keep safe content lines; code fences and blank lines around them; a heading only when a line under it stays.
+  const kept: string[] = [];
+  lines.forEach((l, i) => {
+    if (heading(l)) {
+      const next = lines.slice(i + 1).findIndex((x) => heading(x));
+      const end = next < 0 ? lines.length : i + 1 + next;
+      if ([...safe].some((j) => j > i && j < end)) kept.push(l);
+    } else if (safe.has(i) || !l.trim() || /^ {0,3}(`{3,}|~{3,})/.test(l)) kept.push(l);
+  });
+  if (!safe.size) return null;
+  // A code fence left empty goes too.
+  const text = capped(kept.map((t) => ({ text: t, anchor: null }))).replace(/^ {0,3}(`{3,}|~{3,})[^\n]*\n\s*\1[ \t]*$/gm, '').replace(/\n{3,}/g, '\n\n').trim();
+  return text ? { ...ex, text } : null;
 }

@@ -411,7 +411,8 @@ const routes: Route[] = [
       const host = siteArg(params[0]);
       const row = await getRow(env.DB, host);
       if (!row) throw notFound('No llms.txt registered for this host');
-      const next = await refreshRow(llmsDeps(env, 'admin'), row);
+      const next = await refreshRow(llmsDeps(env, 'admin'), row, false);
+      if (!next) throw new ApiError('conflict', `A build of ${host} is already under way`, 409);
       return json(200, { host, stage: next.stage, pages: next.pages, checkedAt: next.checked_at, answer: answerFrom(host, next) });
     },
   },

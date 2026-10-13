@@ -27,6 +27,7 @@ import { checkRunLinks, normalizeLink, recordsFromFetch, saveLinks } from '../li
 import type { LinkRecord } from '../links/links.ts';
 import { findRunInstructions, instructionsAllowed } from '../agents/instructions.ts';
 import { rebuildFull } from '../llms/registry.ts';
+import { llmsBaseDeps } from '../llms/deps.ts';
 import { E2B_USD_PER_SECOND, E2BCrawler, e2bDailyCap, MAX_SANDBOX_SECONDS } from './e2b.ts';
 import { HostLimiter, intervalFor } from './polite.ts';
 import { presign, r2Endpoint } from './presign.ts';
@@ -336,7 +337,7 @@ export class CrawlSite extends WorkflowEntrypoint<Env, CrawlParams> {
       // stage, from the pages just indexed. Never fails the crawl.
       await step.do('llms', { retries: { limit: 1, delay: '10 seconds' }, timeout: '5 minutes' }, async () => {
         try {
-          const r = await rebuildFull({ db: env.DB, bucket: env.SKILLS, allowLocalhost: local, publicBase: env.LLMS_PUBLIC_BASE || undefined }, p.site);
+          const r = await rebuildFull(llmsBaseDeps(env), p.site);
           return r ? { pages: r.pages, stage: r.stage } : null;
         } catch (e) {
           console.error(JSON.stringify({ step: 'llms', site: p.site, error: e instanceof Error ? e.message : String(e) }));

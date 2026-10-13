@@ -34,6 +34,7 @@ import { cachedQueryEmbed, normalizeQuery } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
 import type { QuickSiteCache } from '../search/quick.ts';
 import { listRegistry, llmsFlags, resolveLlms, serveLlms } from '../llms/registry.ts';
+import { llmsBaseDeps } from '../llms/deps.ts';
 import type { LlmsDeps } from '../llms/registry.ts';
 import { denylistHosts } from '../crawl/gate.ts';
 import type { QuickDiscovery } from '../search/quick.ts';
@@ -244,30 +245,25 @@ function quickSiteCache(): QuickSiteCache | null {
 
 // /v1/llms: storage, the probe budget per host, Jev, and the crawl that makes a full llms.txt.
 export function llmsDeps(env: Env, ip: string, waitUntil?: (p: Promise<unknown>) => void): LlmsDeps {
+  const base = llmsBaseDeps(env);
   return {
-    db: env.DB,
-    bucket: env.SKILLS,
-    publicBase: env.LLMS_PUBLIC_BASE || undefined,
-    allowLocalhost: allowLocalhost(env),
+    ...base,
     waitUntil,
-    quick: {
-      jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
-      siteCache: quickSiteCache(),
-    },
+    quick: { ...base.quick, siteCache: quickSiteCache() },
     startCrawl: env.CRAWL_SITE && env.RATE_KEY ? (root, host) => llmsCrawl(env, ip, root, host) : undefined,
   };
 }
 
 // The full stage of a scoop-built llms.txt needs the site crawled: from its
 // docs root (so the gate judges the docs, not a marketing home page), at most
-// once a week per site, LLMS_CRAWLS_PER_IP a day per IP subject and
+// once a week per site (a rejected or failed run counts), LLMS_CRAWLS_PER_IP a day per IP subject and
 // LLMS_CRAWLS_DAILY_MAX a day overall. Past any of them the instant file stays.
 const LLMS_CRAWLS_PER_IP = 10;
 const LLMS_CRAWLS_DAILY_MAX = 100;
 async function llmsCrawl(env: Env, ip: string, root: string, host: string): Promise<void> {
   const week = new Date(Date.now() - 7 * 86_400_000).toISOString();
   const recent = await env.DB
-    .prepare(`SELECT 1 AS x FROM crawl_runs WHERE site = ? AND (status IN ('queued', 'running') OR (status = 'complete' AND started_at > ?)) LIMIT 1`)
+    .prepare(`SELECT 1 AS x FROM crawl_runs WHERE site = ? AND (status IN ('queued', 'running') OR (status IN ('complete', 'rejected', 'failed') AND started_at > ?)) LIMIT 1`)
     .bind(host, week)
     .first();
   if (recent) return;
@@ -662,7 +658,7 @@ const routes: Route[] = [
         throw err;
       }
       return new Response(r.body, {
-        headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-content-type-options': 'nosniff' },
+        headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'" },
       });
     },
   },
