@@ -129,9 +129,18 @@ export async function agentExcerpt(md: string, llmsUrl: string, o: ExcerptOption
   if (!all.some((l) => l.text.trim() && !heading(l.text))) return null;
   const anchor = all.find((l) => l.anchor)?.anchor;
   const source = anchor ? `${llmsUrl}#${anchor}` : llmsUrl;
-  if (join(all).length <= MAX_EXCERPT || !o.jev) return { text: capped(all), source, method: 'section' };
-  // Too much: Jev selects lines (never writes any), kept in file order.
-  const content = all.map((l, i) => ({ l, i })).filter(({ l }) => l.text.trim() && !heading(l.text)).slice(0, MAX_JEV_LINES);
+  if (join(all).length <= MAX_EXCERPT) return { text: capped(all), source, method: 'section' };
+  // Too much. The first section written for agents leads, whole (Twilio's
+  // "Building with AI", Anthropic's "MCP server"); Jev fills the room left
+  // with the other lines it rates highest (it selects lines, never writes
+  // any), in file order, each under its own section's heading. A first
+  // section too long to lead is itself what Jev selects from.
+  const first = anchor ? all.filter((l) => l.anchor === anchor) : [];
+  const lead = join(first).length <= MAX_EXCERPT - 100 ? first : [];
+  const rest = all.filter((l) => !lead.includes(l));
+  const room = MAX_EXCERPT - (lead.length ? join(lead).length + 2 : 0);
+  if (!o.jev) return { text: capped([...lead, ...rest]), source, method: 'section' };
+  const content = rest.map((l, i) => ({ l, i })).filter(({ l }) => l.text.trim() && !heading(l.text)).slice(0, MAX_JEV_LINES);
   const questions: Record<string, JevQuestion> = {};
   content.forEach(({ l }, k) => {
     questions[`l${k}`] = {
@@ -144,13 +153,32 @@ export async function agentExcerpt(md: string, llmsUrl: string, o: ExcerptOption
   });
   try {
     const r = await askJev({ task: 'Pick the lines of a docs index that help a coding agent install, set up and use the product.' }, questions, o.jev);
-    const keep = new Set(content.filter((_, k) => (r.answers[`l${k}`] as { noul?: number } | undefined)?.noul !== undefined && (r.answers[`l${k}`] as { noul: number }).noul >= KEEP_FROM).map(({ i }) => i));
-    const picked = all.filter((l, i) => keep.has(i) || (heading(l.text) && all.slice(i + 1).some((_, j) => keep.has(i + 1 + j))));
-    if (picked.some((l) => !heading(l.text))) return { text: capped(picked), source, method: 'jev' };
+    const score = (k: number) => (r.answers[`l${k}`] as { noul?: number } | undefined)?.noul ?? 0;
+    const keep = new Set<number>();
+    const headed = new Set<string>();
+    let size = 0;
+    for (const k of content.map((_, k) => k).filter((k) => score(k) >= KEEP_FROM).sort((x, y) => score(y) - score(x))) {
+      const { l, i } = content[k];
+      const h = l.anchor && !headed.has(l.anchor) ? rest.find((x) => x.anchor === l.anchor && heading(x.text)) : undefined;
+      const cost = l.text.length + 1 + (h ? h.text.length + 2 : 0);
+      if (size + cost > room) continue;
+      size += cost;
+      keep.add(i);
+      if (h) {
+        keep.add(rest.indexOf(h));
+        headed.add(l.anchor!);
+      }
+    }
+    const picked = rest.filter((_, i) => keep.has(i));
+    if (picked.some((l) => !heading(l.text))) {
+      const body = capped(picked.flatMap((l) => (heading(l.text) ? [{ ...l, text: '' }, l] : [l])));
+      const text = lead.length ? `${capped(lead)}\n\n${body}` : body;
+      return { text, source, method: 'jev' };
+    }
   } catch {
     // Jev unavailable: the first lines, as found.
   }
-  return { text: capped(all), source, method: 'section' };
+  return { text: capped([...lead, ...rest]), source, method: 'section' };
 }
 
 const INSTALL_PAGE = /(install|quick-?start|getting-started|setup|set-up|get-started|introduction|intro)/i;

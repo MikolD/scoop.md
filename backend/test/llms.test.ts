@@ -504,3 +504,24 @@ test('full-stage descriptions: the page\'s own first sentence, ~100 chars, never
   const long = shortDescription('word '.repeat(60));
   assert.ok(long!.length <= 100 && long!.endsWith('…'));
 });
+
+test('over the cap: the first agent section leads whole; Jev fills the rest by score, each pick under its own heading', async () => {
+  const md = [
+    '# Big', '', '## Building with AI', '', '* [MCP server](https://big.example/ai/mcp.md): Connect coding agents with the MCP server.', '', '## Accounts', '',
+    ...Array.from({ length: 14 }, (_, i) => `* [Key ${i}](https://big.example/keys/${i}.md): Create API keys for project ${i} in the console, then store them safely.`),
+    '', '## CLI', '', '* [Install the CLI](https://big.example/cli/install.md): Install the CLI with npm i -g big.',
+  ].join('\n');
+  const jevFetch = async (_u: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    const answers = Object.fromEntries(Object.entries(body.questions as Record<string, any>).map(([id, q]) => [id, { type: 'noul', noul: /Install the CLI/.test(q.instructions.line) ? 0.95 : /Key 4\]/.test(q.instructions.line) ? 0.8 : 0.1 }]));
+    return Response.json({ model: 'jev-1.13.0', answers, usage: { input_tokens: 1, output_tokens: 1 } });
+  };
+  const ex = await agentExcerpt(md, 'https://big.example/llms.txt', { jev: { apiKey: 'k', fetchImpl: jevFetch }, fetchImpl: allOk });
+  assert.equal(ex?.method, 'jev');
+  assert.equal(ex?.text, [
+    '## Building with AI', '', '* [MCP server](https://big.example/ai/mcp.md): Connect coding agents with the MCP server.', '',
+    '* [Key 4](https://big.example/keys/4.md): Create API keys for project 4 in the console, then store them safely.',
+    '', '## CLI', '* [Install the CLI](https://big.example/cli/install.md): Install the CLI with npm i -g big.',
+  ].join('\n'));
+  assert.ok(ex!.text.length <= MAX_EXCERPT);
+});
