@@ -64,6 +64,8 @@ const PAGE_CAP = 1_000_000;
 const TWIN_SAMPLE = 3;
 // Fewer links than this under a docs path: the whole host is used.
 const MIN_SCOPED = 5;
+// Fewer links than this from navigation and sitemap: every link on the docs root is used too.
+const MIN_INDEX = 20;
 // A host's writing, left out when the whole host is used.
 const WRITING = /^\/(blog|essays?|posts?|news|articles|press|podcasts?|stories|newsletter|careers|jobs)(\/|$)/i;
 // The full stage's limit (crawl entries, then the instant stage's others).
@@ -117,8 +119,9 @@ export function versionOf(url: string, root: string): string | null {
   return new URL(url).pathname.slice(rootPath.length).split('/').filter(Boolean).find((seg) => VERSION_SEGMENT.test(seg)) ?? null;
 }
 
-// One version of versioned docs: pages outside any version, else the
-// unversioned alias (latest, stable, current), else the highest number.
+// One version of versioned docs, among those with at least half the pages
+// of the largest: pages outside any version, else the alias (latest,
+// stable, current), else the highest number.
 export function oneVersion<T extends { url: string }>(links: T[], root: string): T[] {
   const versions = new Map<string | null, T[]>();
   for (const l of links) {
@@ -126,7 +129,10 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
     versions.set(v, [...(versions.get(v) ?? []), l]);
   }
   if (versions.size <= 1) return links;
-  const keys = [...versions.keys()];
+  // Only versions with at least half the pages of the largest one count
+  // (docs.python.org's sitemap lists /3.11/ … /3.15/ once each; its pages are under /3/).
+  const most = Math.max(...[...versions.values()].map((v) => v.length));
+  const keys = [...versions.keys()].filter((k) => versions.get(k)!.length * 2 >= most);
   // Of latest/stable/current, the one with the most pages (Celery's /en/latest/ is one page, /en/stable/ the docs).
   const alias = keys.filter((k) => k && /^(latest|stable|current)$/i.test(k)).sort((a, b) => versions.get(b)!.length - versions.get(a)!.length)[0];
   const numbered = keys.filter((k): k is string => k !== null && /\d/.test(k)).sort((a, b) => {
@@ -135,7 +141,7 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
     for (let i = 0; i < Math.max(pa.length, pb.length); i++) if ((pb[i] ?? 0) !== (pa[i] ?? 0)) return (pb[i] ?? 0) - (pa[i] ?? 0);
     return 0;
   });
-  const keep = versions.has(null) && (versions.get(null)!.length >= links.length / 3) ? null : alias ?? numbered[0] ?? null;
+  const keep = keys.includes(null) && (versions.get(null)!.length >= links.length / 3) ? null : alias ?? numbered[0] ?? keys[0] ?? null;
   return links.filter((l) => versionOf(l.url, root) === keep);
 }
 
@@ -167,15 +173,16 @@ export function siteName(title: string | null, host: string): string {
 
 // ---- Instant stage ----------------------------------------------------------------------------
 
-// Links in the page's navigation and sidebar, in document order, with their text.
-export function navLinks(html: string, pageUrl: string): LlmsLink[] {
+// Links in the page's navigation and sidebar (every link on the page with
+// `all`), in document order, with their text.
+export function navLinks(html: string, pageUrl: string, all = false): LlmsLink[] {
   let doc: { querySelectorAll(s: string): Iterable<{ getAttribute(n: string): string | null; textContent: string | null }> };
   try {
     doc = new DOMParser().parseFromString(/<html[\s>]/i.test(html) ? html : `<!doctype html><html><body>${html}</body></html>`, 'text/html') as never;
   } catch {
     return [];
   }
-  const sel = 'nav a[href], aside a[href], [class*="sidebar" i] a[href], [id*="sidebar" i] a[href], [class*="menu" i] a[href], [role="navigation"] a[href], [class*="toc" i] a[href]';
+  const sel = all ? 'a[href]' : 'nav a[href], aside a[href], [class*="sidebar" i] a[href], [id*="sidebar" i] a[href], [class*="menu" i] a[href], [role="navigation"] a[href], [class*="toc" i] a[href]';
   const out = new Map<string, LlmsLink>();
   for (const a of doc.querySelectorAll(sel)) {
     const href = a.getAttribute('href');
@@ -257,7 +264,13 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
   // Navigation first (its order and titles are the site's own), then the
   // sitemap. A docs path with almost nothing under it (htmx.org/docs is one
   // page; its reference lives at /reference) widens to the whole host.
-  const allNav = html ? navLinks(html, page && page.ok ? page.url : root) : [];
+  const pageUrl = page && page.ok ? page.url : root;
+  let allNav = html ? navLinks(html, pageUrl) : [];
+  // Little in the navigation and sitemap: the page's own table of contents
+  // (docs.python.org/3/ lists its docs in the page, its sidebar has versions).
+  if (html && oneVersion([...allNav, ...maps.map((url) => ({ title: '', url }))].filter((l) => inScope(l.url)), root).length < MIN_INDEX) {
+    allNav = [...allNav, ...navLinks(html, pageUrl, true).filter((l) => !allNav.some((n) => n.url === l.url))];
+  }
   if (scope && [...allNav.map((l) => l.url), ...maps].filter(inScope).length < MIN_SCOPED) scope = '';
   // Widened to the whole host: its writing (blog, essays, posts, news) is not docs.
   const docsOnly = (u: string) => !!scope || !WRITING.test(new URL(u).pathname);

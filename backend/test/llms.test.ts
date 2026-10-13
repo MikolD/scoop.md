@@ -85,6 +85,8 @@ test('helpers: names, sections, titles, versions', () => {
   assert.deepEqual(oneVersion(v, 'https://x.dev/docs').map((l) => l.url), ['https://x.dev/docs/30.4/a', 'https://x.dev/docs/30.4/b']);
   const celery = ['https://c.dev/en/latest/', 'https://c.dev/en/v5.6.0/', 'https://c.dev/en/stable/a.html', 'https://c.dev/en/stable/b.html', 'https://c.dev/en/3.1/'].map((url) => ({ url }));
   assert.deepEqual(oneVersion(celery, 'https://c.dev').map((l) => l.url), ['https://c.dev/en/stable/a.html', 'https://c.dev/en/stable/b.html'], 'the alias with the most pages');
+  const py = ['https://p.dev/3.11/', 'https://p.dev/3.15/', ...['a', 'b', 'c', 'd'].map((x) => `https://p.dev/3/library/${x}.html`)].map((url) => ({ url }));
+  assert.equal(oneVersion(py, 'https://p.dev').length, 4, 'a sitemap\'s one-page versions do not outrank the docs');
   const sample = '# Stripe Documentation\n\n- [A](https://a.dev/a.md)\n- [B](https://a.dev/b)\n';
   assert.deepEqual(describeLlms(sample), { title: 'Stripe Documentation', pages: 2, tokens: Math.ceil(sample.length / 4) });
 });
