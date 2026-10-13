@@ -1513,3 +1513,29 @@ docs site, fast, and never anything for a site that isn't docs.
   in production (the site proxies the API), the staging API itself on
   staging, so staging links never point at production.
 - **Not in this pass:** Context7 fill-in.
+
+### Security review of the registry (55babfd, bf67580, and the re-review)
+
+- **Every quoted line is screened, and none is served unscreened.** A
+  deterministic pre-filter first (secrets, sending data, dotfiles, `sudo`,
+  `rm -r`, shell pipes, base64 blobs, other domains and IP literals), then
+  Jev's risk question for every line, every heading included; fences are
+  reduced to a bare fence. No Jev, no
+  excerpt. Stored text is served only at the current screening version
+  (`agent_checked` ≥ 2), filtered again as it is served.
+- **The install carve-out.** The owner wants "how agents should install
+  it", so the llms risk question treats installing this product's own
+  package, SDK or CLI with a standard package manager, its CLI's install /
+  add / init / create / login / `--version` / `--help`, and setting up its
+  own MCP server or API client as using the product. Any other command is
+  judged as usual.
+- **Accepted risk: a product's own MCP server.** Quoting "connect an MCP
+  client to https://docs.example.com/mcp" lets an agent that follows it
+  give that server tool access in the user's session. The owner accepted
+  this for the product's own server (same registrable domain as its docs,
+  passed the risk question); another domain's server is never quoted.
+- **The prompt names a site only by its own name** (at most 3 words, part
+  of the host's registrable label); otherwise by its host.
+- **Shared hosts** (github.com, npmjs.com, pypi.org, …) are never
+  registered, except where the gate's allowlist names their docs
+  (huggingface.co/docs).
