@@ -667,3 +667,42 @@ test('full stage: with no crawled quick start, the instant file\'s getting-start
   const b = await buildFull(d1, 'https://lint.example/docs', 'Lint', { instant });
   assert.deepEqual(b!.sections.map((s) => s.name), ['Getting started', 'Reference', 'Use']);
 });
+
+test('Sphinx: the docs root\'s contents.html is read, every page once in the docs\' order, titled by its entry; dead and external links out', async () => {
+  const root = readFileSync(new URL('./fixtures/llms/sphinx-root.html', import.meta.url), 'utf8');
+  const contents = readFileSync(new URL('./fixtures/llms/sphinx-contents.html', import.meta.url), 'utf8');
+  const routes: Record<string, Route> = {
+    'https://snake.example/robots.txt': text('User-agent: *\nAllow: /\n'),
+    'https://snake.example/3/': html(root),
+    'https://snake.example/3/contents.html': html(contents),
+  };
+  for (const p of ['download', 'whatsnew/index', 'whatsnew/3.14', 'tutorial/index', 'tutorial/appetite', 'tutorial/interpreter', 'library/index', 'library/os']) routes[`https://snake.example/3/${p}.html`] = html('<html></html>');
+  const b = await buildInstant('https://snake.example/3/', { fetchImpl: web(routes).fetchImpl });
+  const links = b.sections.flatMap((s) => s.links);
+  for (const p of ['whatsnew/index', 'tutorial/appetite', 'tutorial/interpreter', 'library/os']) assert.ok(links.some((l) => l.url === `https://snake.example/3/${p}.html`), p);
+  assert.equal(links.filter((l) => l.url === 'https://snake.example/3/tutorial/interpreter.html').length, 1, 'anchors are one page');
+  assert.equal(links.find((l) => l.url.endsWith('/library/os.html'))!.title, 'os — Miscellaneous operating system interfaces');
+  assert.equal(links.find((l) => l.url.endsWith('/tutorial/appetite.html'))!.title, '1. Whetting Your Appetite');
+  assert.ok(!links.some((l) => /gone|elsewhere|3\.15|3\.13/.test(l.url)), 'dead, external and other-version links are out');
+  assert.equal(b.sections[0].name, 'Tutorial', 'quick start first');
+});
+
+test('link checks per build are bounded: at most CHECKS_PER_BUILD new ones, in order; the next build reaches further', async () => {
+  const { CHECKS_PER_BUILD } = await import('../src/llms/build.ts');
+  const { d1 } = fakeD1();
+  const n = CHECKS_PER_BUILD + 40;
+  const items = Array.from({ length: n }, (_, i) => `<li class="toctree-l1"><a class="reference internal" href="p/${i}.html">Page ${i}</a></li>`).join('');
+  const routes: Record<string, Route> = {
+    'https://big.example/robots.txt': text('User-agent: *\nAllow: /\n'),
+    'https://big.example/': html('<html><head><title>Big</title></head><body><a href="contents.html">Contents</a></body></html>'),
+    'https://big.example/contents.html': html(`<html><body><ul>${items}</ul></body></html>`),
+  };
+  for (let i = 0; i < n; i++) routes[`https://big.example/p/${i}.html`] = html('<html></html>');
+  const w = web(routes);
+  const first = await buildInstant('https://big.example/', { fetchImpl: w.fetchImpl, db: d1, budgetMs: 60_000 });
+  const checks = () => w.fetched.filter((u) => /\/p\/\d+\.html$/.test(u)).length;
+  assert.ok(checks() <= CHECKS_PER_BUILD + 5, `checks ${checks()}`);
+  assert.ok(first.pages >= CHECKS_PER_BUILD - 5 && first.pages < n, `first ${first.pages}`);
+  const second = await buildInstant('https://big.example/', { fetchImpl: w.fetchImpl, db: d1, budgetMs: 60_000 });
+  assert.ok(second.pages > first.pages, `second ${second.pages}`);
+});

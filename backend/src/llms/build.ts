@@ -58,6 +58,8 @@ export interface BuildOptions {
 
 export const INSTANT_BUDGET_MS = 8000;
 export const MAX_LINKS = 300;
+// Links checked for the first time in one build (8 at a time per host, within its budget).
+export const CHECKS_PER_BUILD = 300;
 const MAX_SITEMAPS = 6;
 const SITEMAP_CAP = 5_000_000;
 const PAGE_CAP = 1_000_000;
@@ -271,6 +273,10 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
   if (html && oneVersion([...allNav, ...maps.map((url) => ({ title: '', url }))].filter((l) => inScope(l.url)), root).length < MIN_INDEX) {
     allNav = [...allNav, ...navLinks(html, pageUrl, true).filter((l) => !allNav.some((n) => n.url === l.url))];
   }
+  // A Sphinx site's full table of contents (contents.html, linked from the
+  // docs root): every page in the docs' own order (docs.python.org: 21 → ~490).
+  const toc = html ? await sphinxContents(html, pageUrl, get, allowed) : [];
+  if (toc.length) allNav = [...allNav, ...toc.filter((l) => !allNav.some((n) => n.url === l.url))];
   if (scope && [...allNav.map((l) => l.url), ...maps].filter(inScope).length < MIN_SCOPED) scope = '';
   // Widened to the whole host: its writing (blog, essays, posts, news) is not docs.
   const docsOnly = (u: string) => !!scope || !WRITING.test(new URL(u).pathname);
@@ -285,7 +291,7 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
     if (!byUrl.has(x.href)) byUrl.set(x.href, { title: linkTitle('', x.href) || host, url: x.href });
   }
   const scopeRoot = `${r0.origin}${scope}`;
-  let links = oneVersion([...byUrl.values()], scopeRoot).slice(0, o.maxLinks ?? MAX_LINKS);
+  let links = oneVersion([...byUrl.values()], scopeRoot).slice(0, o.maxLinks ?? (toc.length ? MAX_FULL_LINKS : MAX_LINKS));
 
   // .md twins, when a sample of pages has them.
   links = await withTwins(links, get, left);
@@ -297,6 +303,33 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
 }
 
 type Get = (url: string, cap: number, accept?: string) => ReturnType<typeof crawlFetch>;
+
+// Sphinx's table of contents: <li class="toctree-l1"><a class="reference internal" href="tutorial/index.html">The Python Tutorial</a>.
+const TOC_ENTRY = /<li\b[^>]*\bclass="toctree-l\d[^"]*"[^>]*>\s*<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]{0,500}?)<\/a>/gi;
+
+// The pages listed in a Sphinx site's contents.html, when the docs root links
+// to one: each page once (anchors dropped), titled by its first entry.
+async function sphinxContents(html: string, pageUrl: string, get: Get, allowed: (u: string) => boolean): Promise<LlmsLink[]> {
+  let url: string | null = null;
+  for (const m of html.matchAll(/<a\b[^>]*\bhref="([^"#?]*contents\.html)"/gi)) {
+    try {
+      const u = new URL(decodeHTML(m[1]), pageUrl);
+      if (u.host === new URL(pageUrl).host && /(^|\/)contents\.html$/i.test(u.pathname)) { url = u.href; break; }
+    } catch { /* not a URL */ }
+  }
+  if (!url || !allowed(url)) return [];
+  const r = await get(url, PAGE_CAP, 'text/html, application/xhtml+xml;q=0.9, */*;q=0.5');
+  if (!r.ok || r.notModified) return [];
+  const out = new Map<string, LlmsLink>();
+  for (const m of r.text.matchAll(TOC_ENTRY)) {
+    let u: URL;
+    try { u = new URL(decodeHTML(m[1]), r.url); } catch { continue; }
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
+    u.hash = '';
+    if (!out.has(u.href)) out.set(u.href, { title: decodeHTML(m[2].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim(), url: u.href });
+  }
+  return [...out.values()];
+}
 
 // A link with the page it stands for, when `url` is that page's .md twin.
 type Candidate = LlmsLink & { page?: string };
@@ -323,14 +356,16 @@ async function withTwins(links: LlmsLink[], get: Get, left: () => number): Promi
 }
 
 // Keeps only links known to exist, in their order: statuses on record, the
-// rest checked now (within the budget); a .md twin that fails falls back to its page.
+// rest checked now, in order, at most CHECKS_PER_BUILD of them and within the
+// budget; a link not checked yet waits for the next build (statuses are
+// saved, so each rebuild reaches further). A .md twin that fails falls back to its page.
 async function onlyExisting(links: Candidate[], o: BuildOptions, left: () => number): Promise<LlmsLink[]> {
   const key = (u: string) => normalizeLink(u) ?? u;
   const check = async (urls: string[], timeoutMs: number) => {
     const known = o.db ? await linkStates(o.db, urls.map(key)) : new Map<string, 'ok' | 'bad'>();
-    const unknown = urls.filter((u) => !known.has(key(u)));
+    const unknown = urls.filter((u) => !known.has(key(u))).slice(0, CHECKS_PER_BUILD);
     const checked = await checkLinks(unknown, {
-      fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, perHost: 8, hostIntervalMs: 0, budget: MAX_LINKS * 2,
+      fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, perHost: 8, hostIntervalMs: 0, budget: CHECKS_PER_BUILD,
       deadline: Date.now() + left() - 300, timeoutMs,
     });
     if (o.db) await saveLinks(o.db, checked, 'check', o.now).catch(() => {});
