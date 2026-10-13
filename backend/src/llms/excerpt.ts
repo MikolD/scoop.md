@@ -15,6 +15,7 @@ import { checkLinks, extractLinks, linkStates, normalizeLink, saveLinks } from '
 import { crawlFetch, HostLimiter } from '../crawl/polite.ts';
 import type { FetchImpl } from '../crawl/polite.ts';
 import { looksLikeText } from '../crawl/discover.ts';
+import { extractPage } from '../crawl/html.ts';
 import type { BuiltLlms } from './build.ts';
 
 export interface AgentExcerpt {
@@ -161,12 +162,16 @@ export async function scoopExcerpt(b: BuiltLlms, o: ExcerptOptions = {}): Promis
   ].filter((l, i, a) => a.findIndex((x) => x.url === l.url) === i).slice(0, 2);
   const limiter = new HostLimiter({ concurrency: 2, intervalMs: 0 });
   for (const p of pages) {
-    const r = await crawlFetch(p.url, { fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap: 400_000, truncate: true, timeoutMs: 4000 });
-    if (!r.ok || r.notModified || !looksLikeText(r.contentType, r.text)) continue;
+    const r = await crawlFetch(p.url, {
+      fetchImpl: o.fetchImpl, allowLocalhost: o.allowLocalhost, limiter, cap: 1_000_000, truncate: true, timeoutMs: 4000, accept: 'text/markdown, text/html;q=0.9, */*;q=0.5',
+    });
+    if (!r.ok || r.notModified || !r.text) continue;
+    // Markdown as served, or the page's HTML converted (the crawler's own extractor).
+    const md = looksLikeText(r.contentType, r.text) ? r.text : extractPage(r.text, r.url).markdown;
     // The page's install commands (in code) and setup lines.
     const lines: Line[] = [];
     let fence = '';
-    for (const raw of r.text.split('\n')) {
+    for (const raw of md.split('\n')) {
       const line = raw.replace(/\s+$/, '');
       const f = /^ {0,3}(`{3,}|~{3,})/.exec(line);
       if (fence) {

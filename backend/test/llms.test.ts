@@ -416,3 +416,16 @@ test('a scoop-built file\'s instructions come from the site\'s install / quick s
     method: 'section',
   });
 });
+
+test('a scoop-built file\'s instructions also come from an HTML install page', async () => {
+  const routes = widgetSite();
+  for (const k of Object.keys(routes)) if (k.endsWith('.md')) delete routes[k];
+  const words = 'Widget is a small library for building widgets in the browser with very little code. '.repeat(4);
+  routes['https://widget.example/docs/getting-started/install'] = html(`<html><body><main><h1>Install</h1><p>${words}</p><p>Install the CLI before anything else.</p><pre><code>npm install -g widget-cli</code></pre></main></body></html>`);
+  for (const p of ['getting-started/quickstart', 'guides/routing', 'reference/api-keys']) routes[`https://widget.example/docs/${p}`] = html('<html><body>ok</body></html>');
+  const b = await buildInstant('https://widget.example/docs', { fetchImpl: web(routes).fetchImpl });
+  const ex = await scoopExcerpt(b, { fetchImpl: web(routes).fetchImpl });
+  assert.equal(ex?.source, 'https://widget.example/docs/getting-started/install');
+  assert.match(ex!.text, /Install the CLI before anything else\./);
+  assert.match(ex!.text, /npm install -g widget-cli/);
+});
