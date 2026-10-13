@@ -8,8 +8,9 @@ import { registerHooks } from 'node:module';
 import { readFileSync } from 'node:fs';
 import type { Env } from '../src/env.ts';
 import {
-  buildFull, buildInstant, describeLlms, humanize, linkTitle, navLinks, oneVersion, renderLlms, sectionOf, siteName,
+  buildFull, buildInstant, describeLlms, humanize, linkTitle, MAX_FULL_LINKS, navLinks, oneVersion, renderLlms, sectionOf, siteName,
 } from '../src/llms/build.ts';
+import type { BuiltLlms } from '../src/llms/build.ts';
 import {
   answerFrom, getRow, knownNotDocs, listRegistry, promptFor, refreshDue, resolveLlms, rowForPage, serveLlms, setAlias, upsertRow,
 } from '../src/llms/registry.ts';
@@ -119,7 +120,7 @@ test('instant build: sitemap index + navigation, in scope and robots-allowed, .m
     '- [Routing](https://widget.example/docs/guides/routing.md)',
     '',
     '## Reference',
-    '- [Api keys](https://widget.example/docs/reference/api-keys.md)',
+    '- [API keys](https://widget.example/docs/reference/api-keys.md)',
     '',
   ].join('\n'));
   assert.equal(b.pages, 4);
@@ -546,4 +547,97 @@ test('full build: one version of versioned docs; descriptions from the stored pa
     '- [Setup](https://jest.example/docs/setup): Set up your tests before they run.',
     '- [Timers](https://jest.example/docs/timers)',
   ]);
+});
+
+test('names: og:site_name or <title> of the docs root, else the home page\'s; slug titles cased; a logo glyph dropped', async () => {
+  assert.equal(humanize('api'), 'API');
+  assert.equal(humanize('oauth-apps'), 'OAuth apps');
+  assert.equal(humanize('getting-started'), 'Getting started');
+  assert.equal(linkTitle('</> htmx', 'https://htmx.org/'), 'htmx');
+  assert.equal(siteName('&lt;/&gt; htmx ~ Documentation', 'htmx.org'), 'htmx');
+  assert.equal(siteName('Documentation - ESLint - Pluggable JavaScript Linter', 'eslint.org'), 'ESLint');
+  // jestjs.io/docs is a 404: the home page names the site.
+  const routes: Record<string, Route> = {
+    'https://jest.example/docs': () => new Response('<html><head><title>Page Not Found · Jest</title></head></html>', { status: 404, headers: { 'content-type': 'text/html' } }),
+    'https://jest.example/': html('<html><head><title>Jest · 🃏 Delightful JavaScript Testing</title></head><body></body></html>'),
+  };
+  const b = await buildInstant('https://jest.example/docs', { fetchImpl: web(routes).fetchImpl });
+  assert.equal(b.title, 'Jest');
+  const og = await buildInstant('https://og.example/docs', { fetchImpl: web({ 'https://og.example/docs': html('<html><head><meta property="og:site_name" content="Widget"><title>Docs home | Something long</title></head></html>') }).fetchImpl });
+  assert.equal(og.title, 'Widget');
+});
+
+test('instant stage widened to the whole host: its blog, essays, posts and news are left out', async () => {
+  const urls = ['/docs/', '/attributes/hx-get/', '/reference/', '/essays/hypermedia/', '/posts/2024-01-01-release/', '/blog/news/', '/news/x/', '/events/', '/api/'];
+  const routes: Record<string, Route> = {
+    'https://hx.example/robots.txt': text('User-agent: *\nAllow: /\nSitemap: https://hx.example/sitemap.xml'),
+    'https://hx.example/sitemap.xml': xml(`<urlset>${urls.map((u) => `<url><loc>https://hx.example${u}</loc></url>`).join('')}</urlset>`),
+    'https://hx.example/docs/': html('<html><head><title>hx</title></head><body></body></html>'),
+  };
+  for (const u of urls) routes[`https://hx.example${u}`] ??= html('<html></html>');
+  const b = await buildInstant('https://hx.example/docs/', { fetchImpl: web(routes).fetchImpl });
+  const got = b.sections.flatMap((s) => s.links.map((l) => new URL(l.url).pathname));
+  assert.deepEqual(got.filter((p) => /essays|posts|blog|news/.test(p)), []);
+  for (const p of ['/attributes/hx-get/', '/reference/', '/events/', '/api/']) assert.ok(got.includes(p), p);
+  assert.ok(b.text.includes('> Documentation index for hx.example, prepared by scoop.md.'));
+});
+
+test('full stage never shrinks coverage: crawl entries first, then the instant links it did not cover, in their path sections', async () => {
+  const { d1, raw } = fakeD1();
+  const add = (url: string, title: string, slot: string, summary: string) => {
+    raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, summary, model, cost_usd, indexed_at) VALUES (?, 'py.example', 'h', ?, ?, ?, 'm', 0, 'x')`).run(url, title, slot, summary);
+    raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) VALUES (?, 1, 200, NULL, 'x', 'crawl')`).run(url);
+  };
+  add('https://py.example/3/tutorial/index.html', 'The Python Tutorial', 'quickstart', 'Learn Python.');
+  add('https://py.example/3/library/os.html', 'os', 'api-reference', 'Miscellaneous operating system interfaces.');
+  const instant: BuiltLlms = {
+    title: 'Python', root: 'https://py.example/3', host: 'py.example', text: '', pages: 4, stage: 'instant',
+    sections: [
+      { name: 'Tutorial', links: [{ title: 'Tutorial', url: 'https://py.example/3/tutorial/index.html' }] },
+      { name: 'Library', links: [{ title: 'os', url: 'https://py.example/3/library/os.html' }, { title: 'sys', url: 'https://py.example/3/library/sys.html' }] },
+      { name: 'Reference', links: [{ title: 'Grammar', url: 'https://py.example/3/reference/grammar.html' }] },
+    ],
+  };
+  const b = await buildFull(d1, 'https://py.example/3', 'Python', { instant });
+  assert.deepEqual(b!.sections.map((s) => [s.name, s.links.map((l) => l.title)]), [
+    ['Getting started', ['The Python Tutorial']],
+    ['Reference', ['os', 'Grammar']],
+    ['Library', ['sys']],
+  ]);
+  assert.equal(b!.pages, 4);
+  assert.equal(b!.stage, 'full');
+  assert.equal(MAX_FULL_LINKS, 1000);
+});
+
+test('admin rebuild (Basic auth): a registered host checked again now; unknown hosts 404', async () => {
+  const { handleAdmin } = await import('../src/admin/app.ts');
+  const { d1 } = fakeD1();
+  const { r2 } = fakeR2();
+  const e = {
+    DB: d1, SKILLS: r2, RATE_KEY: 'test-rate-key', READ_LIMITER: { limit: async () => ({ success: true }) }, ENVIRONMENT: 'production', ADMIN_HOST: 'admin.scoop.md', ADMIN_UI_USER: 'admin',
+    ADMIN_UI_PASSCODE: 'correct horse battery staple, twice over', ADMIN_AUTH_LIMITER: { limit: async () => ({ success: true }) },
+  } as unknown as Env;
+  await upsertRow(d1, { host: 'docs.widget.example', docs_root: 'https://docs.widget.example', llms_url: 'https://docs.widget.example/llms.txt', source: 'site', status: 'ready', pages: 1 });
+  const post = async (path: string, auth = true) => {
+    const req = new Request(`https://admin.scoop.md${path}`, {
+      method: 'POST',
+      headers: { origin: 'https://admin.scoop.md', 'sec-fetch-site': 'same-origin', ...(auth ? { authorization: `Basic ${Buffer.from('admin:correct horse battery staple, twice over').toString('base64')}` } : {}) },
+    });
+    const res = await handleAdmin(req, e, new URL(req.url), '203.0.113.7');
+    return { status: res.status, json: await res.json().catch(() => null) as any };
+  };
+  assert.equal((await post('/api/llms/docs.widget.example/rebuild', false)).status, 401);
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('# Widget\n\n## Install for agents\n\nRun `npm i widget`.\n\n- [A](https://docs.widget.example/a.md)\n- [B](https://docs.widget.example/b.md)\n', { headers: { 'content-type': 'text/markdown' } })) as typeof fetch;
+  try {
+    const r = await post('/api/llms/docs.widget.example/rebuild');
+    assert.equal(r.status, 200);
+    assert.equal(r.json.pages, 2);
+    assert.equal(r.json.answer.llms.title, 'Widget');
+    assert.match(r.json.answer.agentInstructions.text, /npm i widget/);
+    assert.equal((await getRow(d1, 'docs.widget.example'))!.pages, 2);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.equal((await post('/api/llms/nothing.example/rebuild')).status, 404);
 });

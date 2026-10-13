@@ -243,7 +243,7 @@ function quickSiteCache(): QuickSiteCache | null {
 }
 
 // /v1/llms: storage, the probe budget per host, Jev, and the crawl that makes a full llms.txt.
-function llmsDeps(env: Env, ip: string, waitUntil?: (p: Promise<unknown>) => void): LlmsDeps {
+export function llmsDeps(env: Env, ip: string, waitUntil?: (p: Promise<unknown>) => void): LlmsDeps {
   return {
     db: env.DB,
     bucket: env.SKILLS,

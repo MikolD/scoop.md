@@ -265,7 +265,7 @@ export async function buildScoop(d: LlmsDeps, row: RegistryRow): Promise<Registr
   let next = await storeBuilt(d, row, built);
   const indexed = await d.db.prepare('SELECT COUNT(*) AS n FROM page_index WHERE site = ?').bind(row.host).first<{ n: number }>();
   if ((indexed?.n ?? 0) >= FULL_FROM_INDEX) {
-    const full = await buildFull(d.db, row.docs_root, next.title ?? built.title, { fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, bucket: d.bucket, now: d.now?.() });
+    const full = await buildFull(d.db, row.docs_root, built.title, { fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, bucket: d.bucket, now: d.now?.(), instant: built });
     if (full && full.pages >= Math.min(built.pages, 5)) next = await storeBuilt(d, next, full);
   } else if (d.startCrawl) {
     await d.startCrawl(row.docs_root, row.host).catch((e) => console.error(JSON.stringify({ llms: 'crawl', host: row.host, error: (e as Error).message })));
@@ -366,7 +366,9 @@ export async function serveLlms(host: string, d: LlmsDeps): Promise<{ status: 20
 export async function rebuildFull(d: LlmsDeps, host: string): Promise<RegistryRow | null> {
   const row = await getRow(d.db, host);
   if (!row || row.source !== 'scoop') return null;
-  const full = await buildFull(d.db, row.docs_root, row.title ?? siteName(null, host), { fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, bucket: d.bucket, now: d.now?.() });
+  // The instant stage again, so the full file keeps every link it had.
+  const instant = await buildInstant(row.docs_root, { fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, db: d.db, now: d.now?.() }).catch(() => null);
+  const full = await buildFull(d.db, row.docs_root, instant?.title ?? row.title ?? siteName(null, host), { fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, bucket: d.bucket, now: d.now?.(), instant });
   if (!full || full.pages < 1) return null;
   return storeBuilt(d, row, full);
 }
@@ -384,26 +386,31 @@ export async function refreshDue(d: LlmsDeps, limit = 10): Promise<number> {
     .all<RegistryRow>();
   for (const row of results) {
     try {
-      if (row.source === 'site') {
-        const desc = await describeSiteLlms(row.llms_url, d);
-        if (desc && desc.pages > 0) {
-          await upsertRow(d.db, {
-            ...row, title: desc.title, pages: desc.pages, tokens: desc.tokens, content_hash: desc.hash, checked_at: now.toISOString(),
-            agent_text: desc.excerpt?.text ?? null, agent_source: desc.excerpt?.source ?? null, agent_method: desc.excerpt?.method ?? null,
-            changed_at: desc.hash === row.content_hash ? row.changed_at : now.toISOString(),
-          }, now);
-        } else {
-          const scoop: RegistryRow = { ...row, source: 'scoop', status: 'preparing', llms_url: scoopUrl(d.publicBase ?? PUBLIC_BASE, row.host), checked_at: now.toISOString() };
-          await upsertRow(d.db, scoop, now);
-          await buildScoop(d, scoop);
-        }
-      } else {
-        const full = row.stage === 'full' ? await rebuildFull(d, row.host) : null;
-        if (!full) await buildScoop({ ...d, startCrawl: undefined }, row);
-      }
+      await refreshRow(d, row);
     } catch (e) {
       console.error(JSON.stringify({ llms: 'refresh', host: row.host, error: (e as Error).message }));
     }
   }
   return results.length;
+}
+
+// One registry row, checked again now: a site's own file is fetched and
+// described again (gone: scoop.md prepares one); a scoop-built one is rebuilt
+// (instant, then full from the index). The cron's step, and the admin rebuild.
+export async function refreshRow(d: LlmsDeps, row: RegistryRow): Promise<RegistryRow> {
+  const now = d.now?.() ?? new Date();
+  if (row.source === 'scoop') return buildScoop({ ...d, startCrawl: undefined }, row);
+  const desc = await describeSiteLlms(row.llms_url, d);
+  if (desc && desc.pages > 0) {
+    const next: RegistryRow = {
+      ...row, title: desc.title, pages: desc.pages, tokens: desc.tokens, content_hash: desc.hash, checked_at: now.toISOString(),
+      agent_text: desc.excerpt?.text ?? null, agent_source: desc.excerpt?.source ?? null, agent_method: desc.excerpt?.method ?? null,
+      changed_at: desc.hash === row.content_hash ? row.changed_at : now.toISOString(),
+    };
+    await upsertRow(d.db, next, now);
+    return next;
+  }
+  const scoop: RegistryRow = { ...row, source: 'scoop', status: 'preparing', llms_url: scoopUrl(d.publicBase ?? PUBLIC_BASE, row.host), checked_at: now.toISOString() };
+  await upsertRow(d.db, scoop, now);
+  return buildScoop(d, scoop);
 }

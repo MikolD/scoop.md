@@ -52,6 +52,8 @@ export interface BuildOptions {
   budgetMs?: number;
   maxLinks?: number;
   now?: Date;
+  // The full stage: the instant build, whose links the crawl did not cover are kept.
+  instant?: BuiltLlms | null;
 }
 
 export const INSTANT_BUDGET_MS = 8000;
@@ -62,6 +64,10 @@ const PAGE_CAP = 1_000_000;
 const TWIN_SAMPLE = 3;
 // Fewer links than this under a docs path: the whole host is used.
 const MIN_SCOPED = 5;
+// A host's writing, left out when the whole host is used.
+const WRITING = /^\/(blog|essays?|posts?|news|articles|press|podcasts?|stories|newsletter|careers|jobs)(\/|$)/i;
+// The full stage's limit (crawl entries, then the instant stage's others).
+export const MAX_FULL_LINKS = 1000;
 
 // ---- Rendering ----------------------------------------------------------------------------
 
@@ -77,10 +83,13 @@ export function renderLlms(b: { title: string; host: string; root: string; secti
   return out.join('\n') + '\n';
 }
 
-// "getting-started" → "Getting started".
+// "getting-started" → "Getting started", "api" → "API".
+const ACRONYM = /^(api|apis|cli|sdk|sdks|css|html|http|https|json|jsx|url|urls|ui|faq|cve|cors|csrf|xss|sse|dom|ssr|ssg|jwt|oauth|sql|ssl|tls|dns|cdn|ide|npm|ai|llm|llms|mcp|rest|graphql|grpc|io|id)$/i;
 export const humanize = (slug: string) => {
   const s = decodeURIComponent(slug).replace(/\.(html?|mdx?)$/i, '').replace(/[-_]+/g, ' ').trim();
-  return s ? s[0].toUpperCase() + s.slice(1) : '';
+  const words = s.split(' ').map((w) => (ACRONYM.test(w) ? (/^oauth$/i.test(w) ? 'OAuth' : /^graphql$/i.test(w) ? 'GraphQL' : /^grpc$/i.test(w) ? 'gRPC' : w.toUpperCase()) : w));
+  const t = words.join(' ');
+  return t ? t[0].toUpperCase() + t.slice(1) : '';
 };
 
 // Path segments that name a version of the docs, not a section: 29.7, v2, next, latest, stable.
@@ -133,9 +142,18 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
 // Link text that says nothing about the page ("next", "index", "¶", "v2").
 const GENERIC_TEXT = /^(next|previous|prev|index|modules|home|back|more|read more|here|link|edit|edit this page|top|stable|latest|docs|documentation|\W*|v?\d+(\.\d+)*)$/i;
 export const linkTitle = (text: string, url: string) => {
-  const t = decodeHTML(text).replace(/\s+/g, ' ').replace(/[¶#§]+$/, '').trim();
+  // Without decoration: "¶" after, a logo glyph before ("</> htmx" → "htmx").
+  const t = decodeHTML(text).replace(/\s+/g, ' ').replace(/[¶#§]+$/, '').replace(/^[<>/{}[\]|]+\s+(?=\p{L})/u, '').trim();
   return t && t.length <= 120 && !GENERIC_TEXT.test(t) ? t : humanize(new URL(url).pathname.split('/').filter(Boolean).pop() ?? '');
 };
+
+// A page's own name for its site: og:site_name, else its <title>.
+function pageName(html: string): string | null {
+  if (!html) return null;
+  const og = /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{1,100})["']/i.exec(html)?.[1]
+    ?? /<meta[^>]+content=["']([^"']{1,100})["'][^>]+property=["']og:site_name["']/i.exec(html)?.[1];
+  return og ?? /<title[^>]*>([^<]{1,300})<\/title>/i.exec(html)?.[1] ?? null;
+}
 
 // A site name from a page title: "Hono - Web framework" → "Hono", "Stripe Documentation" → "Stripe".
 export function siteName(title: string | null, host: string): string {
@@ -227,18 +245,25 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
     })(),
   ]);
   const html = page && page.ok && !page.notModified && !looksLikeText(page.contentType, page.text) ? page.text : '';
-  const titleMatch = /<title[^>]*>([^<]{1,300})<\/title>/i.exec(html)?.[1] ?? null;
-  const ogSite = /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{1,100})["']/i.exec(html)?.[1] ?? null;
-  const title = siteName(ogSite ?? titleMatch, host);
+  // The site's name: the docs root's og:site_name or <title>; the home page's
+  // when the docs root has neither (jestjs.io/docs is a 404; jestjs.io says "Jest").
+  let named = pageName(html);
+  if (!named && r0.pathname.replace(/\/+$/, '') && allowed(`${r0.origin}/`)) {
+    const home = await get(`${r0.origin}/`, PAGE_CAP, 'text/html, application/xhtml+xml;q=0.9, */*;q=0.5');
+    if (home.ok && !home.notModified && !looksLikeText(home.contentType, home.text)) named = pageName(home.text);
+  }
+  const title = siteName(named, host);
 
   // Navigation first (its order and titles are the site's own), then the
   // sitemap. A docs path with almost nothing under it (htmx.org/docs is one
   // page; its reference lives at /reference) widens to the whole host.
   const allNav = html ? navLinks(html, page && page.ok ? page.url : root) : [];
   if (scope && [...allNav.map((l) => l.url), ...maps].filter(inScope).length < MIN_SCOPED) scope = '';
-  const nav = allNav.filter((l) => inScope(l.url));
+  // Widened to the whole host: its writing (blog, essays, posts, news) is not docs.
+  const docsOnly = (u: string) => !!scope || !WRITING.test(new URL(u).pathname);
+  const nav = allNav.filter((l) => inScope(l.url) && docsOnly(l.url));
   const byUrl = new Map<string, LlmsLink>();
-  const keep = new Set(skipLowValue([...nav.map((l) => l.url), ...maps.filter(inScope)]).kept);
+  const keep = new Set(skipLowValue([...nav.map((l) => l.url), ...maps.filter((u) => inScope(u) && docsOnly(u))]).kept);
   for (const l of nav) if (keep.has(l.url) && !byUrl.has(l.url)) byUrl.set(l.url, { title: linkTitle(l.title, l.url) || host, url: l.url });
   for (const u of maps) {
     if (!inScope(u) || !keep.has(u)) continue;
@@ -364,7 +389,7 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
   if (!rows.length) return null;
   // Descriptions from the stored page itself (its first paragraph's first
   // sentence); a stored summary only when it reads like the page's own words.
-  const described = await Promise.all(rows.slice(0, o.maxLinks ?? 1000).map(async (r) => {
+  const described = await Promise.all(rows.slice(0, o.maxLinks ?? MAX_FULL_LINKS).map(async (r) => {
     let description: string | null = null;
     if (o.bucket) {
       const obj = await o.bucket.get(`pages/${r.content_hash}.md`).catch(() => null);
@@ -373,13 +398,13 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
     }
     return description ?? shortDescription(r.summary);
   }));
-  let links: (LlmsLink & { slot: string })[] = rows.slice(0, o.maxLinks ?? 1000).map((r, i) => ({
+  let links: (LlmsLink & { slot: string })[] = rows.slice(0, o.maxLinks ?? MAX_FULL_LINKS).map((r, i) => ({
     title: r.title || humanize(new URL(r.url).pathname.split('/').filter(Boolean).pop() ?? '') || r.url,
     url: r.source_kind === 'page-md' && r.source_url && /\.md$/i.test(new URL(r.source_url).pathname) ? r.source_url : r.url,
     description: described[i] ?? undefined,
     slot: r.slot ?? 'other',
   }));
-  links = links.slice(0, o.maxLinks ?? 1000);
+  links = links.slice(0, o.maxLinks ?? MAX_FULL_LINKS);
   const states = await linkStates(db, links.map((l) => normalizeLink(l.url) ?? l.url));
   const unknown = links.filter((l) => !states.has(normalizeLink(l.url) ?? l.url)).map((l) => l.url);
   if (unknown.length) {
@@ -392,8 +417,23 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
     name,
     links: ok.filter((l) => (SLOT_SECTION[l.slot] ?? 'Other') === name).map(({ title: t, url, description }) => ({ title: t, url, ...(description ? { description } : {}) })),
   })).filter((s) => s.links.length);
+  // Never less than the instant stage: its links the crawl did not cover
+  // (already checked) follow in their path sections, a section of the same
+  // name taking them in, up to MAX_FULL_LINKS.
+  const pageOf = (u: string) => u.replace(/(\/index)?\.md$/i, '').replace(/\/(index\.html?)?$/i, '');
+  const covered = new Set(rows.flatMap((r) => [pageOf(r.url), ...(r.source_url ? [pageOf(r.source_url)] : [])]));
+  let room = MAX_FULL_LINKS - ok.length;
+  for (const s of o.instant?.sections ?? []) {
+    const extra = s.links.filter((l) => !covered.has(pageOf(l.url))).slice(0, Math.max(0, room)).map(({ title: t, url }) => ({ title: t, url }));
+    if (!extra.length) continue;
+    room -= extra.length;
+    const same = sections.find((x) => x.name === s.name);
+    if (same) same.links.push(...extra);
+    else sections.push({ name: s.name, links: extra });
+  }
+  const pages = sections.reduce((n, s) => n + s.links.length, 0);
   const text = renderLlms({ title, host, root, sections });
-  return { title, root, host, sections, text, pages: ok.length, stage: 'full' };
+  return { title, root, host, sections, text, pages, stage: 'full' };
 }
 
 // What a llms.txt says about itself: its H1, its number of links, its size in tokens.

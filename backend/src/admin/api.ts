@@ -5,7 +5,8 @@
 import seedList from '../../seeds/devtools.json' with { type: 'json' };
 import { buildPackage, withCurrentPage } from '../../../extension/lib/package.js';
 import { json, readJson } from '../api/http.ts';
-import { profileJson, renderPackage, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
+import { llmsDeps, profileJson, renderPackage, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
+import { answerFrom, getRow, refreshRow } from '../llms/registry.ts';
 import { viewOf } from '../crawl/requests.ts';
 import { runCosts } from '../db/crawl.ts';
 import { runPrefix } from '../crawl/collect.ts';
@@ -399,6 +400,19 @@ const routes: Route[] = [
     handler: async ({ env, params }) => {
       const site = siteArg(params[0]);
       return json(200, { site, links: await q.brokenLinks(env.DB, site) });
+    },
+  },
+  {
+    method: 'POST',
+    pattern: /^\/api\/llms\/([^/]+)\/rebuild$/,
+    // A registered llms.txt, checked again now: a site's own file described
+    // again, a scoop-built one rebuilt (instant, then full from the index).
+    handler: async ({ env, params }) => {
+      const host = siteArg(params[0]);
+      const row = await getRow(env.DB, host);
+      if (!row) throw notFound('No llms.txt registered for this host');
+      const next = await refreshRow(llmsDeps(env, 'admin'), row);
+      return json(200, { host, stage: next.stage, pages: next.pages, checkedAt: next.checked_at, answer: answerFrom(host, next) });
     },
   },
   {
