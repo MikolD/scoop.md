@@ -87,5 +87,5 @@ In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real 0.6.
 | `4-hono.png` | 1280×800 | hono.dev: an llms.txt only (no instructions): "Copy llms.txt", copied; the toolbar shows "1" |
 | `5-not-developer.png` | 1280×800 | example.com: "This isn't a developer website. scoop.md is for developer docs." and nothing else |
 | `6-badge.png` | 1280×800 | The toolbar badge close-ups: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
-| `promo-small-440x280.png` | 440×280 | Small promo tile: icon, "scoop.md", "Scoop any doc into your coding agent" on #ffeee0 |
-| `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 1 |
+| `promo-small-440x280.png` | 440×280 | Small promo tile: the icon with the "2" badge, "scoop.md", "Scoop any doc's llms.txt" and the "Copy llms.txt + instructions" button on #ffeee0 |
+| `promo-marquee-1400x560.png` | 1400×560 | Marquee: "Scoop any doc's llms.txt" with the docs.stripe.com popup (llms.txt field, instructions for agents, "Copied ✓") and the toolbar icon showing "2" |
