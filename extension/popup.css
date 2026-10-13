@@ -170,3 +170,11 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 .instructions a { color: var(--link); }
 .usage { display: flex; align-items: baseline; gap: var(--gap-sm); }
 .tokens { font-size: var(--text-lg); font-weight: var(--weight-bold); }
+
+/* Main view: the site's llms.txt */
+.main { justify-items: start; }
+.main .copy { margin-top: 4px; }
+#llms-meta a { color: var(--link); }
+#llms-status:empty { display: none; }
+.views { display: flex; justify-content: flex-end; min-height: 0; }
+.views .link { font-size: var(--text-sm); }

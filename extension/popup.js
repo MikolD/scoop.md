@@ -1,6 +1,6 @@
-import { fetchPublicText, siteKey } from './lib/discover.js';
+import { discover, fetchPublicText, siteKey } from './lib/discover.js';
 import { buildOverviewPackage, buildPagePackage, packageMeta, tokenEstimate, verifyLlms, withCurrentPage } from './lib/package.js';
-import { scoopPage, currentPageSection, isPrivateHost } from './lib/scoop.js';
+import { scoopPage, currentPageSection, isPrivateHost, pageUrlOf } from './lib/scoop.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason, withoutSectionQuery } from './lib/library.js';
 import { createTelemetry, docsLike, getInstallId, NOTICE_KEY, pagePath, errorText, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
 import { registrableDomain } from './lib/hosts.js';
@@ -72,11 +72,14 @@ async function writeClipboard(text) {
   }
 }
 
+// In Advanced, opened from the main view, the page's package is only shown:
+// the clipboard keeps the llms.txt prompt until Copy is pressed.
+let autoCopy = true;
 async function copy(text) {
   clipboardText = text;
   $('preview').value = text;
   $('copy').disabled = false;
-  return writeClipboard(text);
+  return autoCopy ? writeClipboard(text) : null;
 }
 
 // Clicking the text selects all of it, for people who prefer to copy by hand.
@@ -87,6 +90,8 @@ $('preview').onfocus = () => $('preview').select();
 function copied(ok) {
   if (ok) {
     status('Copied to your clipboard.');
+  } else if (ok === null) {
+    status('Ready to copy.');
   } else {
     status('Click Copy to put it on your clipboard.', 'err');
   }
@@ -173,13 +178,20 @@ function scoopResult(outcome, { scoop, text, sections = [], shared = null, index
 // In 'content', the active tab's panel shows (This page, Overview or Search).
 const PANELS = { page: 'content', overview: 'overview', search: 'search' };
 let activeTab = 'page';
+// Two views in 'content': the main one (the site's llms.txt) and Advanced
+// (the tabs: this page's copy, Overview, Search).
+let view = 'main';
 function setStage(name) {
   document.body.dataset.stage = name;
   logStage(name);
   $('loader').hidden = name !== 'loading';
   $('copied-stage').hidden = name !== 'copied';
-  $('tabs').hidden = name !== 'content';
-  for (const [t, id] of Object.entries(PANELS)) $(id).hidden = name !== 'content' || t !== activeTab;
+  const shown = name === 'content';
+  $('main').hidden = !shown || view !== 'main';
+  $('advanced-open').hidden = !shown || view !== 'main';
+  $('advanced-back').hidden = !shown || view !== 'advanced';
+  $('tabs').hidden = !shown || view !== 'advanced';
+  for (const [t, id] of Object.entries(PANELS)) $(id).hidden = !shown || view !== 'advanced' || t !== activeTab;
 }
 
 // The loader stays at least timing.loaderMs, so a fast scoop doesn't flicker.
@@ -202,7 +214,8 @@ async function revealAfterCopy(ok) {
     await sleep(reduced ? timing.reducedMs : timing.celebrateMs);
   }
   reveal();
-  if (ok && activeTab === 'page') flashCopied();
+  if (ok && view === 'main') flashLlmsCopied();
+  else if (ok && activeTab === 'page') flashCopied();
 }
 
 // Clears the live region first, so the same message twice is announced twice.
@@ -217,6 +230,12 @@ const ANNOUNCE_DELAY_MS = 50;
 // The content, announced with the status line, and focus on the Copy button
 // (on the Overview and Search tabs, their own status line and button).
 function reveal() {
+  if (view === 'main') {
+    setStage('content');
+    announce(`${$('llms-pill').getAttribute('aria-label')}. ${$('llms-status').textContent}`.trim());
+    if (!$('copy-llms').hidden) $('copy-llms').focus();
+    return;
+  }
   if (verdict.state === 'checking') setChip(devDocs(siteInfo?.index, siteInfo?.quick, null));
   setStage('content');
   const panel = $(PANELS[activeTab]);
@@ -1044,6 +1063,186 @@ for (const btn of document.querySelectorAll('#feedback button[data-worked]')) {
 $('report-open').onclick = (e) => { e.preventDefault(); $('report').hidden = !$('report').hidden; };
 $('report').onsubmit = (e) => { e.preventDefault(); return report($('reason').value); };
 
+// The main view (0.6.0): the site's llms.txt. GET /v1/llms answers with the
+// exact prompt to copy (its URL and how to use it); a docs site without an
+// llms.txt gets one prepared by scoop.md, already at a valid URL while it is
+// built ("preparing", polled until ready). Not docs: nothing to copy. The
+// library unreachable or slow (5 s): the site's own llms.txt, if verified
+// here, gives the same prompt; otherwise "Couldn't reach scoop.md" and Retry.
+let llmsPrompt = '';
+let llmsSource = null;
+let llmsPoll = null;
+let mainStarted = false;
+const PREPARING_POLLS = 40;
+
+async function runMain() {
+  mainStarted = true;
+  clearTimeout(llmsPoll);
+  setLlms({ state: 'checking' });
+  showLoader();
+  const host = new URL(tab.url).hostname;
+  const privateHost = isPrivateHost(host);
+  let res = null;
+  if (devLibrary || !privateHost) res = await library.llms(llmsQueryUrl(tab.url));
+  if (res?.ok && res.data && typeof res.data === 'object') return showLlms(res.data, { fallback: false, privateHost });
+  const local = await localLlms(tab.url);
+  if (local) return showLlms(local, { fallback: true, privateHost });
+  setLlms({ state: 'unreachable' });
+  await loaderDone();
+  reveal();
+}
+
+async function showLlms(data, { fallback, privateHost }) {
+  const llms = data.llms;
+  const docs = Boolean(data.docs?.found && llms?.url && data.prompt && /^https?:\/\//i.test(llms.url));
+  if (!fallback && !privateHost && data.docs?.verdict !== 'unknown') {
+    rememberVerdict(chrome, siteKey(tab.url), docs ? 'docs' : 'not_docs').then(() => setTabBadge(chrome, tab)).catch(() => {});
+  }
+  if (!docs) {
+    setLlms({ state: 'no' });
+    await loaderDone();
+    return reveal();
+  }
+  llmsPrompt = data.prompt;
+  llmsSource = fallback ? 'fallback' : llms.source === 'scoop' ? 'scoop' : 'site';
+  setLlms({ state: 'yes', data });
+  const ok = await writeClipboard(llmsPrompt);
+  if (ok && !privateHost) track('llms_copy', { site: siteKey(tab.url), source: llmsSource, trigger: 'auto' });
+  $('llms-status').textContent = ok ? 'Copied to your clipboard.' : 'Press Copy llms.txt to put it on your clipboard.';
+  await revealAfterCopy(ok);
+  if (llms.status === 'preparing' && !fallback) pollPreparing(data.retryAfterMs, 0);
+}
+
+// A scoop.md-built llms.txt still being built: its URL already works; asked
+// again every retryAfterMs until it is ready.
+function pollPreparing(retryAfterMs, n) {
+  if (n >= PREPARING_POLLS) return;
+  llmsPoll = setTimeout(async () => {
+    const res = await library.llms(llmsQueryUrl(tab.url));
+    if (!res.ok || !res.data?.llms) return pollPreparing(retryAfterMs, n + 1);
+    if (res.data.prompt) llmsPrompt = res.data.prompt;
+    setLlms({ state: 'yes', data: res.data });
+    if (res.data.llms.status === 'preparing') pollPreparing(res.data.retryAfterMs ?? retryAfterMs, n + 1);
+  }, Math.max(500, Number(retryAfterMs) || 3_000));
+}
+
+// What GET /v1/llms is told: the page's address without its query or fragment
+// (a hash route stays), enough to find the docs root.
+function llmsQueryUrl(url) {
+  const u = new URL(pageUrlOf(url));
+  u.search = '';
+  return u.href;
+}
+
+const docsName = (title, host) => (String(title || '').replace(/\s*[-–|:]\s*$/, '').replace(/\s+(developer\s+)?(documentation|docs)$/i, '').trim() || host);
+
+// The site's own llms.txt found here (the library unreachable): the same prompt.
+async function localLlms(url) {
+  const found = await discover(pageUrlOf(url)).catch(() => ({}));
+  const file = found.llms;
+  if (!file?.content || !verifyLlms(file.content)) return null;
+  const title = file.content.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? '';
+  const pages = (file.content.match(/\[[^\]]+\]\((?:https?:\/\/|\/)[^)\s]+\)/g) ?? []).length;
+  const root = new URL(file.url).origin;
+  return {
+    site: siteKey(url),
+    docs: { found: true, root, verdict: 'unknown' },
+    llms: { url: file.url, source: 'site', status: 'ready', title, pages, checkedAt: new Date().toISOString(), fullUrl: null },
+    prompt: `${docsName(title, siteKey(file.url))} docs for agents: ${file.url} — read it first, then fetch only the pages you need.`,
+    retryAfterMs: null,
+  };
+}
+
+function checkedText(iso) {
+  const t = Date.parse(iso ?? '');
+  if (!t) return '';
+  const days = Math.floor((Date.now() - t) / 86_400_000);
+  return days <= 0 ? 'checked today' : days === 1 ? 'checked yesterday' : `checked ${days} days ago`;
+}
+
+// The pill, the one meta line and the button, for a state:
+// checking, yes (with the /v1/llms answer), no, or unreachable.
+function setLlms({ state, data = null }) {
+  const pill = $('llms-pill');
+  const text = $('llms-pill-text');
+  const site = siteKey(tab.url);
+  pill.hidden = state === 'unreachable';
+  pill.dataset.state = state === 'yes' ? 'yes' : state === 'no' ? 'no' : 'checking';
+  text.textContent = '';
+  $('llms-meta').hidden = state !== 'yes';
+  $('copy-llms').hidden = state !== 'yes';
+  $('llms-retry').hidden = state !== 'unreachable';
+  $('llms-status').textContent = state === 'unreachable' ? "Couldn't reach scoop.md" : '';
+  if (state === 'checking') {
+    text.textContent = 'Checking…';
+    pill.setAttribute('aria-label', "Checking this site's llms.txt");
+  } else if (state === 'no') {
+    text.textContent = 'Not a docs site';
+    pill.setAttribute('aria-label', `${site} is not a documentation site: nothing to copy`);
+  } else if (state === 'yes') {
+    const llms = data.llms;
+    const root = /^https:\/\//i.test(data.docs?.root ?? '') ? data.docs.root : null;
+    const rootHost = siteKey(root ?? llms.url);
+    if (rootHost !== site && root) {
+      text.append(Object.assign(document.createElement('a'), { href: root, target: '_blank', rel: 'noopener', textContent: `Docs at ${rootHost} ↗` }));
+      pill.setAttribute('aria-label', `The docs for ${site} are at ${rootHost}`);
+    } else {
+      text.textContent = rootHost;
+      pill.setAttribute('aria-label', `${rootHost} has an llms.txt`);
+    }
+    const meta = $('llms-meta');
+    meta.textContent = '';
+    if (llms.status === 'preparing') {
+      meta.textContent = 'Preparing llms.txt…';
+      return;
+    }
+    const name = Object.assign(document.createElement('a'), { href: llms.url, target: '_blank', rel: 'noopener', textContent: llms.source === 'scoop' ? 'llms.txt by scoop.md' : 'llms.txt' });
+    const rest = llms.source === 'scoop'
+        ? ' · ready'
+        : [llms.pages > 0 ? `${llms.pages} pages` : '', checkedText(llms.checkedAt)].filter(Boolean).map((x) => ` · ${x}`).join('');
+    meta.append(name, document.createTextNode(rest));
+  }
+}
+
+let llmsCopiedTimer = null;
+function flashLlmsCopied() {
+  $('copy-llms-label').textContent = 'Copied ✓';
+  clearTimeout(llmsCopiedTimer);
+  llmsCopiedTimer = setTimeout(() => { $('copy-llms-label').textContent = 'Copy llms.txt'; }, timing.copiedLabelMs);
+}
+$('copy-llms').onclick = async () => {
+  if (!llmsPrompt) return;
+  const ok = await writeClipboard(llmsPrompt);
+  $('llms-status').textContent = ok ? 'Copied to your clipboard.' : "Couldn't copy. Try again.";
+  if (!ok) return;
+  flashLlmsCopied();
+  if (!isPrivateHost(new URL(tab.url).hostname)) track('llms_copy', { site: siteKey(tab.url), source: llmsSource, trigger: 'button' });
+};
+$('llms-retry').onclick = () => runMain().catch(fail);
+
+// Views: the choice is remembered on this device (popupView).
+const VIEW_KEY = 'popupView';
+let advancedStarted = false;
+function setView(next) {
+  view = next;
+  try { chrome.storage.local.set({ [VIEW_KEY]: next }); } catch {}
+  if (document.body.dataset.stage === 'content') setStage('content');
+}
+$('advanced-open').onclick = () => {
+  setView('advanced');
+  if (!advancedStarted) {
+    advancedStarted = true;
+    autoCopy = false;
+    return run().catch(fail);
+  }
+  reveal();
+};
+$('advanced-back').onclick = () => {
+  setView('main');
+  if (!mainStarted) return runMain().catch(fail);
+  reveal();
+};
+
 async function main() {
   settings = await chrome.storage.sync.get(DEFAULTS);
   try { applyTheme((await chrome.storage.local.get('theme')).theme); } catch {}
@@ -1063,9 +1262,19 @@ async function main() {
   if (!/^https?:/.test(tab?.url || '')) {
     track('scoop_result', { outcome: 'unsupported_page', durationMs: 0 });
     status('Open a documentation page first.', 'err');
+    setLlms({ state: 'unreachable' });
+    $('llms-status').textContent = 'Open a documentation page first.';
+    $('llms-retry').hidden = true;
     return reveal();
   }
-  await run();
+  let saved;
+  try { saved = (await chrome.storage.local.get(VIEW_KEY))[VIEW_KEY]; } catch {}
+  view = saved === 'advanced' ? 'advanced' : 'main';
+  if (view === 'advanced') {
+    advancedStarted = true;
+    return run();
+  }
+  await runMain();
 }
 
 // The popup can't tell a toolbar click from the keyboard shortcut (MV3 has no

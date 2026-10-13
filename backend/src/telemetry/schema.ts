@@ -59,6 +59,8 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   // Tabs (0.5.0): Overview and Search on indexed sites. search never carries the query.
   tab_switch: ['extension', { tab: oneOf('page', 'overview', 'search') }],
   search: ['extension', { site, qLen: int, results: int }],
+  // The main view (0.6.0): the site's llms.txt prompt copied, by whom it was found or prepared.
+  llms_copy: ['extension', { site, source: oneOf('site', 'scoop', 'fallback'), trigger: oneOf('auto', 'button') }],
   copy_overview: ['extension', { site }],
   copy_search: ['extension', { site, count: int }],
   // How often the toolbar icon showed each docs verdict in an hour: per verdict, no sites.

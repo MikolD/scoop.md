@@ -42,6 +42,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `copied_animation_shown` | popup | `reducedMotion` (the "copied to your clipboard" moment played; never for private hosts) |
 | `tab_switch` | popup | `tab` (`page` (the Quick Copy tab) / `overview` / `search`) |
 | `search` | popup | `site`, `qLen` (length of the query, never its text), `results` |
+| `llms_copy` | popup | `site` (hostname), `source` (`site`: the site's own llms.txt / `scoop`: prepared by scoop.md / `fallback`: found by the extension when the library didn't answer), `trigger` (`auto` on opening / `button`) |
 | `copy_overview` | popup | `site` |
 | `copy_search` | popup | `site`, `count` (results copied) |
 | `badge_verdict_shown` | extension (service worker, hourly) | `verdict` (`docs` / `not_docs`), `count`: how many times the toolbar icon showed that verdict in the hour (once per tab per site); no sites |

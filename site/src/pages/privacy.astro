@@ -16,6 +16,7 @@ const events = [
   ['copied_animation_shown', 'The "copied to your clipboard" animation played, and whether your system asks for reduced motion.'],
   ['crawl_request, crawl_wait', "You were the first to scoop a docs site, so scoop.md asked for it to be crawled: the site's hostname and how the request went; then how long you waited and how it ended (ready, not developer docs, failed, you copied the page instead, it took too long or stalled, or you closed the popup)."],
   ['tab_switch', 'You switched between the Quick Copy, Overview and Search tabs: which tab.'],
+  ['llms_copy', "You copied a site's llms.txt prompt: the hostname, whether the llms.txt was the site's own or prepared by scoop.md, and whether it was copied on opening or with the button."],
   ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
   ['badge_verdict_shown', 'Once an hour at most: how many times the toolbar icon showed "developer docs" and "not developer docs". Two numbers, no sites or pages.'],
   ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
@@ -42,7 +43,8 @@ const events = [
     <ul>
       <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show on its icon whether a site is developer docs (a check, a "!" or nothing), it compares each tab's site with lists downloaded to your device and with the verdicts for sites you scooped (kept on your device for 7 days); that check never leaves your device.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
+      <li>Opening scoop.md asks the library at <code>api.scoop.md</code> for the site's llms.txt, with the page's address (without its query or fragment), never for a page on your computer or a private network. The page itself isn't read for this.</li>
+      <li>In Advanced, every scoop asks the library for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
       <li>
         Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
         path of public docs pages you scoop. The extension says so the first time you open it, with a button to turn
@@ -79,7 +81,15 @@ const events = [
     </ul>
 
     <h2>What leaves your device</h2>
-    <h3>Every scoop</h3>
+    <h3>Opening scoop.md: the site's llms.txt</h3>
+    <p>
+      When you open scoop.md on a web page, the extension sends the page's address without its query or fragment (for
+      example <code>https://docs.stripe.com/webhooks</code>) to <code>api.scoop.md/v1/llms</code>, which answers with the
+      site's llms.txt (or one scoop.md prepared for it) as a short prompt to copy. Whatever the sharing setting. Never for
+      pages on your computer or a private network. If the library doesn't answer, the extension looks for the site's
+      llms.txt itself, without your cookies.
+    </p>
+    <h3>Every scoop of the page (Advanced)</h3>
     <p>
       Each time you scoop a web page, the extension sends the site's hostname (for example <code>docs.stripe.com</code>)
       to <code>api.scoop.md/v1/skills/best</code> to look for a shared version, and to

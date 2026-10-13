@@ -9,6 +9,7 @@ export const VOTE_TIMEOUT_MS = 8_000;
 export const STATUS_TIMEOUT_MS = 3_000;
 export const CRAWL_TIMEOUT_MS = 8_000;
 export const PACKAGE_TIMEOUT_MS = 10_000;
+export const LLMS_TIMEOUT_MS = 5_000;
 export const QUICK_TIMEOUT_MS = 5_000; // finding a site's docs root can take 2–3 s cold (live on staging)
 export const SEARCH_TIMEOUT_MS = 5_000;
 export const INDEX_TIMEOUT_MS = 15_000;
@@ -64,6 +65,8 @@ export function createLibrary({ baseUrl, installId, client, telemetry = true, fe
     // Instant: what the server finds for a page right away (llms.txt files and
     // the page's .md twin, also on docs.<domain>), without crawling.
     quick: (url) => call('GET', `/quick?url=${encodeURIComponent(url)}`, undefined, QUICK_TIMEOUT_MS),
+    // The site's llms.txt as a short prompt (GET /v1/llms): what the popup copies first.
+    llms: (url) => call('GET', `/llms?url=${encodeURIComponent(url)}`, undefined, LLMS_TIMEOUT_MS),
     // Search tab and Overview tab, for indexed sites.
     search: (site, q, limit = 20) => call('GET', `/search?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}&limit=${limit}`, undefined, SEARCH_TIMEOUT_MS),
     queryPackage: (site, q) => call('GET', `/packages?site=${encodeURIComponent(site)}&q=${encodeURIComponent(q)}`, undefined, PACKAGE_TIMEOUT_MS, 'text'),

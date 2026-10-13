@@ -146,6 +146,8 @@ async function openPopup(url, { local = {}, share = true, installType = 'develop
   globalThis.addEventListener = (type, fn) => { windowListeners[type] = fn; };
   local.devLibraryUrl ??= mock.url;
   local.telemetryNoticeShown ??= true;
+  // Most tests here cover Advanced (the page copy, Overview, Search); the main view's own tests pass popupView: 'main'.
+  local.popupView ??= 'advanced';
   globalThis.chrome = {
     storage: {
       sync: {
@@ -1253,7 +1255,7 @@ test('Copy: tokens are the headline with the size beside; the button says "Copie
   await p.$('copy').onclick();
   assert.equal(p.$('copy-label').textContent, 'Copied ✓');
   assert.equal(p.$('preview').getAttribute('rows'), '4');
-  assert.equal(p.$('tab-page').textContent, 'Quick Copy');
+  assert.equal(p.$('tab-page').textContent, 'This page', 'in Advanced');
 }));
 
 test('Overview: within 16k with tokens shown; a longer llms.txt is cut and offered whole ("Copy full llms.txt")', () => withMock({
@@ -1340,3 +1342,129 @@ test('search snippets drop Markdown heading marks', () => withMock({ sites: { [S
   await waitFor(() => p.document.querySelector('.hit-snippet'));
   assert.equal(p.document.querySelector('.hit-snippet').textContent, 'Verify manually Verify webhook signatures manually');
 }));
+
+// The main view (0.6.0): the site's llms.txt as a prompt
+
+const NOW = new Date().toISOString();
+const PROMPT = 'Example docs for agents: https://docs.example.com/llms.txt — read it first, then fetch only the pages you need.';
+const llmsAnswer = (over = {}, llms = {}) => ({
+  site: SITE,
+  docs: { found: true, root: `https://${SITE}`, verdict: 'yes' },
+  llms: { url: `https://${SITE}/llms.txt`, source: 'site', status: 'ready', title: 'Example docs', pages: 412, tokens: 23000, checkedAt: NOW, fullUrl: null, ...llms },
+  prompt: PROMPT,
+  retryAfterMs: null,
+  ...over,
+});
+const main = (p) => ({
+  pill: p.$('llms-pill').dataset.state,
+  text: p.$('llms-pill-text').textContent,
+  meta: p.$('llms-meta').hidden ? null : p.$('llms-meta').textContent,
+  button: p.$('copy-llms').hidden ? null : p.$('copy-llms-label').textContent,
+});
+
+test('main view, the site’s own llms.txt: the pill, one meta line, the prompt copied at once (exact text), and nothing else runs', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer() } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.equal(p.clipboard.text, PROMPT, 'the exact prompt');
+  assert.deepEqual(main(p), { pill: 'yes', text: SITE, meta: 'llms.txt · 412 pages · checked today', button: 'Copied ✓' });
+  assert.equal(p.$('llms-meta').querySelector('a').getAttribute('href'), `https://${SITE}/llms.txt`);
+  assert.deepEqual(stages(), ['loading', 'copied', 'content']);
+  assert.equal(p.$('main').hidden, false);
+  assert.equal(p.$('tabs').hidden, true, 'Advanced is behind its link');
+  assert.equal(p.$('advanced-open').hidden, false);
+  assert.deepEqual(gets('/v1/llms')[0].query, { url: PAGE });
+  assert.equal(gets('/v1/packages').length + gets('/v1/quick').length + posts('/v1/skills').length + posts('/v1/crawl-requests').length, 0, 'no page scoop, no share, no crawl');
+  assert.deepEqual(queued(p.local, 'llms_copy'), [{ site: SITE, source: 'site', trigger: 'auto' }]);
+  await waitFor(() => p.local.docsVerdicts?.[SITE]?.v === 'docs');
+  await p.$('copy-llms').onclick();
+  await waitFor(() => queued(p.local, 'llms_copy').length === 2);
+  assert.deepEqual(queued(p.local, 'llms_copy').at(-1), { site: SITE, source: 'site', trigger: 'button' });
+}));
+
+test('main view: the page address without its query goes to /v1/llms; docs elsewhere show "✓ Docs at <host> ↗"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ docs: { found: true, root: `https://${SUB}`, verdict: 'yes' } }, { url: `https://${SUB}/llms.txt` }) } } }, async () => {
+  const p = await openPopup(`${PAGE}?tab=js&utm_source=x#install`, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.deepEqual(gets('/v1/llms')[0].query, { url: PAGE });
+  assert.equal(main(p).text, `Docs at ${SUB} ↗`);
+  assert.equal(p.$('llms-pill-text').querySelector('a').getAttribute('href'), `https://${SUB}`);
+  assert.equal(p.$('llms-pill').getAttribute('aria-label'), `The docs for ${SITE} are at ${SUB}`);
+}));
+
+test('main view, an llms.txt prepared by scoop.md and ready: "llms.txt by scoop.md · ready"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ prompt: 'Example docs for agents (llms.txt prepared by scoop.md): https://scoop.md/docs.example.com/llms.txt — read it first, then fetch only the pages you need.' }, { source: 'scoop', url: 'https://scoop.md/docs.example.com/llms.txt' }) } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.equal(p.clipboard.text, 'Example docs for agents (llms.txt prepared by scoop.md): https://scoop.md/docs.example.com/llms.txt — read it first, then fetch only the pages you need.');
+  assert.equal(main(p).meta, 'llms.txt by scoop.md · ready');
+  assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['scoop']);
+}));
+
+test('main view, preparing: copied at once, "Preparing llms.txt…", then asked again until ready', () => withMock({ sites: { [SITE]: { llmsApi: [
+  llmsAnswer({ retryAfterMs: 20, prompt: 'P1' }, { source: 'scoop', status: 'preparing', url: 'https://scoop.md/docs.example.com/llms.txt' }),
+  llmsAnswer({ retryAfterMs: 20, prompt: 'P1' }, { source: 'scoop', status: 'preparing', url: 'https://scoop.md/docs.example.com/llms.txt' }),
+  llmsAnswer({ prompt: 'P2' }, { source: 'scoop', status: 'ready', url: 'https://scoop.md/docs.example.com/llms.txt' }),
+] } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.equal(p.clipboard.text, 'P1', 'the URL already works: copied at once');
+  assert.equal(main(p).meta, 'Preparing llms.txt…');
+  await waitFor(() => main(p).meta === 'llms.txt by scoop.md · ready', 4000);
+  assert.equal(gets('/v1/llms').length, 3);
+  await p.$('copy-llms').onclick();
+  assert.equal(p.clipboard.text, 'P2', 'the latest prompt');
+}));
+
+test('main view, not docs: "✕ Not a docs site", no button, nothing copied, the toolbar learns it', () => withMock({ sites: { [SITE]: {} } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.deepEqual(main(p), { pill: 'no', text: 'Not a docs site', meta: null, button: null });
+  assert.equal(p.clipboard.text, null);
+  assert.deepEqual(stages(), ['loading', 'content'], 'no copied moment');
+  assert.deepEqual(queued(p.local, 'llms_copy'), []);
+  await waitFor(() => p.local.docsVerdicts?.[SITE]?.v === 'not_docs');
+}));
+
+test('main view, the library unreachable: the site’s own verified llms.txt gives the same prompt here', () => withMock({ sites: {} }, async () => {
+  const p = await openPopup(`https://${SUB}/guide`, { local: { popupView: 'main', devLibraryUrl: 'http://localhost:9/v1' } });
+  await p.ready;
+  assert.equal(p.clipboard.text, 'Example docs for agents: https://docs.example.org/llms.txt — read it first, then fetch only the pages you need.');
+  assert.equal(main(p).text, SUB);
+  assert.match(main(p).meta, /^llms\.txt · 1 pages · checked today$/);
+  assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['fallback']);
+  assert.equal(p.local.docsVerdicts, undefined, 'a local find is not a verdict');
+}));
+
+test('main view, the library unreachable and no llms.txt here: "Couldn’t reach scoop.md" and Retry', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer() } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main', devLibraryUrl: 'http://localhost:9/v1' } });
+  await p.ready;
+  assert.equal(p.$('llms-status').textContent, "Couldn't reach scoop.md");
+  assert.equal(p.$('llms-retry').hidden, false);
+  assert.equal(p.$('copy-llms').hidden, true);
+  assert.equal(p.$('llms-pill').hidden, true);
+  assert.equal(p.clipboard.text, null);
+}));
+
+test('Advanced from the main view: this page’s copy is built but not copied over the prompt; Copy copies it; Overview and Search are there; the view is remembered', () => withMock({ sites: { [SITE]: { indexed: true, topics: TOPICS, llmsApi: llmsAnswer() } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  await p.$('advanced-open').onclick();
+  assert.equal(p.local.popupView, 'advanced');
+  assert.equal(p.$('main').hidden, true);
+  assert.equal(p.$('tabs').hidden, false);
+  assert.equal(p.$('tab-page').textContent, 'This page');
+  assert.equal(p.clipboard.text, PROMPT, 'the prompt stays on the clipboard');
+  assert.equal(p.$('preview').value, packageFor(SITE, PAGE), 'the page package is ready');
+  await p.$('copy').onclick();
+  assert.equal(p.clipboard.text, packageFor(SITE, PAGE));
+  p.$('tab-overview').onclick();
+  await waitFor(() => !p.$('copy-overview').disabled);
+  p.$('advanced-back').onclick();
+  assert.equal(p.$('main').hidden, false);
+  assert.equal(p.local.popupView, 'main');
+}));
+
+test('0.6.0: the version, the main button wording, and no paywall words', () => {
+  assert.equal(MANIFEST.version, '0.6.0');
+  const html = read('../extension/popup.html');
+  assert.match(html, /<span id="copy-llms-label">Copy llms\.txt<\/span>/);
+  assert.match(html, /Advanced ›/);
+});

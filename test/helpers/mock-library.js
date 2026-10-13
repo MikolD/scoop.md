@@ -8,7 +8,8 @@
 //   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...],
 //   isDevDocs: { verdict, method, score }, quickDevDocs, agentInstructions: [{ text, url }],
 //   docs: { found, root, via, verdict } (/quick's docs field), llms: { url, verified, fullUrl, fullVerified },
-//   notDocs: true (listed in /sites/index notDocs) } }
+//   notDocs: true (listed in /sites/index notDocs),
+//   llmsApi: the GET /v1/llms answer, or a list of answers given in turn (the last one repeats); llmsDelayMs } }
 // GET /sites/index lists indexed sites and notDocs hosts with an ETag (304 for If-None-Match).
 // A crawl request moves one step per GET /crawl-requests/:id; at "complete"
 // the site becomes indexed. hold: true stays at the last step before it.
@@ -120,6 +121,14 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
       if (!site(name).indexed || site(name).packages404) return json(404, { error: { code: 'not_indexed', message: `${name} is not indexed` } });
       res.writeHead(200, { 'content-type': 'text/markdown; charset=utf-8' });
       return res.end(site(name).packageText ?? packageFor(name, u.searchParams.get('url')));
+    }
+    if (req.method === 'GET' && u.pathname === '/v1/llms') {
+      const name = new URL(u.searchParams.get('url')).hostname;
+      const s = site(name);
+      if (s.llmsDelayMs) await new Promise((r) => setTimeout(r, s.llmsDelayMs));
+      const answers = [s.llmsApi ?? { site: name, docs: { found: false, root: null, verdict: 'no' }, llms: null, prompt: null, retryAfterMs: null }].flat();
+      s.llmsCalls = (s.llmsCalls ?? 0) + 1;
+      return json(200, answers[Math.min(s.llmsCalls - 1, answers.length - 1)]);
     }
     if (req.method === 'GET' && u.pathname === '/v1/quick') {
       const pageUrl = u.searchParams.get('url');

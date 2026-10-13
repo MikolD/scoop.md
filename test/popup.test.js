@@ -71,6 +71,8 @@ async function openPopup(url, { libraryUrl = apiUrl, share = true, installType =
     runtime: { getManifest: () => MANIFEST, openOptionsPage() {}, setUninstallURL: async () => {} },
   };
   local.devLibraryUrl = libraryUrl;
+  // These tests cover the page copy, now in Advanced (the main view is in popup-ux.test.js).
+  local.popupView = 'advanced';
   globalThis.chrome.management = { getSelf: async () => ({ installType }) };
   const popup = await import(`../extension/popup.js?${Math.random()}`);
   await popup.ready;

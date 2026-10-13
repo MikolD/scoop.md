@@ -62,8 +62,21 @@
 
     <p id="announce" class="sr" aria-live="polite"></p>
 
-    <div id="tabs" class="tabs" role="tablist" aria-label="What to copy" hidden>
-      <button id="tab-page" class="tab" role="tab" type="button" aria-selected="true" aria-controls="content">Quick Copy</button>
+    <!-- The main view: the site's llms.txt, as a short prompt for the agent. -->
+    <section id="main" class="card main" aria-labelledby="llms-pill" hidden>
+      <span id="llms-pill" class="chip" data-state="checking" role="img" aria-label="Checking this site's llms.txt"><span class="chip-icon" aria-hidden="true"></span><span id="llms-pill-text">Checking…</span></span>
+      <p id="llms-meta" class="meta" hidden></p>
+      <button id="copy-llms" class="copy" type="button" hidden>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        <span id="copy-llms-label">Copy llms.txt</span>
+      </button>
+      <p id="llms-status" class="meta" role="status"></p>
+      <button id="llms-retry" class="small" type="button" hidden>Retry</button>
+    </section>
+    <p class="views"><button id="advanced-open" class="link" type="button" hidden>Advanced ›</button><button id="advanced-back" class="link" type="button" hidden>‹ llms.txt</button></p>
+
+    <div id="tabs" class="tabs" role="tablist" aria-label="Advanced: what to copy" hidden>
+      <button id="tab-page" class="tab" role="tab" type="button" aria-selected="true" aria-controls="content">This page</button>
       <button id="tab-overview" class="tab" role="tab" type="button" aria-selected="false" aria-controls="overview" tabindex="-1">Overview</button>
       <button id="tab-search" class="tab" role="tab" type="button" aria-selected="false" aria-controls="search" tabindex="-1">Search</button>
     </div>
