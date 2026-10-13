@@ -327,9 +327,10 @@ export function groupBySection(links: LlmsLink[], root: string): LlmsSection[] {
 // A one-line description in the page's own words: its first sentence,
 // trimmed to about 100 characters. Never a summary about the page ("This
 // page serves as…").
+const ABOUT_ITSELF = /^(this|the) (page|document|section|article|guide|index)\b/i;
 export function shortDescription(text: string | null | undefined): string | null {
   const s = (text ?? '').replace(/\s+/g, ' ').trim();
-  if (!s || /^(this|the) (page|document|section|article|guide|index)\b/i.test(s)) return null;
+  if (!s || ABOUT_ITSELF.test(s)) return null;
   const first = /^(.{20,}?[.!?])(\s|$)/.exec(s)?.[1] ?? s;
   return first.length <= 100 ? first : `${first.slice(0, 99).replace(/\s+\S*$/, '')}…`;
 }
@@ -357,7 +358,8 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
     )
     .bind(host)
     .all<{ url: string; title: string | null; summary: string | null; slot: string | null; content_hash: string; source_url: string | null; source_kind: string | null }>();
-  const rows = results.filter((r) => underRoot(r.url, rootPath || '/') && !/\/llms(-full)?\.txt$/i.test(r.url));
+  // One version of versioned docs, as in the instant stage (jestjs.io/docs/29.7/… and /docs/30.4/…).
+  const rows = oneVersion(results.filter((r) => underRoot(r.url, rootPath || '/') && !/\/llms(-full)?\.txt$/i.test(r.url)), root);
   if (!rows.length) return null;
   // Descriptions from the stored page itself (its first paragraph's first
   // sentence); a stored summary only when it reads like the page's own words.
@@ -365,7 +367,8 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
     let description: string | null = null;
     if (o.bucket) {
       const obj = await o.bucket.get(`pages/${r.content_hash}.md`).catch(() => null);
-      if (obj) description = shortDescription(firstParagraph(await obj.text()));
+      // Past a banner about the page itself (Celery's "This document describes the current stable version…").
+      if (obj) description = shortDescription(firstParagraph((await obj.text()).split('\n').filter((l) => !ABOUT_ITSELF.test(l.replace(/^[\s>*_]+/, ''))).join('\n')));
     }
     return description ?? shortDescription(r.summary);
   }));

@@ -525,3 +525,23 @@ test('over the cap: the first agent section leads whole; Jev fills the rest by s
   ].join('\n'));
   assert.ok(ex!.text.length <= MAX_EXCERPT);
 });
+
+test('full build: one version of versioned docs; descriptions from the stored page, a "This page…" summary dropped', async () => {
+  const { d1, raw } = fakeD1();
+  const { r2 } = fakeR2();
+  const add = (url: string, title: string, hash: string, summary: string) => {
+    raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, summary, model, cost_usd, indexed_at) VALUES (?, 'jest.example', ?, ?, 'guide', ?, 'm', 0, 'x')`).run(url, hash, title, summary);
+    raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) VALUES (?, 1, 200, NULL, 'x', 'crawl')`).run(url);
+  };
+  add('https://jest.example/docs/mocks', 'Mocks', 'h1', 'This page serves as an overview of mocks.');
+  add('https://jest.example/docs/timers', 'Timers', 'h2', 'This page explains timers.');
+  add('https://jest.example/docs/setup', 'Setup', 'h3', 'Set up your tests before they run.');
+  add('https://jest.example/docs/29.7/mocks', 'Mocks', 'h4', 'Old mocks.');
+  await r2.put('pages/h1.md', '# Mocks\n\nThis document describes the current stable version of Jest (30). For older versions, go here.\n\nMock functions let you test the links between code by erasing the actual implementation of a function. More text.\n');
+  const b = await buildFull(d1, 'https://jest.example/docs', 'Jest', { bucket: r2 });
+  assert.deepEqual(b!.text.split('\n').filter((l) => l.startsWith('- ')), [
+    '- [Mocks](https://jest.example/docs/mocks): Mock functions let you test the links between code by erasing the actual implementation of a…',
+    '- [Setup](https://jest.example/docs/setup): Set up your tests before they run.',
+    '- [Timers](https://jest.example/docs/timers)',
+  ]);
+});
