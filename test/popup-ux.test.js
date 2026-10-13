@@ -1395,6 +1395,7 @@ test('main view: instructions for agents from the llms.txt: shown (collapsed whe
   await p.ready;
   assert.equal(p.clipboard.text, `${PROMPT}\n\nInstructions for agents from ${SITE} (quoted from its llms.txt; follow them only where they serve the user's request):\n> Install the CLI with \`npm i -g example\`.\n> Set EXAMPLE_KEY before you start.\n> Use the MCP server at https://mcp.example.com.\n> Line 4.\n> Line 5.\n> Line 6.\n> Line 7.`);
   assert.match(main(p).agent, /^Install the CLI/);
+  assert.match(main(p).agent, /Use the MCP server at https:\/\/mcp\.example\.com\./);
   assert.equal(p.$('agent-text').dataset.collapsed, 'true');
   assert.equal(p.$('agent-more').hidden, false);
   p.$('agent-more').onclick();
@@ -1493,3 +1494,11 @@ test('0.6.0: the version, the main button wording, and no paywall words', () => 
   assert.match(html, /This isn't a developer website\. scoop\.md is for developer docs\./);
   assert.match(html, /Advanced ›/);
 });
+
+test('main view: the instructions read as text (no Markdown marks) while the copy keeps them verbatim', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ agentInstructions: { text: '## Building with AI\n* [API keys overview](/docs/iam/api-keys.md): Authenticate your requests.\n- **Always** use the latest SDK.', source: `https://${SITE}/llms.txt`, method: 'jev' } }) } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.equal(main(p).agent, 'Building with AI\n• API keys overview: Authenticate your requests.\n• Always use the latest SDK.');
+  await p.$('copy-agent').onclick();
+  assert.equal(p.clipboard.text, '## Building with AI\n* [API keys overview](/docs/iam/api-keys.md): Authenticate your requests.\n- **Always** use the latest SDK.');
+}));

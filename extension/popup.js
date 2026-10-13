@@ -1213,7 +1213,7 @@ function setLlms({ state, data = null }) {
   $('llms-field').setAttribute('aria-label', `Open ${llms.url}${llms.source === 'scoop' ? ', prepared by scoop.md' : ''}`);
   const text = agentInstructions(data);
   $('agent-block').hidden = !text;
-  $('agent-text').textContent = text;
+  $('agent-text').textContent = readable(text);
   const long = text.split('\n').length > 6 || text.length > 360;
   $('agent-text').dataset.collapsed = String(long);
   $('agent-more').hidden = !long;
@@ -1226,6 +1226,16 @@ function setLlms({ state, data = null }) {
   if ($('copy-llms-label').textContent !== 'Copied ✓') $('copy-llms-label').textContent = llmsLabel;
 }
 let llmsLabel = 'Copy llms.txt';
+
+// The instructions as the popup shows them: Markdown marks left out (headings'
+// #, emphasis, link targets), bullets as •. What is copied stays verbatim.
+function readable(text) {
+  return text.split('\n').map((line) => line
+    .replace(/^\s*#{1,6}\s+/, '')
+    .replace(/^(\s*)[*-]\s+/, '$1• ')
+    .replace(/!?\[([^\]]*)\]\([^)\s]*\)/g, '$1')
+    .replace(/\*\*([^*]+)\*\*/g, '$1')).join('\n');
+}
 
 let llmsCopiedTimer = null;
 function flashLlmsCopied() {
