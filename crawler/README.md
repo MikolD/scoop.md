@@ -15,7 +15,7 @@ Workflow when discovery marks a site `needs_browser`.
 - `server.js` — the template's start command (port 8080): `POST /run`,
   `GET /status`, `GET /result`, `GET /health`. See the header comment.
 - `lib.js` — pure helpers (tested from the repo's `test/crawler.test.js`).
-- `vendor/` — copies of `extension/lib/extract.js`,
+- `vendor/` — copies of `shared/extract.js`,
   `backend/src/crawl/robots.ts`, `backend/src/crawl/skip.ts` and
   `backend/src/lib/urls.ts`. Refresh with `npm run sync`; a test fails when
   they drift.

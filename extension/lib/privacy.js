@@ -40,3 +40,17 @@ export function scrubText(text) {
     .replace(/\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}(?::\d+)?(?:\/\S*)?/gi, '<host>')
     .replace(/[A-Za-z0-9_\-+/=]{24,}/g, '<token>');
 }
+
+// Tracking parameters (utm_*, click IDs, ref) dropped from a URL; the rest of
+// the query kept byte for byte. The same as shared/extract.js's, which the
+// crawler vendors on its own.
+const TRACKING = /^(utm_.*|_gl|_ga|gclid|dclid|gbraid|wbraid|fbclid|msclkid|yclid|igshid|mc_cid|mc_eid|_hsenc|_hsmi|mkt_tok|ref_src|ref_url)$/i;
+export function stripTracking(url) {
+  const u = new URL(url);
+  const kept = u.search.slice(1).split('&').filter((pair) => {
+    const key = pair.split('=')[0];
+    try { return pair && !TRACKING.test(decodeURIComponent(key)); } catch { return true; }
+  });
+  u.search = kept.length ? `?${kept.join('&')}` : '';
+  return u.href;
+}

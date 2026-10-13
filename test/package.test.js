@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOverviewPackage, buildPackage, buildPagePackage, packageMeta, PAGE_BUDGET, tokenEstimate, verifyLlms, withCurrentPage } from '../extension/lib/package.js';
+import { buildOverviewPackage, buildPackage, buildPagePackage, packageMeta, PAGE_BUDGET, tokenEstimate, verifyLlms, withCurrentPage } from '../shared/package.js';
 
 const now = new Date('2026-09-30T00:00:00Z');
 

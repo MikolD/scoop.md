@@ -6,7 +6,7 @@ Usage statistics for scoop.md: who installs and keeps the extension, which docum
 
 - **No identity.** No names, emails, Google account, cookies. The extension's random install ID is the only identifier.
 - **No IP addresses stored.** The IP is used at ingest for rate limiting (the IP subject: IPv4, or the IPv6 /64), for Cloudflare's country/region/continent/network lookup (`request.cf`), and for `ip_hash = HMAC(dayKey, "ip:" + subject)`, kept for abuse analysis. `dayKey` is a random 256-bit key per UTC day in `TELEMETRY_DB.day_keys`, deleted after 48 hours; after that nobody (admins included) can link a hash to an IP or to another day. `ip_hash` is never written to the R2 archive and is cleared in D1 after 30 days. The website's visitor ID is `HMAC(dayKey, "visitor:" + subject + user agent)`. The raw IP never reaches the queue, D1 or R2.
-- **A notice first.** The first popup shows "scoop.md sends anonymous usage statistics, including the hostname and path of public docs pages you scoop." with [Turn off] and [OK], whatever the sharing setting. Until it has been shown (`telemetryNoticeShown`), events carry no `site` or `path`; lifecycle events still go.
+- **A notice first.** The first popup shows "scoop.md sends anonymous usage statistics, including the hostname of the sites you open it on." (before 0.6.0: "…including the hostname and path of public docs pages you scoop.") with [Turn off] and [OK], whatever the sharing setting. Until it has been shown (`telemetryNoticeShown`), events carry no `site` or `path`; lifecycle events still go.
 - **Only the clicked tab.** Events describe the page the user clicked scoop.md on, nothing else.
 - **No private hosts.** Nothing about a page on a private host (`isPrivateHost` in `extension/lib/hosts.js`: localhost, private, link-local, benchmarking (198.18/15) and multicast/reserved (224+) IPs, single-label names, `.local`, `.internal`, `.lan`, `.home.arpa`, `.home`, `.corp`, `.intranet`, `.private`, `.test`, `.example`, `.invalid`, `.onion`, `.i2p`). The extension sends no events for the scoop; the server drops any event naming one.
 - **Sites and paths.** `scoop_start` names no site. On `scoop_result` and the events after it (copy, share, vote, report, rebuild): the hostname when the page was public or the library has the site, else only its registrable domain (`extension/lib/hosts.js` `registrableDomain`: `acme.atlassian.net` → `atlassian.net`). A path only when the scoop found a docs source (`page-md`, `llms`, `llms-full`) or the page is public HTML that looks like docs (`docsLike`: a `docs.`/`developer.`/… host or a `/docs`/`/guide`/`/reference`/… path). Paths have no query string or fragment (a `#/` route stays, cut at `?`, `&` or a second `#`), tracking parameters are stripped, and secret-looking segments (`extension/lib/privacy.js` `SECRETISH`: long letters-and-digits, 12+ hex, UUIDs; readable slugs, where every part looks like a word or number and one is a real word, excepted) become `:id`, in the extension and again on the server.
@@ -35,22 +35,24 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `telemetry_opt_out` / `telemetry_opt_in` | extension (options) | |
 | `popup_open` | popup | `trigger` (accepted, not sent: MV3 can't tell toolbar from shortcut) |
 | `popup_close` | popup | `durationMs` |
-| `scoop_start` | popup | (none: the site is named on `scoop_result`) |
-| `scoop_result` | popup | `site`, `path`, `outcome` (`copied_ready` / `empty` / `error` / `unsupported_page`), `sourceKinds[]`, `sources`, `sizeBytes`, `truncated`, `durationMs`, `libraryHit`, `libraryWorked`, `indexHit`, `isPublic`, `relatedLinks`, `clipboard` (`sourceKinds` is `["index"]` for a package from the docs index) |
-| `copy` | popup | `site`, `path`, `sizeBytes`, `trigger` (`auto` / `button`) |
-| `rebuild` | popup | `site`, `path` |
+| `scoop_start` | popup (before 0.6.0) | (none: the site is named on `scoop_result`) |
+| `scoop_result` | popup (before 0.6.0) | `site`, `path`, `outcome` (`copied_ready` / `empty` / `error` / `unsupported_page`), `sourceKinds[]`, `sources`, `sizeBytes`, `truncated`, `durationMs`, `libraryHit`, `libraryWorked`, `indexHit`, `isPublic`, `relatedLinks`, `clipboard` (`sourceKinds` is `["index"]` for a package from the docs index) |
+| `copy` | popup (before 0.6.0) | `site`, `path`, `sizeBytes`, `trigger` (`auto` / `button`) |
+| `rebuild` | popup (before 0.6.0) | `site`, `path` |
 | `copied_animation_shown` | popup | `reducedMotion` (the "copied to your clipboard" moment played; never for private hosts) |
-| `tab_switch` | popup | `tab` (`page` (the Quick Copy tab) / `overview` / `search`) |
-| `search` | popup | `site`, `qLen` (length of the query, never its text), `results` |
-| `copy_overview` | popup | `site` |
-| `copy_search` | popup | `site`, `count` (results copied) |
-| `badge_verdict_shown` | extension (service worker, hourly) | `verdict` (`docs` / `not_docs`), `count`: how many times the toolbar icon showed that verdict in the hour (once per tab per site); no sites |
-| `crawl_request` | popup | `site`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` / `error` when the request itself failed) |
-| `crawl_wait` | popup | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it) / `timeout` (gave up after 10 minutes and copied the page; the service worker keeps following it) / `stalled_index` (indexing stopped making progress, so the pages already indexed were delivered)) |
-| `share_result` | popup | `site`, `path`, `outcome` (`shared` / `duplicate` / `not_shared`), `reason` (`sharing_off`, `not_devdocs`, `private_host`, `signed_in`, or the library's error code) |
-| `vote` | popup | `site`, `path`, `skillId`, `worked`, `ok` |
-| `report` | popup | `site`, `path`, `skillId`, `reason`, `ok` |
-| `settings_change` | popup, options | `key` (`share` / `theme` / `telemetry`), `value` |
+| `tab_switch` | popup (before 0.6.0) | `tab` (`page` (the Quick Copy tab) / `overview` / `search`) |
+| `search` | popup (before 0.6.0) | `site`, `qLen` (length of the query, never its text), `results` |
+| `llms_copy` | popup | `site` (hostname), `source` (`site`: the site's own llms.txt / `scoop`: prepared by scoop.md / `fallback`: found by the extension when the library didn't answer), `trigger` (`auto` on opening / `button`) |
+| `copy_overview` | popup (before 0.6.0) | `site` |
+| `copy_search` | popup (before 0.6.0) | `site`, `count` (results copied) |
+| `badge_verdict_shown` | extension (service worker, hourly; before 0.6.0) | `verdict` (`docs` / `not_docs`), `count` |
+| `badge_llms_shown` | extension (service worker, hourly) | `level` (`1`: the site has an llms.txt / `2`: llms.txt and instructions for agents), `count`: how many times the toolbar badge showed it in the hour (once per tab per site); no sites |
+| `crawl_request` | popup (before 0.6.0) | `site`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` / `error` when the request itself failed) |
+| `crawl_wait` | popup (before 0.6.0) | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it) / `timeout` (gave up after 10 minutes and copied the page; the service worker keeps following it) / `stalled_index` (indexing stopped making progress, so the pages already indexed were delivered)) |
+| `share_result` | popup (before 0.6.0) | `site`, `path`, `outcome` (`shared` / `duplicate` / `not_shared`), `reason` (`sharing_off`, `not_devdocs`, `private_host`, `signed_in`, or the library's error code) |
+| `vote` | popup (before 0.6.0) | `site`, `path`, `skillId`, `worked`, `ok` |
+| `report` | popup (before 0.6.0) | `site`, `path`, `skillId`, `reason`, `ok` |
+| `settings_change` | popup, options | `key` (`share` (before 0.6.0) / `theme` / `telemetry`), `value` |
 | `options_open` | options | |
 | `error` | popup | `where`, `code`, `message` (≤200 chars; emails, URLs, hostnames and tokens removed on both sides) |
 | `page_view` | website | `path`, `referrerHost`, `utmSource`, `utmMedium`, `utmCampaign` |

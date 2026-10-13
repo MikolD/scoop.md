@@ -117,12 +117,8 @@ export function compact(text) {
 }
 
 // llms.txt that is what it claims: Markdown starting with an H1, with at least one link.
-export function verifyLlms(content) {
-  if (typeof content !== 'string') return false;
-  const first = content.split('\n').find((l) => l.trim());
-  // A link: absolute, or site-relative (/docs/x.md, as twilio.com's llms.txt has them).
-  return Boolean(first && /^#\s+\S/.test(first.trim()) && /\[[^\]]+\]\((?:https?:\/\/|\/)[^)\s]+\)/.test(content));
-}
+// The same check the extension makes (one definition, in the extension).
+export { verifyLlms } from '../extension/lib/llms.js';
 
 const QUOTED_HEADING = '## What this site says to AI agents';
 export function buildPagePackage({ site, title, pageUrl, devDocs = true, llms = null, llmsFull = null, instructions = [], sections = [], relatedLinks = [], budget = PAGE_BUDGET }) {

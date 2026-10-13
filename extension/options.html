@@ -17,27 +17,16 @@
   <main>
     <section id="pin-hint" class="card pin-hint" hidden>
       <div class="row">
-        <span class="text"><svg class="pin" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg><span>Pin scoop.md to the toolbar to see which sites have developer docs <span class="meta">(puzzle-piece menu › pin)</span>.</span></span>
+        <span class="text"><svg class="pin" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg><span>Pin scoop.md to the toolbar to see which sites have an llms.txt <span class="meta">(puzzle-piece menu › pin)</span>.</span></span>
         <button id="pin-ok" class="button" type="button">OK</button>
       </div>
-    </section>
-
-    <section class="card">
-      <label class="row" for="share">
-        <span class="text">
-          <span class="title">Share with the library</span>
-          <span class="meta">Public docs you scoop help the next person on that site. Pages behind a login are never shared.</span>
-          <span class="meta">Turning this off stops uploads; looking up this page in the docs index still sends its address.</span>
-        </span>
-        <input id="share" type="checkbox" class="toggle" role="switch">
-      </label>
     </section>
 
     <section class="card">
       <label class="row" for="telemetry">
         <span class="text">
           <span class="title">Send usage statistics</span>
-          <span class="meta">Anonymous events: which public docs sites and pages you scoop, whether it worked, versions, browser, OS and errors. Never page content or anything signed-in.</span>
+          <span class="meta">Anonymous events: which sites you open scoop.md on, whether their llms.txt was copied, versions, browser, OS and errors. Never page content or anything signed-in.</span>
           <span class="meta">Install ID <span id="install-id" class="mono"></span>, for <a href="https://scoop.md/privacy#usage-statistics" target="_blank" rel="noopener">deletion requests</a>.</span>
         </span>
         <input id="telemetry" type="checkbox" class="toggle" role="switch">

@@ -59,9 +59,13 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   // Tabs (0.5.0): Overview and Search on indexed sites. search never carries the query.
   tab_switch: ['extension', { tab: oneOf('page', 'overview', 'search') }],
   search: ['extension', { site, qLen: int, results: int }],
+  // The main view (0.6.0): the site's llms.txt prompt copied, by whom it was found or prepared.
+  llms_copy: ['extension', { site, source: oneOf('site', 'scoop', 'fallback'), trigger: oneOf('auto', 'button') }],
   copy_overview: ['extension', { site }],
   copy_search: ['extension', { site, count: int }],
-  // How often the toolbar icon showed each docs verdict in an hour: per verdict, no sites.
+  // How often the toolbar badge showed "1" (llms.txt) or "2" (llms.txt + instructions) in an hour: per level, no sites.
+  badge_llms_shown: ['extension', { level: int, count: int }],
+  // 0.5.x: how often the toolbar icon showed each docs verdict in an hour (still accepted from those versions).
   badge_verdict_shown: ['extension', { verdict: oneOf('docs', 'not_docs'), count: int }],
   // The docs index: asking for a crawl and waiting for it
   crawl_request: ['extension', { site, state: oneOf('queued', 'running', 'indexing', 'complete', 'rejected', 'failed', 'rate_limited', 'error') }],

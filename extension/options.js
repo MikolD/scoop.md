@@ -9,7 +9,7 @@ function applyTheme(theme) {
   else delete document.documentElement.dataset.theme;
 }
 
-// Once, in Settings too: pinning shows on the icon whether each site is developer docs.
+// Once, in Settings too: pinning shows "1" or "2" on the icon for sites with an llms.txt.
 const PIN_KEY = 'pinHintSettingsSeen';
 Promise.all([chrome.storage.local.get(PIN_KEY), chrome.action?.getUserSettings?.()]).then(([{ [PIN_KEY]: seen }, user]) => {
   if (seen || user?.isOnToolbar !== false) return;
@@ -23,11 +23,6 @@ Promise.all([chrome.storage.local.get(PIN_KEY), chrome.action?.getUserSettings?.
 // The library URL is no longer a setting.
 chrome.storage.sync.remove('libraryUrl');
 
-chrome.storage.sync.get({ share: true }).then(({ share }) => { $('share').checked = share; });
-$('share').onchange = () => {
-  telemetry.track('settings_change', { key: 'share', value: String($('share').checked) });
-  return chrome.storage.sync.set({ share: $('share').checked });
-};
 
 // Off sends one telemetry_opt_out event, then nothing (lib/telemetry.js).
 telemetryEnabled(chrome).then((on) => { $('telemetry').checked = on; });

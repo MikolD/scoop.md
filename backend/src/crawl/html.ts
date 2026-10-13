@@ -1,10 +1,10 @@
 // HTML → Markdown for server-rendered docs (html sites), with the extension's
-// own extractor (extension/lib/extract.js) over linkedom, so a crawled page
+// own extractor (shared/extract.js) over linkedom, so a crawled page
 // reads the same as a scooped one. Plain JS DOM, no Workers APIs.
 
 import { DOMParser } from 'linkedom';
-import { htmlToMarkdown, pickMain, relatedLinks } from '../../../extension/lib/extract.js';
-import type { DomNode } from '../../../extension/lib/extract.js';
+import { htmlToMarkdown, pickMain, relatedLinks } from '../../../shared/extract.js';
+import type { DomNode } from '../../../shared/extract.js';
 
 // Below this many words the extraction is treated as having failed: a client
 // shell, a login wall or a page that is mostly navigation.

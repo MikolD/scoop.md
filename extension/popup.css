@@ -1,5 +1,5 @@
-/* Layout: a header on the tinted background, then white cards: the text to
-   paste with one Copy button, and the library (share status, feedback). */
+/* Layout: a header on the tinted background, then one white card: the site's
+   llms.txt, its instructions for agents and one Copy button. */
 /* Tokens live in theme.css; rules below use only var(--…). */
 [hidden] { display: none !important; }
 * { box-sizing: border-box; }
@@ -33,39 +33,13 @@ main { display: grid; gap: var(--gap); padding: 0 var(--pad) var(--pad); }
 .x { margin-left: auto; padding: 0 4px; border: 0; background: none; color: var(--muted); font-size: 16px; line-height: 1; cursor: pointer; }
 
 .meta { color: var(--muted); font-size: var(--text-sm); }
-.head { display: grid; gap: 2px; min-width: 0; }
-#status { font-size: var(--text-md); font-weight: var(--weight-bold); }
-#status.busy { color: var(--muted); font-weight: var(--weight-medium); }
-#status.err { color: var(--err); }
-/* Success is shown by the Copy button and the copied moment; the line stays for screen readers. */
-#status.ok { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-
-#preview { display: block; width: 100%; height: calc(4lh + 20px); resize: none; padding: 10px var(--gap); border: 1px solid var(--line); border-radius: var(--radius); background: var(--well); color: var(--fg); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; overflow: auto; }
-#preview:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
-
 .copy { display: flex; align-items: center; justify-content: center; gap: var(--gap-sm); width: 100%; padding: 12px var(--card-pad); border: 0; border-radius: var(--radius); background: var(--accent); color: var(--on-accent); font-weight: var(--weight-bold); font-size: var(--text-md); cursor: pointer; }
 .copy:hover { background: var(--accent-hover); }
 .copy:disabled { opacity: .5; cursor: default; background: var(--accent); }
 
-/* Library card */
-.foot { gap: var(--gap-sm); }
-#share.warn { color: var(--warn); }
-#feedback { display: flex; align-items: center; gap: var(--gap-sm); }
-.label { font-weight: var(--weight-strong); }
-.vote { display: grid; place-items: center; width: var(--icon-button); height: var(--icon-button); padding: 0; border: 1.5px solid var(--line); border-radius: 50%; background: none; color: var(--muted); cursor: pointer; }
-.vote:hover { color: var(--link); border-color: var(--link); }
-.vote svg { width: 15px; height: 15px; }
-.quiet { margin-left: auto; color: var(--muted); font-size: var(--text-sm); }
-.link { justify-self: start; margin: 0; padding: 0; border: 0; background: none; color: var(--link); text-decoration: underline; cursor: pointer; }
 .small { padding: 4px var(--gap); font-size: var(--text-sm); border: 1.5px solid var(--line); border-radius: var(--radius-sm); background: none; cursor: pointer; }
-#report { display: flex; gap: var(--gap-sm); }
-select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); background: var(--card); color: var(--fg); border: 1.5px solid var(--line); border-radius: var(--radius-sm); }
-
-/* Stages: loading → copied → content, or loading → waiting (body[data-stage]).
+/* Stages: loading → copied → content, or loading → content (body[data-stage]).
    Motion is decoration only: the copy has already happened by the time any of it plays. */
-#content { display: grid; gap: var(--gap); }
-#content.reveal { animation: reveal var(--reveal-ms) ease-out both; }
-@keyframes reveal { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
 .stage { display: grid; justify-items: center; align-content: center; gap: var(--gap); min-height: var(--stage-height); padding: var(--card-pad); border-radius: var(--radius-card); background: var(--card); box-shadow: var(--shadow); }
 .stage-text { color: var(--muted); font-size: var(--text-md); font-weight: var(--weight-medium); }
@@ -94,45 +68,6 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
 @keyframes draw { to { stroke-dashoffset: 0; } }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 
-/* Background indexing and the full docs */
-#crawl-note { color: var(--fg); }
-#full-docs { justify-self: start; }
-.primary-outline { border-color: var(--accent); color: var(--link); font-weight: var(--weight-strong); }
-
-/* Tabs: This page, Overview, Search */
-/* Grid items may shrink below their content (a long llms.txt line would widen the popup). */
-.card, .panel, #content, .panel > div { min-width: 0; }
-.tabs { display: flex; gap: 4px; padding: 3px; border-radius: var(--radius); background: var(--accent-soft); }
-.tab { flex: 1; padding: 6px var(--gap-sm); border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); font-size: var(--text); font-weight: var(--weight-strong); cursor: pointer; }
-.tab[aria-selected="true"] { background: var(--card); color: var(--fg); box-shadow: var(--shadow); }
-.tab:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-.panel.reveal, #content.reveal { animation: reveal var(--reveal-ms) ease-out both; }
-.panel-title { font-size: var(--text-md); font-weight: var(--weight-bold); }
-.panel-title .site-name { color: var(--brand); }
-.panel-sub { margin-top: var(--gap-sm); font-weight: var(--weight-strong); }
-.off { display: grid; gap: 4px; }
-.off-title { font-weight: var(--weight-strong); }
-
-/* Overview */
-.topics { margin: 0; padding-left: 18px; max-height: 150px; overflow: auto; }
-.topics li { margin: 2px 0; }
-.topics ul { padding-left: 16px; }
-.excerpt { min-width: 0; overflow-wrap: anywhere; max-height: 110px; margin: 0; padding: 8px var(--gap); overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--well); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; }
-
-/* Search */
-.search-q { width: 100%; padding: 8px var(--gap); border: 1.5px solid var(--line); border-radius: var(--radius); background: var(--card); color: var(--fg); font: inherit; }
-.search-q:focus { outline: 2px solid var(--focus); outline-offset: 1px; }
-.results { display: grid; gap: 4px; max-height: 210px; margin: 0; padding: 0; overflow: auto; list-style: none; }
-.results li { display: flex; align-items: flex-start; gap: var(--gap-sm); padding: 6px; border-radius: var(--radius-sm); }
-.results li:hover { background: var(--well); }
-.results input { margin-top: 3px; accent-color: var(--accent); }
-.results label { display: grid; gap: 1px; min-width: 0; cursor: pointer; }
-.hit-title { font-weight: var(--weight-strong); }
-.hit-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.hit-snippet { color: var(--muted); font-size: var(--text-sm); }
-.search-actions { display: flex; align-items: center; gap: var(--gap-sm); }
-.search-actions .copy { flex: 1; }
-
 /* Reduced motion: no movement, just the check and a quick fade. */
 @media (prefers-reduced-motion: reduce) {
   #loader .mark img, .dots span { animation: none; }
@@ -140,33 +75,33 @@ select { font: inherit; font-size: var(--text-sm); padding: 4px var(--gap-sm); b
   #copied-stage:not([hidden]) .doc, #copied-stage:not([hidden]) .board { animation: none; }
   #copied-stage:not([hidden]) .check { animation: none; stroke-dashoffset: 0; }
   #copied-stage:not([hidden]) { animation: fade 200ms ease-out both; }
-  #content.reveal, .panel.reveal { animation: fade 150ms ease-out both; }
 }
 
 /* Pin hint */
 .pin-hint .pin { width: 15px; height: 15px; flex: none; color: var(--brand); }
 
-/* Quick Copy: one line per item */
-.verdict { display: grid; min-width: 0; }
-.chip { display: inline-flex; align-items: center; gap: 6px; justify-self: start; max-width: 100%; padding: 5px 12px 5px 8px; border-radius: 999px; background: var(--chip-wait); color: var(--chip-wait-on); font-size: var(--text); font-weight: var(--weight-bold); }
-.chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.chip a { color: inherit; text-decoration: none; }
-.chip a:hover { text-decoration: underline; }
-.chip-icon { display: grid; place-items: center; flex: none; width: 18px; height: 18px; border-radius: 50%; font-size: var(--text-xs); line-height: 1; }
-.chip[data-state="yes"], .chip[data-state="elsewhere"] { background: var(--chip-yes); color: var(--chip-yes-on); }
-.chip[data-state="yes"] .chip-icon::before, .chip[data-state="elsewhere"] .chip-icon::before { content: "✓"; }
-.chip[data-state="no"] { background: var(--chip-no); color: var(--chip-no-on); }
-.chip[data-state="no"] .chip-icon::before { content: "✕"; }
-.chip[data-state="checking"] .chip-icon { width: 14px; height: 14px; border: 2px solid currentColor; border-right-color: transparent; animation: spin .8s linear infinite; }
-@keyframes spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .chip[data-state="checking"] .chip-icon { animation: none; } }
-.tab[aria-disabled="true"] { opacity: .45; cursor: not-allowed; }
-.row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
-.row a { color: var(--link); }
-.item[data-on="true"]::after { content: " ✓"; color: var(--ok); }
-.item[data-on="false"]::after { content: " ✕"; }
-.instructions summary { color: var(--muted); font-size: var(--text-sm); cursor: pointer; }
-.instructions ul { display: grid; gap: 2px; margin: 6px 0 0; padding-left: 18px; border-left: 3px solid var(--line); list-style: none; font-size: var(--text-sm); }
-.instructions a { color: var(--link); }
-.usage { display: flex; align-items: baseline; gap: var(--gap-sm); }
-.tokens { font-size: var(--text-lg); font-weight: var(--weight-bold); }
+/* Main view: the site's llms.txt and its instructions for agents */
+.main { gap: var(--gap); }
+.field-block { display: grid; gap: 6px; min-width: 0; }
+.field-label { display: flex; align-items: center; gap: var(--gap-sm); min-width: 0; font-size: var(--text-sm); }
+.label-chip { padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); font-weight: var(--weight-strong); }
+.badge { padding: 1px 6px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: var(--text-xs); }
+.field { display: flex; align-items: center; min-width: 0; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--well); }
+.field-url { flex: 1; min-width: 0; padding: 8px 10px; color: var(--fg); font: var(--text-sm)/1.3 var(--mono); white-space: nowrap; overflow: hidden; user-select: all; }
+.field-icon { display: grid; place-items: center; flex: none; width: 32px; height: 32px; margin: 0; padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--muted); cursor: pointer; }
+.field-icon:hover, .field-icon:focus-visible { color: var(--link); background: var(--accent-soft); }
+.field-icon svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.field-icon[data-done="true"] { color: var(--ok); }
+.field-label .field-icon { margin-left: auto; }
+.field-block > .meta { margin: 0; }
+.agent-text { margin: 0; padding: 8px 10px; border-left: 3px solid var(--line); background: var(--well); color: var(--fg); font: var(--text-xs)/var(--leading) var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-text[data-collapsed="true"] { max-height: calc(4lh + 16px); overflow: hidden; }
+.not-dev { font-weight: var(--weight-strong); }
+#llms-status:empty { display: none; }
+.card { min-width: 0; }
+/* "Show all ⌄": a quiet text button, like the chips. */
+.more { justify-self: start; padding: 2px 8px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: var(--text-sm); cursor: pointer; }
+.more:hover, .more:focus-visible { background: var(--accent-soft); color: var(--fg); }
+
+/* The elapsed time under the loader and while an llms.txt is being prepared */
+.elapsed { color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }

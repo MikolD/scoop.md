@@ -325,7 +325,7 @@ listening on `::` for that port.
   queues a URL (plan, sitemap entries, llms.txt links, browser results, the
   crawl request's `startUrl`).
 - **Server-rendered sites without Markdown** (path `html`) are converted in the
-  Worker: `extension/lib/extract.js` runs over linkedom (`src/crawl/html.ts`),
+  Worker: `shared/extract.js` runs over linkedom (`src/crawl/html.ts`),
   imported directly with a small `extract.d.ts` beside it, so crawled pages
   read like scooped ones. The plan is the start page, its same-site links
   (navigation and main content) and then sitemap pages under the docs root,
@@ -912,7 +912,7 @@ Recorded from a 4-page trial before M4; M4 uses it as described below.
   never runs its `fail` step. The profile only goes idle (`endCrawl`): a
   cancelled crawl has no outcome.
 - **The skill package preview is the extension's code.** `api.ts` imports
-  `extension/lib/package.js` (typed by `package.d.ts`, left out of the
+  `shared/package.js` (typed by `package.d.ts`, left out of the
   extension zip) and calls `buildPackage(withCurrentPage(sections, null,
   pageUrl))`, i.e. what the popup copies on the skill's own page when the local
   scoop found nothing to add.

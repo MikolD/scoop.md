@@ -3,7 +3,7 @@
 // admin routes, called in-process: the browser never holds ADMIN_TOKEN.
 
 import seedList from '../../seeds/devtools.json' with { type: 'json' };
-import { buildPackage, withCurrentPage } from '../../../extension/lib/package.js';
+import { buildPackage, withCurrentPage } from '../../../shared/package.js';
 import { json, readJson } from '../api/http.ts';
 import { llmsDeps, profileJson, renderPackage, requestsDailyMax, runJson, searchDeps } from '../api/v1.ts';
 import { answerFrom, getRow, refreshRow } from '../llms/registry.ts';
@@ -160,7 +160,7 @@ async function profilesFor(db: D1Database, sites: string[]): Promise<Map<string,
 }
 
 // The Markdown package the extension copies for a shared skill when the user
-// is on the skill's own page: extension/lib/package.js itself, not a port.
+// is on the skill's own page: shared/package.js itself, not a port.
 export function skillPackage(skill: { site: string; pageUrl: string; sections: { label: string; url: string; content: string | null; bytes?: number | null }[]; relatedLinks?: { url: string; text?: string }[] }, now = new Date()) {
   return buildPackage({
     site: skill.site,

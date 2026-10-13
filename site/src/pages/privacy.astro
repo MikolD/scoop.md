@@ -4,25 +4,28 @@ import { CONTACT_EMAIL, DELETION_EMAIL, LEGAL_ENTITY } from '../lib/links';
 
 export const prerender = true;
 
-const updated = '2026-10-12';
+const updated = '2026-10-13';
 
-// Every usage event the extension can send (docs/TELEMETRY.md).
+// Every usage event the extension sends (docs/TELEMETRY.md).
 const events = [
   ['install, update, browser_update', 'When the extension is installed or updated, or Chrome updates: the old and new version.'],
   ['active_daily', 'Once a day while the browser runs: nothing beyond the common fields below.'],
   ['popup_open, popup_close', 'You opened the popup; when it closes, how long it was open.'],
-  ['scoop_start, scoop_result', "A scoop began (nothing more) and how it ended: the site's hostname (only its registrable domain for a signed-in page), the page's path (public docs pages only), the outcome, which kinds of sources were used and how many, the package size, whether it was cut for length, how long it took, whether the shared library had it (and its \"worked\" count), whether it came from the docs index, whether the page was public, and the number of related links."],
-  ['copy, rebuild', 'The package reached your clipboard (automatically or with the Copy button), or you rebuilt it from the page: the hostname, the path (public docs pages only) and the size.'],
+  ['llms_copy', "You copied a site's llms.txt prompt: the hostname, whether the llms.txt was the site's own or prepared by scoop.md, and whether it was copied on opening or with the button."],
   ['copied_animation_shown', 'The "copied to your clipboard" animation played, and whether your system asks for reduced motion.'],
-  ['crawl_request, crawl_wait', "You were the first to scoop a docs site, so scoop.md asked for it to be crawled: the site's hostname and how the request went; then how long you waited and how it ended (ready, not developer docs, failed, you copied the page instead, it took too long or stalled, or you closed the popup)."],
-  ['tab_switch', 'You switched between the Quick Copy, Overview and Search tabs: which tab.'],
-  ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
-  ['badge_verdict_shown', 'Once an hour at most: how many times the toolbar icon showed "developer docs" and "not developer docs". Two numbers, no sites or pages.'],
-  ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
-  ['vote, report', "You voted or reported: the hostname and path (public docs pages only), the scoop's ID, your vote or reason."],
-  ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
+  ['badge_llms_shown', 'Once an hour at most: how many times the toolbar badge showed "1" (the site has an llms.txt) and "2" (an llms.txt and instructions for agents). Two numbers, no sites or pages.'],
+  ['settings_change, options_open', 'You changed the theme or usage statistics, or opened the settings page.'],
   ['telemetry_opt_out, telemetry_opt_in', 'You switched usage statistics off or on.'],
   ['error', 'Something failed: where, an error code and a short message with URLs and hostnames removed.'],
+];
+// Sent only by versions before 0.6.0, which copied the page itself and shared it (still accepted from them).
+const olderEvents = [
+  ['scoop_start, scoop_result', "A scoop of the page began and how it ended: the hostname (only its registrable domain for a signed-in page), the path of public docs pages, the outcome, the kinds and number of sources, the size, how long it took, and whether the shared library or the docs index had it."],
+  ['copy, rebuild', 'The page package reached the clipboard, or was rebuilt from the page: the hostname, the path (public docs pages only) and the size.'],
+  ['crawl_request, crawl_wait', "A crawl was requested for a docs site: the hostname and how it went."],
+  ['tab_switch, search, copy_overview, copy_search', "Tabs switched, searches made (the query's length, never its text) and results or overviews copied, on indexed sites."],
+  ['share_result, vote, report', "Whether a scoop was shared, and votes and reports on shared scoops."],
+  ['badge_verdict_shown', 'Once an hour at most: how many times the toolbar icon showed "developer docs" and "not developer docs". Two numbers, no sites.'],
 ];
 ---
 
@@ -40,118 +43,60 @@ const events = [
 
     <h2>The short version</h2>
     <ul>
-      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show on its icon whether a site is developer docs (a check, a "!" or nothing), it compares each tab's site with lists downloaded to your device and with the verdicts for sites you scooped (kept on your device for 7 days); that check never leaves your device.</li>
-      <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Every scoop asks the library at <code>api.scoop.md</code> for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
+      <li>The extension never reads the pages you visit. Opening it asks the library at <code>api.scoop.md</code> for the site's llms.txt, with the page's origin and the first segment of its path only (for example <code>https://app.example.com/docs</code>), never for a page on your computer or a private network.</li>
+      <li>To show "1" or "2" on its icon (the site has an llms.txt, and instructions for agents), it compares each tab's site with a list downloaded to your device and with what the library told it for sites you opened scoop.md on (kept on your device for 7 days); that check never leaves your device.</li>
       <li>
-        Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
-        path of public docs pages you scoop. The extension says so the first time you open it, with a button to turn
-        them off; you can also turn them off in its settings ("Send usage statistics").
+        Usage statistics are on by default: anonymous events about how you use the extension, including the hostname of
+        the sites you open it on. The extension says so the first time you open it, with a button to turn them off; you
+        can also turn them off in its settings ("Send usage statistics").
       </li>
-      <li>No accounts, names or emails. Nothing about pages you don't click scoop.md on. No ads, no third-party trackers, and we don't sell data.</li>
+      <li>No accounts, names or emails. Nothing about sites you don't open scoop.md on. No ads, no third-party trackers, and we don't sell data.</li>
       <li>IP addresses are used for rate limiting and to look up your country, and are not stored.</li>
     </ul>
 
     <h2>What the extension reads</h2>
     <p>
-      When you click <strong>Scoop to agent</strong>, the extension reads the active tab's address, title and page
-      content. It doesn't see other tabs and doesn't read your browsing history. It writes the package to your
-      clipboard; it never reads your clipboard. A small background script handles installs and updates and sends
-      queued usage statistics (once an hour at most, and only while they're on); it never reads tabs or pages.
+      When you open scoop.md, the extension reads the active tab's address. It doesn't read the page, other tabs or your
+      browsing history. It writes the llms.txt prompt to your clipboard; it never reads your clipboard. A small
+      background script reads the address of the tab you switch to, only to set the "1" or "2" on the icon from a list
+      on your device; it handles installs and updates and sends queued usage statistics (once an hour at most, and only
+      while they're on).
     </p>
     <p>
-      To find documentation the site already publishes, the extension requests files like <code>&lt;page&gt;.md</code>,{' '}
-      <code>llms.txt</code>, <code>llms-full.txt</code> and the page itself directly from that site, without your
-      cookies. Those requests go to the documentation site, not to us. This is why the extension asks for access to all
-      sites: it can't know in advance which docs you'll scoop.
+      If the library doesn't answer, the extension looks for the site's <code>llms.txt</code> itself, directly from that
+      site and without your cookies. That request goes to the documentation site, not to us. This is why the extension
+      asks for access to all sites: it can't know in advance which site you'll open it on.
     </p>
 
     <h2>What stays on your device</h2>
     <ul>
-      <li>The package on your clipboard.</li>
+      <li>The prompt on your clipboard.</li>
       <li>
-        Your settings, stored in Chrome's extension storage. Sharing and usage statistics on or off sync with your Google
-        account if you use Chrome sync; the theme stays on this device.
+        Your settings, stored in Chrome's extension storage. Usage statistics on or off syncs with your Google account
+        if you use Chrome sync; the theme stays on this device.
       </li>
       <li>A random install ID the extension creates on first run. It identifies an installation, not a person. The settings page shows it.</li>
+      <li>The list behind the "1" and "2", and what the library answered for sites you opened scoop.md on (7 days).</li>
       <li>Usage events waiting to be sent (at most 500; the oldest are dropped).</li>
-      <li>Anything from a page that only rendered because you're signed in. It reaches your clipboard and nowhere else.</li>
     </ul>
 
     <h2>What leaves your device</h2>
-    <h3>Every scoop</h3>
+    <h3>Opening scoop.md: the site's llms.txt</h3>
     <p>
-      Each time you scoop a web page, the extension sends the site's hostname (for example <code>docs.stripe.com</code>)
-      to <code>api.scoop.md/v1/skills/best</code> to look for a shared version, and to
-      <code>api.scoop.md/v1/sites/&lt;site&gt;/status</code> to see whether the site's docs are indexed. Not the page
-      address, not the page content. This happens whether or not sharing is on.
+      When you open scoop.md on a web page, the extension sends only the page's origin and the first segment of its path
+      (on <code>https://docs.stripe.com/webhooks/quickstart?lang=node</code>, that's <code>https://docs.stripe.com/webhooks</code>)
+      to <code>api.scoop.md/v1/llms</code>, which answers with the
+      site's llms.txt (or one scoop.md prepared for it) as a short prompt to copy. Never for pages on your computer or a
+      private network. If the library doesn't answer, the extension looks for the site's
+      llms.txt itself, without your cookies.
     </p>
-    <h3>When the page is public</h3>
+    <h3>The "1" and "2" on the icon</h3>
     <p>
-      The page's address (without tracking parameters) goes to <code>api.scoop.md/v1/packages</code> when the site's
-      docs are indexed (it answers with the indexed docs arranged around that page), or else to
-      <code>api.scoop.md/v1/quick</code> (it answers with the site's llms.txt files and the page's Markdown version, which
-      the extension then downloads without your cookies). Whatever the sharing setting. Never for a page that only
-      renders signed in, or on your computer or a private network.
+      Every 6 hours the extension downloads the list of sites with an llms.txt (and which of them also have instructions
+      for agents) from <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The
+      site you're on is looked up in that list on your device, along with what the library answered for sites you opened
+      scoop.md on in the last 7 days. Pages on your computer or a private network are never looked up.
     </p>
-    <h3>Checking links before copying</h3>
-    <p>
-      So your agent never gets a dead link, the links in a package built on your device from a public page (the page's
-      own links, its Markdown version and related pages) are checked before it's copied. When sharing is on, their
-      addresses (never ones on your computer or a private network) go to <code>api.scoop.md/v1/links/check</code>. Links
-      on the page's own site, or on a site the package's sources came from, that it can't vouch for are checked directly
-      from your browser with a HEAD request over https, without your cookies; links to any other site are never
-      requested. With sharing off, only the direct checks run. For a page that isn't public (signed in, or on your
-      computer or a private network), no link address is sent or requested. Links that don't work, or can't be confirmed
-      within about 2.5 seconds, lose their link but keep their text; a bare address is kept as text.
-    </p>
-    <h3>On the Overview and Search tabs</h3>
-    <p>
-      For an indexed site: the hostname, to get its topics (<code>/v1/sites/&lt;site&gt;/topics</code>), and what you type
-      in the search box, to search its docs (<code>/v1/search</code>, and <code>/v1/packages</code> for "Copy all
-      results"). The library's request log keeps the query, as described under Library requests below.
-    </p>
-    <h3>The docs check on the icon</h3>
-    <p>
-      Every 6 hours the extension downloads the list of indexed docs sites, and of sites known not to be developer docs,
-      from <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The site you're on
-      is looked up in those lists on your device, along with the verdicts the library gave for sites you scooped in the
-      last 7 days. Pages on your computer or a private network are never looked up.
-    </p>
-    <h3>When a docs site isn't indexed yet, sharing is on and the page is public developer docs</h3>
-    <p>
-      A crawl request: the page's address (without tracking parameters) and your install ID go to
-      <code>api.scoop.md/v1/crawl-requests</code>. The library then reads that site's public docs itself, without your
-      cookies. Nothing waits for it: you get the best package available at once. While it works, the extension asks about
-      that request every 5 seconds while the popup is open, or every 30 seconds after you close it (the request ID is kept
-      on your device until it finishes).
-    </p>
-    <h3>When sharing is on, the page is recognised as developer docs and the material was fetched without cookies</h3>
-    <ul>
-      <li>The public documentation sections in the package, and the URL each came from.</li>
-      <li>The page's address and title.</li>
-      <li>Related links from the site's navigation.</li>
-      <li>Your install ID.</li>
-    </ul>
-    <p>
-      Only pages recognised as developer docs are shared; for any other page, nothing is shared and no crawl is
-      requested. If any part of the package came from your signed-in view of the page, nothing is shared. The library then
-      re-fetches every source itself, without cookies, and rejects anything that doesn't match what the site serves
-      publicly.
-    </p>
-    <h3>When you ask for a site to be crawled</h3>
-    <p>
-      On a docs site the library doesn't know yet, the popup can ask it to crawl the site. That request sends the
-      address of the page you are on (its path included), so it shows which documentation page you were reading,
-      together with your install ID. The library stores the page address with a keyed hash of the install ID, never the
-      install ID itself, and starts a crawl of that site's public documentation. The pages it crawls are fetched by the
-      library without your cookies.
-    </p>
-    <h3>When you vote or report</h3>
-    <ul>
-      <li>"It worked" or "It didn't": the scoop's ID, your vote and your install ID.</li>
-      <li>A report: the scoop's ID, the reason, anything you type in the details box, and your install ID.</li>
-    </ul>
     <p>
       Every request also carries what any web request does: your IP address and your browser's user agent, plus the
       extension's version.
@@ -163,11 +108,16 @@ const events = [
       batches: when the popup closes, and from its background script. We use them to see who installs and keeps using
       scoop.md, which documentation sites it's used on, what works and what breaks. The first time you open the
       extension it shows a notice with a button to turn them off; until that notice has been shown, events carry no
-      hostname or path.
+      hostname.
     </p>
     <table>
       <thead><tr><th>Event</th><th>What it records</th></tr></thead>
       <tbody>{events.map(([names, what]) => <tr><td>{names.split(', ').map((n) => <code class="event">{n}</code>)}</td><td>{what}</td></tr>)}</tbody>
+    </table>
+    <p>Versions before 0.6.0, which copied the page itself and could share it, also sent these (we still accept them from those versions):</p>
+    <table>
+      <thead><tr><th>Event</th><th>What it records</th></tr></thead>
+      <tbody>{olderEvents.map(([names, what]) => <tr><td>{names.split(', ').map((n) => <code class="event">{n}</code>)}</td><td>{what}</td></tr>)}</tbody>
     </table>
     <p>
       Every event also carries the time, a random ID for that popup session, your install ID, the extension version, the
@@ -176,16 +126,11 @@ const events = [
     </p>
     <ul>
       <li>
-        <strong>Pages</strong>: the hostname of the page you clicked scoop.md on, and its path only when it is a public
-        docs page (the site publishes Markdown or <code>llms.txt</code> for it, or the public page looks like
-        documentation). Paths lose the query string, fragment and tracking parameters, and any part that looks like a
-        secret or an ID (long random strings, hashes, UUIDs) is replaced with <code>:id</code>. For a page that only
-        renders when you're signed in, only the site's registrable domain (for <code>acme.atlassian.net</code>, just
-        <code>atlassian.net</code>) and no path. Nothing at all about pages on your computer or a private network
-        (<code>localhost</code>, private IP addresses, <code>.local</code>, <code>.internal</code>, <code>.corp</code>,
-        <code>.onion</code> and similar).
+        <strong>Sites</strong>: the hostname of the site you opened scoop.md on, never a path. Nothing at all about pages
+        on your computer or a private network (<code>localhost</code>, private IP addresses, <code>.local</code>,
+        <code>.internal</code>, <code>.corp</code>, <code>.onion</code> and similar).
       </li>
-      <li><strong>Never</strong>: page content, page titles, what you copy, cookies, your name, email or Google account, or anything about tabs you didn't click scoop.md on.</li>
+      <li><strong>Never</strong>: page content, page titles, what you copy, cookies, your name, email or Google account, or anything about tabs you didn't open scoop.md on.</li>
       <li>
         <strong>Worked out on our server</strong>: your country, region and continent, and the name of your network
         provider, looked up by Cloudflare from your IP address as the request arrives; the browser family from the user
@@ -209,16 +154,15 @@ const events = [
 
     <h3>Library requests</h3>
     <p>
-      For lookups, searches and package requests to the library (including the extension's lookup by hostname), the
-      library records the route, the hostname, the search text, whether anything was found, how many results, how long it
-      took, the <code>X-Scoop-Client</code> value and the country, with the time rounded to the hour. Not the IP address,
+      For lookups to the library (including the extension's llms.txt lookup), the library records the route, the
+      hostname, whether anything was found, how long it took, the <code>X-Scoop-Client</code> value and the country, with the time rounded to the hour. Not the IP address,
       region, network, browser or an install ID, and nothing at all for an extension with usage statistics off.
     </p>
 
     <h2>What the library keeps</h2>
     <ul>
       <li>
-        <strong>Shared scoops</strong>: the documentation text, source URLs, page address and title, related links, the
+        <strong>Shared scoops</strong> (from versions before 0.6.0; 0.6.0 shares nothing): the documentation text, source URLs, page address and title, related links, the
         time it was shared and the sharer's install ID. Scoops and their vote counts are public, on this website and
         through the API. Install IDs are never published.
       </li>

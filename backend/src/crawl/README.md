@@ -11,7 +11,7 @@ gate.ts      the devtool gate: lists, start-page signals, one AI call when incon
 gate-lists.ts  known docs hosts (allow) and non-devtool hosts (deny), plain data
 sitemap.ts   sitemap.xml / sitemap indexes (gzip too), linear scan, no DOM
 discover.ts  llms.txt links, .md twin URLs, docs root, client-shell detection
-html.ts      server-rendered HTML -> Markdown with extension/lib/extract.js over linkedom
+html.ts      server-rendered HTML -> Markdown with shared/extract.js over linkedom
 polite.ts    per-host politeness (2 in flight, >= 1 s apart, Crawl-delay up to 10 s),
              conditional GETs, same-site manual redirects, read cap
 site.ts      discoverSite(): the deterministic discovery pass and fetch plan;

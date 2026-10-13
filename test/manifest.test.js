@@ -19,7 +19,7 @@ test('manifest is MV3 and every file it references exists', () => {
 });
 
 test('only the permissions STORE.md justifies', () => {
-  assert.deepEqual(manifest.permissions.sort(), ['activeTab', 'alarms', 'clipboardWrite', 'scripting', 'storage']);
+  assert.deepEqual(manifest.permissions.sort(), ['alarms', 'clipboardWrite', 'storage']);
   assert.deepEqual(manifest.background, { service_worker: 'background.js', type: 'module' });
   assert.deepEqual(manifest.host_permissions, ['<all_urls>']);
   const store = readFileSync(ext('STORE.md'), 'utf8');
@@ -48,7 +48,7 @@ test('the privacy page matches what the extension does (no library off switch)',
   for (const gone of ['library can be turned off', 'Clear the library address', 'no network calls', 'Only when the library is on']) {
     assert.ok(!privacy.includes(gone), gone);
   }
-  assert.match(privacy, /api\.scoop\.md\/v1\/skills\/best/);
+  assert.match(privacy, /api\.scoop\.md\/v1\/llms/);
   assert.match(privacy, /theme stays on this device/);
 });
 
@@ -96,12 +96,12 @@ test('the store zip leaves out store artwork, docs, types, tests and source maps
   for (const pattern of ["'store-assets/*'", "'*.md'", "'*.d.ts'", "'*.test.js'", "'*.map'"]) assert.ok(pack.includes(pattern), pattern);
 });
 
-test('the link checks are disclosed on the privacy page and in STORE.md', () => {
+test('the llms.txt lookup is disclosed on the privacy page and in STORE.md: origin and first path segment only', () => {
   const privacy = readFileSync(new URL('../site/src/pages/privacy.astro', import.meta.url), 'utf8');
   const store = readFileSync(ext('STORE.md'), 'utf8');
-  for (const doc of [privacy, store]) assert.match(doc, /links\/check/);
-  assert.match(privacy, /When sharing is on, their\s+addresses/);
-  assert.match(privacy, /no link address is sent or requested/);
-  assert.match(store, /For a page that isn't public, no link address is sent or requested\./);
+  for (const doc of [privacy, store]) assert.match(doc, /v1\/llms/);
+  assert.match(privacy, /origin and the first segment of its path/);
+  assert.match(store, /origin and the first segment of its path/);
   assert.match(store, /this stays on the device and is never sent/);
+  assert.match(store, /\| Website content \| No \|/);
 });
