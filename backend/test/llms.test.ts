@@ -593,20 +593,21 @@ test('full stage never shrinks coverage: crawl entries first, then the instant l
   add('https://py.example/3/tutorial/index.html', 'The Python Tutorial', 'quickstart', 'Learn Python.');
   add('https://py.example/3/library/os.html', 'os', 'api-reference', 'Miscellaneous operating system interfaces.');
   const instant: BuiltLlms = {
-    title: 'Python', root: 'https://py.example/3', host: 'py.example', text: '', pages: 4, stage: 'instant',
+    title: 'Python', root: 'https://py.example/3', host: 'py.example', text: '', pages: 5, stage: 'instant',
     sections: [
       { name: 'Tutorial', links: [{ title: 'Tutorial', url: 'https://py.example/3/tutorial/index.html' }] },
       { name: 'Library', links: [{ title: 'os', url: 'https://py.example/3/library/os.html' }, { title: 'sys', url: 'https://py.example/3/library/sys.html' }] },
       { name: 'Reference', links: [{ title: 'Grammar', url: 'https://py.example/3/reference/grammar.html' }] },
+      { name: 'Use', links: [{ title: 'Getting started', url: 'https://py.example/3/use/getting-started.html' }] },
     ],
   };
   const b = await buildFull(d1, 'https://py.example/3', 'Python', { instant });
   assert.deepEqual(b!.sections.map((s) => [s.name, s.links.map((l) => l.title)]), [
-    ['Getting started', ['The Python Tutorial']],
+    ['Getting started', ['The Python Tutorial', 'Getting started']],
     ['Reference', ['os', 'Grammar']],
     ['Library', ['sys']],
   ]);
-  assert.equal(b!.pages, 4);
+  assert.equal(b!.pages, 5);
   assert.equal(b!.stage, 'full');
   assert.equal(MAX_FULL_LINKS, 1000);
 });
@@ -653,4 +654,16 @@ test('full stage: a docs path with almost nothing under it widens to the whole h
   const b = await buildFull(d1, 'https://hx.example/docs', 'hx');
   assert.equal(b!.pages, 6);
   assert.ok(!b!.text.includes('essays'));
+});
+
+test('full stage: with no crawled quick start, the instant file\'s getting-started page leads', async () => {
+  const { d1, raw } = fakeD1();
+  raw.prepare(`INSERT INTO page_index (url, site, content_hash, title, slot, summary, model, cost_usd, indexed_at) VALUES ('https://lint.example/docs/rules/curly', 'lint.example', 'h', 'curly', 'api-reference', '', 'm', 0, 'x')`).run();
+  raw.prepare(`INSERT INTO link_status (url, ok, status, final_url, checked_at, source) VALUES ('https://lint.example/docs/rules/curly', 1, 200, NULL, 'x', 'crawl')`).run();
+  const instant: BuiltLlms = {
+    title: 'Lint', root: 'https://lint.example/docs', host: 'lint.example', text: '', pages: 2, stage: 'instant',
+    sections: [{ name: 'Use', links: [{ title: 'Getting Started', url: 'https://lint.example/docs/use/getting-started' }, { title: 'Configure', url: 'https://lint.example/docs/use/configure' }] }],
+  };
+  const b = await buildFull(d1, 'https://lint.example/docs', 'Lint', { instant });
+  assert.deepEqual(b!.sections.map((s) => s.name), ['Getting started', 'Reference', 'Use']);
 });

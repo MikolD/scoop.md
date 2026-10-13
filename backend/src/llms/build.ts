@@ -381,6 +381,7 @@ const SLOT_SECTION: Record<string, string> = {
   'webhooks-events': 'Reference', 'versioning-changelog': 'Reference',
 };
 const SECTION_ORDER = ['Getting started', 'Guides', 'Reference', 'Other'];
+const QUICK_START_PAGE = /\/(install(ation|ing)?|quick-?start|getting-started|get-started)(\/|\.|$)/i;
 
 // From the indexed pages under the docs root: title, summary, slot, and the
 // .md source when the crawl fetched one. Only links known to exist.
@@ -438,14 +439,23 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
   // name taking them in, up to MAX_FULL_LINKS.
   const pageOf = (u: string) => u.replace(/(\/index)?\.md$/i, '').replace(/\/(index\.html?)?$/i, '');
   const covered = new Set(ok.map((l) => pageOf(l.url)));
+  // An install or quick start page joins Getting started, which comes first
+  // (eslint.org's crawl indexed its rules; its getting-started page is in the instant file).
   let room = MAX_FULL_LINKS - ok.length;
+  const into = (name: string, links: LlmsLink[]) => {
+    const same = sections.find((x) => x.name === name);
+    if (same) same.links.push(...links);
+    else if (name === 'Getting started') sections.unshift({ name, links });
+    else sections.push({ name, links });
+  };
   for (const s of o.instant?.sections ?? []) {
     const extra = s.links.filter((l) => !covered.has(pageOf(l.url))).slice(0, Math.max(0, room)).map(({ title: t, url }) => ({ title: t, url }));
     if (!extra.length) continue;
     room -= extra.length;
-    const same = sections.find((x) => x.name === s.name);
-    if (same) same.links.push(...extra);
-    else sections.push({ name: s.name, links: extra });
+    const start = extra.filter((l) => QUICK_START_PAGE.test(new URL(l.url).pathname));
+    if (start.length) into('Getting started', start);
+    const rest = extra.filter((l) => !start.includes(l));
+    if (rest.length) into(s.name, rest);
   }
   const pages = sections.reduce((n, s) => n + s.links.length, 0);
   const text = renderLlms({ title, host, root, sections });
