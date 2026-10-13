@@ -12,6 +12,7 @@ export type ErrorCode =
   | 'conflict'
   | 'forbidden'
   | 'not_indexed'
+  | 'preparing'
   | 'internal';
 
 export class ApiError extends Error {

@@ -41,7 +41,9 @@
     // Jev's price, USD per million tokens: PROVISIONAL (not published yet); tokens are recorded either way.
     // Jev tokens per UTC day for the account, checked before every Jev request.
     "JEV_USD_PER_MTOK": "0.5",
-    "JEV_DAILY_TOKEN_CAP": "5000000"
+    "JEV_DAILY_TOKEN_CAP": "5000000",
+    // Where scoop-built llms.txt files are public: <base>/<host>/llms.txt.
+    "LLMS_PUBLIC_BASE": "http://localhost:8787/v1/llms"
     // The admin console answers on admin.localhost only (ADMIN_HOST pins it in staging and production).
     // ALLOW_LOCALHOST, ALLOW_ANY_EXTENSION, ADMIN_TOKEN and RATE_KEY come from .dev.vars locally.
     // ALLOW_LOCALHOST is ignored unless ENVIRONMENT is "dev".
@@ -135,7 +137,8 @@
         "ONDEMAND_INDEX_SHARE": "0.5",
         "CLASSIFIER": "jev",
         "JEV_USD_PER_MTOK": "0.5",
-        "JEV_DAILY_TOKEN_CAP": "5000000"
+        "JEV_DAILY_TOKEN_CAP": "5000000",
+        "LLMS_PUBLIC_BASE": "https://api-staging.scoop.md/v1/llms"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [
@@ -207,7 +210,8 @@
         "ONDEMAND_INDEX_SHARE": "0.5",
         "CLASSIFIER": "jev",
         "JEV_USD_PER_MTOK": "0.5",
-        "JEV_DAILY_TOKEN_CAP": "5000000"
+        "JEV_DAILY_TOKEN_CAP": "5000000",
+        "LLMS_PUBLIC_BASE": "https://scoop.md"
       },
       "assets": { "directory": "./admin", "binding": "ASSETS", "run_worker_first": true },
       "d1_databases": [

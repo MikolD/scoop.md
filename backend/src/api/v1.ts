@@ -32,6 +32,9 @@ import { addRefs, checkLinks, extractLinks, linkStates, normalizeLink, queueLink
 import { siteTopics, topicChunks } from '../search/queries.ts';
 import { cachedQueryEmbed, normalizeQuery } from '../search/embedcache.ts';
 import { quickDiscover } from '../search/quick.ts';
+import type { QuickSiteCache } from '../search/quick.ts';
+import { listRegistry, resolveLlms, serveLlms } from '../llms/registry.ts';
+import type { LlmsDeps } from '../llms/registry.ts';
 import { denylistHosts } from '../crawl/gate.ts';
 import type { QuickDiscovery } from '../search/quick.ts';
 import { search } from '../search/search.ts';
@@ -63,6 +66,8 @@ interface Ctx {
   ip: string;
   // Filled in by the handler for usage telemetry (src/telemetry/ingest.ts).
   usage: ApiUsage;
+  // Work after the response (absent in tests: awaited instead).
+  waitUntil?: (p: Promise<unknown>) => void;
 }
 
 type Handler = (c: Ctx) => Promise<Response>;
@@ -222,6 +227,48 @@ async function cachedQuery(
 
 // The Cache API (absent outside Workers, e.g. in the node tests).
 const edgeCache = () => (typeof caches === 'undefined' ? null : caches.default);
+
+// /v1/quick's site-level cache (llms files, docs roots), shared by /v1/llms.
+function quickSiteCache(): QuickSiteCache | null {
+  const cache = edgeCache();
+  if (!cache) return null;
+  const req = (k: string) => new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`);
+  return {
+    get: async (k) => (await cache.match(req(k)).catch(() => undefined))?.json() ?? null,
+    put: (k, v) =>
+      cache.put(req(k), new Response(JSON.stringify(v), {
+        headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` },
+      })).catch(() => {}),
+  };
+}
+
+// /v1/llms: storage, the probe budget per host, Jev, and the crawl that makes a full llms.txt.
+function llmsDeps(env: Env, ip: string, waitUntil?: (p: Promise<unknown>) => void): LlmsDeps {
+  return {
+    db: env.DB,
+    bucket: env.SKILLS,
+    publicBase: env.LLMS_PUBLIC_BASE || undefined,
+    allowLocalhost: allowLocalhost(env),
+    waitUntil,
+    quick: {
+      jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
+      siteCache: quickSiteCache(),
+    },
+    startCrawl: env.CRAWL_SITE && env.RATE_KEY
+      ? async (root, host) => {
+        // A crawl request on the user's behalf, under the usual daily limits (per IP subject; 429s just leave the instant file).
+        await requestCrawl(
+          {
+            db: env.DB, bucket: env.SKILLS, workflow: env.CRAWL_SITE, rateKey: env.RATE_KEY, dailyMax: requestsDailyMax(env),
+            e2bCapUsd: e2bDailyCap(env), indexTotalCapUsd: indexDeps(env).totalCapUsd,
+            e2bShare: ondemandShare(env.ONDEMAND_E2B_SHARE), indexShare: ondemandShare(env.ONDEMAND_INDEX_SHARE),
+          },
+          { pageUrl: root, site: host, install: `llms:${ipSubject(ip)}`, ip },
+        );
+      }
+      : undefined,
+  };
+}
 
 // A site the API may talk about: a public hostname (400 for IP literals,
 // localhost, .local, .internal and the like, as for any fetch).
@@ -537,6 +584,68 @@ const routes: Route[] = [
   },
   {
     method: 'GET',
+    pattern: /^\/v1\/llms$/,
+    name: '/v1/llms',
+    // "llms.txt first": the docs site's llms.txt as a short link prompt (src/llms/registry.ts).
+    handler: async ({ env, url, usage, ip, waitUntil }) => {
+      if (env.QUICK_LIMITER && !(await env.QUICK_LIMITER.limit({ key: ipSubject(ip) })).success) {
+        const err = new ApiError('rate_limited', 'Too many requests; try again later', 429);
+        err.retryAfter = 60;
+        throw err;
+      }
+      const raw = url.searchParams.get('url');
+      if (!raw || raw.length > 1024) throw bad('url must be a string of 1–1024 characters');
+      const pageUrl = normalizePageUrl(assertFetchable(raw, { allowLocalhost: allowLocalhost(env) }));
+      usage.site = siteOf(pageUrl);
+      const deps = llmsDeps(env, ip, waitUntil);
+      // The per-host probe budget, as for /v1/quick.
+      const host = new URL(pageUrl).host;
+      const probe = !env.PROBE_HOST_LIMITER || (await env.PROBE_HOST_LIMITER.limit({ key: host })).success;
+      const answer = await resolveLlms(pageUrl, { ...deps, quick: { ...deps.quick, probe } });
+      Object.assign(usage, { hit: answer.docs.found, results: answer.llms?.pages ?? 0 });
+      // Not cached: a preparing answer turns ready within seconds.
+      return json(200, answer, { 'cache-control': answer.llms?.status === 'ready' ? CACHE_LIST : 'no-store' });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/llms\/index$/,
+    name: '/v1/llms/index',
+    // The registry, for the website's Library page: docs sites only, most scooped first.
+    handler: async ({ env, url }) => {
+      const limit = Math.min(200, Math.max(1, Math.trunc(Number(url.searchParams.get('limit'))) || 100));
+      const offset = Math.max(0, Math.trunc(Number(url.searchParams.get('cursor'))) || 0);
+      const { rows, more } = await listRegistry(env.DB, limit, offset);
+      return json(200, {
+        sites: rows.map((r) => ({
+          host: r.host, docsRoot: r.docs_root, llmsUrl: r.llms_url, source: r.source, title: r.title, pages: r.pages, tokens: r.tokens, checkedAt: r.checked_at,
+        })),
+        next: more ? String(offset + limit) : null,
+      }, { 'cache-control': CACHE_LIST });
+    },
+  },
+  {
+    method: 'GET',
+    pattern: /^\/v1\/llms\/([a-z0-9.-]{1,253})\/llms\.txt$/,
+    name: '/v1/llms/:host/llms.txt',
+    // A scoop-built llms.txt (the site's own: a redirect to it).
+    handler: async ({ env, params, ip }) => {
+      const host = siteParam(params[0]);
+      const r = await serveLlms(host, llmsDeps(env, ip));
+      if (r.status === 302) return new Response(null, { status: 302, headers: { location: r.location!, 'cache-control': 'public, max-age=300' } });
+      if (r.status === 404) throw notFound('No llms.txt for this host');
+      if (r.status === 503) {
+        const err = new ApiError('preparing', 'This llms.txt is still being prepared; try again in a few seconds', 503);
+        err.retryAfter = 3;
+        throw err;
+      }
+      return new Response(r.body, {
+        headers: { 'content-type': 'text/markdown; charset=utf-8', 'cache-control': 'public, max-age=300', 'x-content-type-options': 'nosniff' },
+      });
+    },
+  },
+  {
+    method: 'GET',
     pattern: /^\/v1\/quick$/,
     name: '/v1/quick',
     // Instant first answer for a page (src/search/quick.ts): the Markdown its
@@ -577,13 +686,7 @@ const routes: Route[] = [
           probe,
           instructionsFor,
           jev: env.JEV_API_KEY ? { apiKey: env.JEV_API_KEY, allow: jevAllowance(env.DB, jevTokenCap(env)) } : null,
-          siteCache: cache && {
-            get: async (k) => (await cache.match(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`)).catch(() => undefined))?.json() ?? null,
-            put: (k, v) =>
-              cache.put(new Request(`https://quick-cache.scoop.md/site?k=${encodeURIComponent(k)}`), new Response(JSON.stringify(v), {
-                headers: { 'content-type': 'application/json', 'cache-control': `public, max-age=${QUICK_CACHE_SECONDS}` },
-              })).catch(() => {}),
-          },
+          siteCache: quickSiteCache(),
         });
         const { jevTokens: _, ...rest } = d;
         found = rest;
@@ -957,14 +1060,14 @@ export interface Matched {
 
 // Finds the route for a request. Unknown routes (including admin routes hit with
 // the wrong method) are a plain 404.
-export function match(req: Request, env: Env, url: URL, ip: string): Matched | null {
+export function match(req: Request, env: Env, url: URL, ip: string, waitUntil?: (p: Promise<unknown>) => void): Matched | null {
   for (const r of routes) {
     if (r.method !== req.method) continue;
     const m = r.pattern.exec(url.pathname);
     if (!m) continue;
     const store = new Store(env.DB, env.SKILLS);
     const usage: ApiUsage = {};
-    return { name: r.name, usage, run: () => r.handler({ req, env, url, params: m.slice(1), store, ip, usage }) };
+    return { name: r.name, usage, run: () => r.handler({ req, env, url, params: m.slice(1), store, ip, usage, waitUntil }) };
   }
   return null;
 }

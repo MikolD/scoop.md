@@ -73,6 +73,8 @@ export interface Env {
   CLASSIFIER?: string;
   // Jev's price in USD per million tokens (default 0: tokens are recorded either way).
   JEV_USD_PER_MTOK?: string;
+  // Where scoop-built llms.txt files are public: <base>/<host>/llms.txt (default https://scoop.md).
+  LLMS_PUBLIC_BASE?: string;
   // Jev tokens per UTC day for the account (default 5,000,000), checked before every Jev request.
   JEV_DAILY_TOKEN_CAP?: string;
   // GET /v1/quick: 30 per minute per IP subject (its probes fetch other sites and may ask Jev).

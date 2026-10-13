@@ -13,6 +13,7 @@ import { pruneCrawlRequests, startAllWaiting } from './crawl/requests.ts';
 import { indexDeps } from './index/deps.ts';
 import { reclassify } from './index/reclassify.ts';
 import { processLinkQueue, pruneLiveLinks } from './links/links.ts';
+import { refreshDue } from './llms/registry.ts';
 import { ApiError, notFound } from './lib/errors.ts';
 import { handleTelemetryBatch, pruneTelemetry } from './telemetry/consumer.ts';
 import { API_ROUTES, recordApiUsage } from './telemetry/ingest.ts';
@@ -38,7 +39,7 @@ export default {
     }
 
     const preflight = req.method === 'OPTIONS';
-    const matched = preflight ? null : match(req, env, url, ip);
+    const matched = preflight ? null : match(req, env, url, ip, ctx ? (p) => ctx.waitUntil(p) : undefined);
     const route = preflight ? 'preflight' : (matched?.name ?? 'unmatched');
 
     let res: Response;
@@ -106,6 +107,11 @@ export default {
       const allowLocalhost = env.ENVIRONMENT === 'dev' && env.ALLOW_LOCALHOST === '1';
       console.log(JSON.stringify({ cron: 'link-check', checked: await processLinkQueue(env.DB, { limit: 200, allowLocalhost, deadline: Date.now() + 5 * 60_000 }) }));
       console.log(JSON.stringify({ cron: 'link-prune', deleted: await pruneLiveLinks(env.DB) }));
+      // llms.txt registry: a day old (six hours for sites scooped often) is checked again.
+      console.log(JSON.stringify({
+        cron: 'llms-refresh',
+        refreshed: await refreshDue({ db: env.DB, bucket: env.SKILLS, allowLocalhost, publicBase: env.LLMS_PUBLIC_BASE || undefined }, 10),
+      }));
       return;
     }
     const { totalCapUsd, dailyCapUsd, classify } = indexDeps(env);

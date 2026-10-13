@@ -1,5 +1,5 @@
-// Read-only client for the library API (docs/BACKEND.md §5). Only the website's
-// two endpoints are used: GET /v1/sites and GET /v1/sites/:site.
+// Read-only client for the library API (docs/BACKEND.md §5): GET /v1/sites,
+// GET /v1/sites/:site and the llms.txt registry, GET /v1/llms/index.
 
 
 export type SourceKind = 'page-md' | 'llms' | 'llms-full' | 'page-html';
@@ -62,6 +62,23 @@ async function get<T>(path: string): Promise<Result<T>> {
 
 export async function listSites(limit = 100): Promise<Result<SiteEntry[]>> {
   const r = await get<{ sites: SiteEntry[] }>(`/v1/sites?limit=${limit}`);
+  return r.ok ? { ok: true, data: r.data.sites ?? [] } : r;
+}
+
+// A docs site's llms.txt in the registry (0.6.0): the site's own, or one scoop.md prepared.
+export interface LlmsEntry {
+  host: string;
+  docsRoot: string;
+  llmsUrl: string;
+  source: 'site' | 'scoop';
+  title: string | null;
+  pages: number;
+  tokens: number;
+  checkedAt: string | null;
+}
+
+export async function listLlms(limit = 200): Promise<Result<LlmsEntry[]>> {
+  const r = await get<{ sites: LlmsEntry[] }>(`/v1/llms/index?limit=${limit}`);
   return r.ok ? { ok: true, data: r.data.sites ?? [] } : r;
 }
 

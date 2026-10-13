@@ -1,40 +1,41 @@
 ---
 import Base from '../layouts/Base.astro';
 import Unavailable from '../components/Unavailable.astro';
-import { listSites } from '../lib/api';
-import { ago, bytes, plural, KIND_LABEL } from '../lib/format';
+import { listLlms } from '../lib/api';
+import { ago, plural } from '../lib/format';
 
 export const prerender = false;
 
-const result = await listSites(100);
+const result = await listLlms(200);
 Astro.response.headers.set(
   'Cache-Control',
   result.ok ? 'public, max-age=60, s-maxage=60' : 'public, max-age=0, s-maxage=10',
 );
 if (!result.ok) Astro.response.status = 503;
 const sites = result.ok ? result.data : [];
+const tokens = (n: number) => (n >= 1000 ? `${Math.round(n / 100) / 10}k` : String(n));
 ---
 
-<Base title="Library" description="Documentation sites with a scoop people confirmed worked, most recently confirmed first.">
+<Base title="Library" description="Every docs site's llms.txt that scoop.md knows: the site's own, or one scoop.md prepared.">
   <div class="wrap page">
     <header class="head">
       <p class="eyebrow">library</p>
       <h1>The library</h1>
       <p class="sub">
-        Sites with a scoop that people confirmed worked, most recently confirmed first. When you scoop one of these
-        sites, this is what you get.
+        Every docs site's llms.txt that scoop.md knows, most scooped first. Sites that publish their own are linked as
+        they are; for the rest, scoop.md prepared one. Scooping any of these sites copies a short prompt with its link.
       </p>
     </header>
 
-    {!result.ok && <Unavailable path="/v1/sites" />}
+    {!result.ok && <Unavailable path="/v1/llms/index" />}
 
     {
       result.ok && sites.length === 0 && (
         <div class="empty">
-          <h2>Nothing confirmed yet</h2>
+          <h2>Nothing here yet</h2>
           <p>
-            A site shows up here once someone scoops it and says it worked. Install the extension, scoop the docs you're
-            working with, and tell it how it went.
+            A docs site shows up here the first time someone scoops it. Install the extension and scoop the docs you're
+            working with.
           </p>
         </div>
       )
@@ -43,36 +44,31 @@ const sites = result.ok ? result.data : [];
     {
       result.ok && sites.length > 0 && (
         <table class="sites">
-          <caption class="sr-only">Sites in the library</caption>
+          <caption class="sr-only">Docs sites and their llms.txt</caption>
           <thead>
             <tr>
               <th scope="col">Site</th>
-              <th scope="col">Sources</th>
-              <th scope="col" class="num">Worked</th>
-              <th scope="col">Last confirmed</th>
+              <th scope="col">llms.txt</th>
+              <th scope="col" class="num">Pages</th>
+              <th scope="col">Checked</th>
             </tr>
           </thead>
           <tbody>
-            {sites.map(({ site, best }) => (
+            {sites.map((s) => (
               <tr>
                 <th scope="row" data-label="Site">
-                  <a href={`/${site}`}>{site}</a>
+                  <a href={s.docsRoot} rel="noopener">{s.title ?? s.host}</a>
+                  <span class="size muted">{s.host}</span>
                 </th>
-                <td data-label="Sources">
-                  <span class="count">{plural(best.sources.length, 'source')}</span>
-                  <span class="kinds">
-                    {[...new Set(best.sources.map((s) => s.kind))].map((k) => (
-                      <span class={`kind kind--${k}`}>{KIND_LABEL[k] ?? k}</span>
-                    ))}
-                  </span>
-                  <span class="size muted">{bytes(best.sizeBytes)}</span>
+                <td data-label="llms.txt">
+                  <a href={s.llmsUrl} rel="noopener">{s.source === 'site' ? 'The site\'s own' : 'Prepared by scoop.md'}</a>
+                  <span class="size muted">~{tokens(s.tokens)} tokens</span>
                 </td>
-                <td data-label="Worked" class="num">
-                  <strong>{best.worked}×</strong>
-                  {best.failed > 0 && <span class="muted"> · {best.failed} didn't</span>}
+                <td data-label="Pages" class="num">
+                  <strong>{plural(s.pages, 'page')}</strong>
                 </td>
-                <td data-label="Last confirmed">
-                  <time datetime={best.lastWorkedAt ?? undefined}>{ago(best.lastWorkedAt)}</time>
+                <td data-label="Checked">
+                  <time datetime={s.checkedAt ?? undefined}>{ago(s.checkedAt)}</time>
                 </td>
               </tr>
             ))}

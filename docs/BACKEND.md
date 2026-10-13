@@ -103,6 +103,7 @@ All responses are JSON (`content-type: application/json; charset=utf-8`) unless 
 | 400 | `invalid_request` | Malformed JSON, missing or invalid fields, bad install ID |
 | 404 | `not_found` | Unknown skill or site |
 | 404 | `not_indexed` | `GET /v1/packages?url=`: the site has no index yet |
+| 503 | `preparing` | `GET /v1/llms/<host>/llms.txt`: a scoop-built file couldn't be built just now (`Retry-After`) |
 | 409 | `conflict` | Admin crawl of a site that already has one queued or running |
 | 410 | `removed` | Skill removed by takedown |
 | 413 | `too_large` | Body over 6 MB, or any section over its limit |
@@ -245,6 +246,47 @@ For packages the extension builds itself. Request `{ "urls": [ … ] }`, at most
 
 #### `GET /v1/search?q=&site=&slot=&limit=`
 Hybrid search over indexed chunks. Cached in the Cache API for 10 minutes per site (or all sites), normalised query (lowercased, whitespace collapsed), `slot`, `limit` and index version (indexed page count and last index time), `x-scoop-cache: hit | miss`; the search rate limit counts only misses. `GET /v1/packages?q=` is cached the same way (per `budget`). Query embeddings have their own 10-minute cache. On a miss the vector side (embedding and Vectorize) gets 1.2 s; past it the answer is full-text only. The Cache API is per data center, so the first request in each one is a miss. Each hit: `{ id, url, title, heading_path, snippet, slot, topic_path, score }`, no full text: `id` is the chunk's stable ID (the page URL's hash and the chunk's position; it changes only when the page is re-chunked), for `GET /v1/packages?chunks=`.
+
+### llms.txt (0.6.0, "llms.txt first")
+
+Every scoop gives the user the docs site's llms.txt as a short link prompt. Implementation: `backend/src/llms/` (registry, builder, instructions for agents); tables `llms_registry` and `llms_aliases` (migration 0013); scoop-built files in R2 at `llms/<host>.txt`.
+
+#### `GET /v1/llms?url=<page url>`
+Public, 30 per minute per IP subject (`QUICK_LIMITER`), with /v1/quick's safety: the SSRF guard, the per-host probe budget, the not-docs lists.
+```jsonc
+{ "site": "stripe.com",
+  "docs": { "found": true, "root": "https://docs.stripe.com", "verdict": "yes" },
+  "llms": { "url": "https://docs.stripe.com/llms.txt", "source": "site", "status": "ready", "title": "Stripe Documentation",
+            "pages": 513, "tokens": 23000, "checkedAt": "2026-10-13T08:00:00.000Z", "fullUrl": null },
+  "agentInstructions": { "text": "## Instructions for …", "source": "https://docs.stripe.com/llms.txt#instructions-for-…", "method": "section" },
+  "prompt": "Stripe docs for agents: https://docs.stripe.com/llms.txt — read it first, then fetch only the pages you need.\n\nFrom the Stripe docs, for agents (…):\n…",
+  "retryAfterMs": null }
+```
+1. **Not docs** (the gate's denylist, a site the gate rejected, or /v1/quick's discovery finds no docs): `{ site, docs: { found: false, root: null, verdict }, llms: null, agentInstructions: null, prompt: null, retryAfterMs: null }`. Nothing is stored and nothing is crawled.
+2. **The registry**: a page whose host (or a host that led to it before: stripe.com → docs.stripe.com) is registered is answered from it, with no request to the site.
+3. **Otherwise** /v1/quick's discovery finds the docs root (the page itself, a docs subdomain or path, another domain's docs). A verified llms.txt there (`source: "site"`) is registered as is: its H1, its number of links, its size in tokens (chars / 4), its hash.
+4. **No llms.txt**: scoop.md prepares one (`source: "scoop"`, `url` `<LLMS_PUBLIC_BASE>/<host>/llms.txt`, https://scoop.md in production). The first answer is `status: "preparing"` with `retryAfterMs: 3000`; the URL works at once (the hosted file builds the instant stage on demand). The instant stage runs after the response; the full stage follows from the site's index when it has pages under the root, else from a crawl requested for it (the usual daily crawl-request limits).
+- `agentInstructions`: verbatim lines from the llms.txt that tell an agent how to install, set up or use the product (sections headed instructions/agents/LLM/AI/install/setup/getting started/quick start/MCP/CLI; lines about MCP, CLI installs, API keys elsewhere), at most 1,200 characters. Over that, Jev selects lines (it never writes any). Lines that pipe into a shell or point at other domains are dropped, and so is any line with a link not known to exist. For a scoop-built file they come from the site's install / quick start pages. `method`: `section` | `jev`. Null when none.
+- `prompt` is the exact clipboard text: the link line, then the instructions quoted as the docs' own words when there are any.
+- `cache-control: public, max-age=60` when ready, `no-store` while preparing.
+
+#### `GET /v1/llms/<host>/llms.txt`
+A scoop-built llms.txt, `text/markdown; charset=utf-8`, `cache-control: public, max-age=300`. The website proxies it at `https://scoop.md/<host>/llms.txt`. A registered site's own file is a 302 to it; an unknown host is 404. Format:
+```
+# Hono
+> Documentation index for hono.dev, prepared by scoop.md. Source: https://hono.dev/docs
+
+## Getting started
+- [Basic](https://hono.dev/docs/getting-started/basic.md): Create your first app
+```
+- **Instant stage** (seconds): the docs root's sitemap(s) (robots.txt `Sitemap:` lines, else /sitemap.xml and its index variants) and the links in its navigation and sidebars, titled by their link text, grouped by path section (versions ignored; one version of versioned docs), quick start sections first; robots.txt honoured; Sphinx indexes and search pages skipped; a docs path with fewer than 5 links widens to the host. At most 300 links.
+- **Full stage** (after a crawl): the indexed pages with their one-line summaries, grouped Getting started → Guides → Reference → Other by their slots.
+- Every link is checked (link health, below); only links known to exist are written. `.md` twins are used when a sample of pages has them (a twin that fails falls back to its page).
+
+#### `GET /v1/llms/index?limit=&cursor=`
+The registry for the website's Library page: `{ sites: [{ host, docsRoot, llmsUrl, source, title, pages, tokens, checkedAt }], next }`, ready files only, most scooped first; docs sites only (a site the gate rejected never appears). `cache-control: public, max-age=60`.
+
+Refresh: the hourly cron re-checks rows not checked for a day (six hours for sites scooped 20 times or more), 10 per run: a site's own file is fetched again (gone: scoop.md prepares one), a scoop-built one is rebuilt. A crawl ends with an `llms` step that rebuilds the site's scoop-built file at the full stage.
 
 ### Instant answers and the sites index
 

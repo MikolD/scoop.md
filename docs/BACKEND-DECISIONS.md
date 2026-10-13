@@ -1485,3 +1485,31 @@ everywhere and its empty answer was then served for an hour.
   512 KB (`crawlFetch` `truncate`; an over-cap read now also keeps the bytes
   up to the cap). The probe limiter allows 48 requests at once and each
   fetch gets what is left of the 1.5 s, so the redirect's second round fits.
+
+## llms.txt first (0.6.0)
+
+The owner's decision: a scoop is a short link prompt to the docs' llms.txt,
+not the docs' content. The backend's job is to have an llms.txt for every
+docs site, fast, and never anything for a site that isn't docs.
+
+- **Answer from the registry first.** Discovery (/v1/quick's, ~1-1.5 s)
+  only runs on a miss; the page host is remembered as an alias of the docs
+  host, so stripe.com and docs.stripe.com/webhooks answer instantly after
+  the first scoop. Non-docs answers store nothing: no row, no alias, no
+  crawl request (the same privacy rule as `notDocs`).
+- **A prepared file is usable at once.** The first answer for a site with
+  no llms.txt is `preparing`, but its URL already works: the hosted file
+  builds the instant stage on demand if the background build hasn't
+  finished. Instant (sitemaps and the docs root's navigation, every link
+  checked) takes 1-8 s on real sites; the full stage reuses the crawl and
+  classification pipeline (slots give Getting started / Guides / Reference
+  and the summaries give one-line descriptions).
+- **Instructions for agents are selected, never written.** Verbatim lines
+  from the file (or the install pages), deterministic first, Jev only to
+  select among too many lines, with the H1 safety filters (no shell pipes,
+  no other domains) and dead links dropped. The prompt quotes them as the
+  docs' own words.
+- **The public URL is configurable** (`LLMS_PUBLIC_BASE`): https://scoop.md
+  in production (the site proxies the API), the staging API itself on
+  staging, so staging links never point at production.
+- **Not in this pass:** Context7 fill-in.
