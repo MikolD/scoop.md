@@ -179,7 +179,7 @@ test('verifyAll returns titles and links read from the fetched sources', async (
 
 test("the extension's package renders server labels as before", async () => {
   // A variable path keeps tsc from type-checking the extension's plain JS.
-  const extensionPackage = '../../extension/lib/package.js';
+  const extensionPackage = '../../shared/package.js';
   const { buildPackage } = await import(extensionPackage);
   const s = withServerText(skill(), [v('', [['https://ex.com/docs/auth-keys', 'API keys']]), v('Receive webhooks')]);
   const md = buildPackage({

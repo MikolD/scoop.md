@@ -77,7 +77,7 @@ Check with `curl -sI https://anydoc.md/library` → `301` and `location: https:/
 
 ```
 src/lib/api.ts           read-only API client, result types, hostname checks
-src/lib/example.ts       the landing page's example package (same format as extension/lib/package.js)
+src/lib/example.ts       the landing page's example package (same format as shared/package.js)
 src/lib/links.ts         GitHub, Chrome Web Store, contact placeholders
 src/components/          Logo, ScoopFlow (the three-step demo), Unavailable, NotFound
 src/pages/               index, library, [site], privacy, terms, 404

@@ -65,6 +65,8 @@ export const CATALOG: Record<string, [Source, Record<string, Spec>]> = {
   copy_search: ['extension', { site, count: int }],
   // How often the toolbar badge showed "1" (llms.txt) or "2" (llms.txt + instructions) in an hour: per level, no sites.
   badge_llms_shown: ['extension', { level: int, count: int }],
+  // 0.5.x: how often the toolbar icon showed each docs verdict in an hour (still accepted from those versions).
+  badge_verdict_shown: ['extension', { verdict: oneOf('docs', 'not_docs'), count: int }],
   // The docs index: asking for a crawl and waiting for it
   crawl_request: ['extension', { site, state: oneOf('queued', 'running', 'indexing', 'complete', 'rejected', 'failed', 'rate_limited', 'error') }],
   crawl_wait: ['extension', { durationMs: int, outcome: oneOf('complete', 'rejected', 'failed', 'copied_page', 'closed', 'timeout', 'stalled_index') }],

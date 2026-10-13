@@ -11,8 +11,7 @@
 
 import { libraryUrl } from './library.js';
 import { isPrivateHost } from './hosts.js';
-import { redactPath, scrubText } from './privacy.js';
-import { stripTracking } from './extract.js';
+import { redactPath, scrubText, stripTracking } from './privacy.js';
 
 export const QUEUE_KEY = 'telemetryQueue';
 export const RETRY_KEY = 'telemetryRetry';

@@ -15,7 +15,7 @@ const UA = 'Mozilla/5.0 (compatible; scoop.md-bot/1; +https://scoop.md/bot) Chro
 const NAV_TIMEOUT_MS = 30_000;
 const SETTLE_MS = 4_000;
 
-// extension/lib/extract.js, evaluated inside the page (it needs a real DOM).
+// shared/extract.js, evaluated inside the page (it needs a real DOM).
 // `export` is dropped so it runs as a plain script.
 const EXTRACT = readFileSync(new URL('./vendor/extract.js', import.meta.url), 'utf8').replace(/^export /gm, '');
 

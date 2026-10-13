@@ -24,7 +24,7 @@ registerHooks({
   },
 });
 const { default: worker } = await import('../src/index.ts');
-const { buildPackage, withCurrentPage } = await import('../../extension/lib/package.js');
+const { buildPackage, withCurrentPage } = await import('../../shared/package.js');
 
 const USER = 'admin';
 const PASS = 'correct horse battery staple, twice over';
@@ -582,7 +582,7 @@ test('shared library: sites, best and recent skills, the extension\'s exact pack
   assert.deepEqual(site.recent.map((s: any) => s.id).sort(), [id, id2].sort());
   assert.equal(site.recent[0].sources.length, 2);
 
-  // The package is extension/lib/package.js's output for the stored skill.
+  // The package is shared/package.js's output for the stored skill.
   const d = (await call(env, req(`/api/skills/${id}`))).body;
   const stored = (await store.load((await store.getRow(id))!))!;
   const expected = buildPackage({ site: stored.site, pageUrl: stored.pageUrl, sections: withCurrentPage(stored.sections, null, stored.pageUrl), relatedLinks: stored.relatedLinks });

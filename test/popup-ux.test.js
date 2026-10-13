@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { parseHTML, DOMParser } from 'linkedom';
 import { startMockLibrary } from './helpers/mock-library.js';
 import { sleep, stageLog, timing } from '../extension/lib/ux.js';
-import { SITES_KEY, SITES_ALARM, LEARNED_TTL_MS, badgeFor, compactCount, llmsLevelFor, refreshSites, rememberLlms, setTabBadge } from '../extension/lib/badge.js';
+import { SITES_KEY, SITES_ALARM, LEARNED_TTL_MS, badgeFor, llmsLevelFor, refreshSites, rememberLlms, setTabBadge } from '../extension/lib/badge.js';
 import { createLibrary } from '../extension/lib/library.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -186,7 +186,6 @@ async function withMock(opts, fn) {
 }
 
 test('llmsLevelFor: "1" llms.txt, "2" with instructions, from the list or what the popup learned (newer, 7 days); private hosts never; an old list shows nothing', () => {
-  assert.deepEqual([0, 14, 230, 999, 1000, 1234, 9999, 12_345, 1_500_000].map(compactCount), ['', '14', '230', '999', '1k', '1.2k', '9.9k', '12k', '1.5m'], 'still used for topic counts');
   const llms = { 'docs.stripe.com': 2, 'stripe.com': 2, 'hono.dev': 1 };
   const now = Date.now();
   assert.equal(llmsLevelFor('https://docs.stripe.com/webhooks', { llms }), 2);
@@ -203,8 +202,9 @@ test('llmsLevelFor: "1" llms.txt, "2" with instructions, from the list or what t
   assert.ok(!read('../extension/lib/badge.js').includes('OffscreenCanvas'), 'no icon overlays');
 });
 
-test('service worker: downloads the sites index with llms levels (then 304), sets "1" / "2" / nothing per tab in the brand colour with white text, no request per visit, counts once per tab per site', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 230, llmsLevel: 1 }, [SITE]: { indexed: true, pages: 14, llmsLevel: 2 }, 'amazon.com': { notDocs: true } } }, async () => {
-  const local = { devLibraryUrl: mock.url };
+test('service worker: clears 0.5.x state, downloads the sites index with llms levels (then 304), sets "1" / "2" / nothing per tab in the brand colour with white text, no request per visit, counts once per tab per site', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 230, llmsLevel: 1 }, [SITE]: { indexed: true, pages: 14, llmsLevel: 2 }, 'amazon.com': { notDocs: true } } }, async () => {
+  const local = { devLibraryUrl: mock.url, crawlPending: { x: {} }, popupView: 'advanced', introSeen: true, docsVerdicts: { 'a.dev': { v: 'docs', at: 1 } }, badgeVerdictsShown: { docs: 1 } };
+  const syncStore = { share: false, telemetry: false };
   const badges = {};
   const colors = {};
   const textColors = {};
@@ -216,7 +216,7 @@ test('service worker: downloads the sites index with llms levels (then 304), set
   globalThis.chrome = {
     storage: {
       local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: structuredClone(local[k]) } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async (ks) => { for (const k of [ks].flat()) delete local[k]; } },
-      sync: { get: async (d) => ({ ...d, telemetry: false }) },
+      sync: { get: async (d) => ({ ...d, ...syncStore }), remove: async (k) => { for (const key of [k].flat()) delete syncStore[key]; } },
       onChanged: on('storage'),
     },
     runtime: { getManifest: () => MANIFEST, onInstalled: on('installed'), onStartup: on('startup'), setUninstallURL: async () => {}, getPlatformInfo: async () => ({}) },
@@ -233,6 +233,9 @@ test('service worker: downloads the sites index with llms levels (then 304), set
   await import(`../extension/background.js?${Math.random()}`);
   listeners.installed({ reason: 'install' });
   await waitFor(() => local[SITES_KEY]?.etag);
+  await waitFor(() => local.docsVerdicts === undefined);
+  for (const key of ['crawlPending', 'popupView', 'introSeen', 'docsVerdicts', 'badgeVerdictsShown']) assert.equal(local[key], undefined, `0.5.x ${key} removed`);
+  assert.equal(syncStore.share, undefined, 'the sharing setting removed');
   assert.deepEqual(local[SITES_KEY].llms, { 'hono.dev': 1, [SITE]: 2 });
   assert.equal(alarms[SITES_ALARM].periodInMinutes, 360, 'every 6 hours');
   const before = mock.log.length;
@@ -348,7 +351,13 @@ test('main view, the site’s own llms.txt: the llms.txt field (opens the file),
   const p = await openPopup(PAGE, {});
   await p.ready;
   assert.equal(p.clipboard.text, PROMPT, 'the exact prompt');
-  assert.deepEqual(main(p), { field: `${SITE}/llms.txt`, meta: '412 pages · checked today', badge: false, agent: null, button: 'Copied ✓', notDev: null });
+  const { meta, ...rest } = main(p);
+  assert.deepEqual(rest, { field: `${SITE}/llms.txt`, badge: false, agent: null, button: 'Copied ✓', notDev: null });
+  assert.match(meta, /^412 pages · checked today · found in \d+\.\ds$/, 'the final time stays in the meta');
+  const stopped = p.$('elapsed').textContent;
+  assert.match(stopped, /^\d+\.\ds$/);
+  await sleep(250);
+  assert.equal(p.$('elapsed').textContent, stopped, 'the timer stopped on success');
   assert.equal(p.$('llms-field').getAttribute('href'), `https://${SITE}/llms.txt`, 'the field opens the file');
   assert.equal(p.$('llms-field').getAttribute('target'), '_blank');
   assert.equal(p.$('llms-status').textContent, '', 'the button says it');
@@ -427,8 +436,11 @@ test('main view, preparing: copied at once, "Preparing…", then asked again unt
   const p = await openPopup(PAGE, {});
   await p.ready;
   assert.equal(p.clipboard.text, 'P1', 'the URL already works: copied at once');
-  assert.equal(main(p).meta, 'Preparing…');
-  await waitFor(() => main(p).meta === '230 pages · checked today', 4000);
+  assert.match(main(p).meta, /^Preparing… \d+\.\ds$/, 'the clock keeps running while it is prepared');
+  const first = main(p).meta;
+  await sleep(250);
+  assert.notEqual(main(p).meta, first, 'it ticks');
+  await waitFor(() => /^230 pages · checked today · prepared in \d+\.\ds$/.test(main(p).meta), 4000);
   assert.equal(gets('/v1/llms').length, 3);
   await p.$('copy-llms').onclick();
   assert.equal(p.clipboard.text, 'P2', 'the latest prompt');
@@ -450,7 +462,7 @@ test('main view, the library unreachable: the site’s own verified llms.txt giv
   await p.ready;
   assert.equal(p.clipboard.text, 'Example docs for agents: https://docs.example.org/llms.txt — read it first, then fetch only the pages you need.');
   assert.equal(main(p).field, `${SUB}/llms.txt`);
-  assert.equal(main(p).meta, '1 page · checked today');
+  assert.match(main(p).meta, /^1 page · checked today · found in \d+\.\ds$/, 'the fallback stops the clock too');
   assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['fallback']);
   assert.equal(p.local.llmsLevels, undefined, 'a local find is not learned');
 }));
@@ -524,3 +536,27 @@ test('usage statistics notice: shown once; Turn off sends nothing more', () => w
   await again.ready;
   assert.equal(again.$('usage-notice').hidden, true);
 }));
+
+test('the elapsed timer: under the loader, every 100 ms (once a second with reduced motion); it stops on an error too', async () => {
+  await withMock({ sites: { [SITE]: { llmsApi: llmsAnswer(), llmsDelayMs: 450 } } }, async () => {
+    timing.loaderMs = 0;
+    const p = await openPopup(PAGE);
+    await sleep(320);
+    assert.equal(p.document.body.dataset.stage, 'loading');
+    assert.match(p.$('elapsed').textContent, /^0\.[2-4]s$/, `ticks every 100 ms: ${p.$('elapsed').textContent}`);
+    await p.ready;
+  });
+  await withMock({ sites: { [SITE]: { llmsApi: llmsAnswer(), llmsDelayMs: 450 } } }, async () => {
+    const p = await openPopup(PAGE, { reduced: true });
+    await sleep(320);
+    assert.equal(p.$('elapsed').textContent, '0.0s', 'reduced motion: once a second');
+    await p.ready;
+  });
+  await withMock({ sites: {} }, async () => {
+    const p = await openPopup(PAGE, { local: { devLibraryUrl: 'http://localhost:9/v1' } });
+    await p.ready;
+    const stopped = p.$('elapsed').textContent;
+    await sleep(250);
+    assert.equal(p.$('elapsed').textContent, stopped, 'stopped on "Couldn\'t reach scoop.md"');
+  });
+});

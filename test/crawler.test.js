@@ -11,7 +11,7 @@ import { normalizePageUrl } from '../backend/src/lib/urls.ts';
 const read = (p) => readFileSync(new URL(p, import.meta.url), 'utf8');
 
 test('vendored extract.js, robots.ts, skip.ts and urls.ts match their sources (run `npm run sync` in crawler/)', () => {
-  assert.equal(read('../crawler/vendor/extract.js'), read('../extension/lib/extract.js'));
+  assert.equal(read('../crawler/vendor/extract.js'), read('../shared/extract.js'));
   assert.equal(read('../crawler/vendor/robots.ts'), read('../backend/src/crawl/robots.ts'));
   assert.equal(read('../crawler/vendor/skip.ts'), read('../backend/src/crawl/skip.ts'));
   assert.equal(read('../crawler/vendor/urls.ts'), read('../backend/src/lib/urls.ts'));

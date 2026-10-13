@@ -1,7 +1,7 @@
 // The popup (0.6.0): the site's llms.txt and its instructions for agents,
 // copied for the agent in one click. Nothing else: no page scoop, no sharing.
 import { discover, siteKey } from './lib/discover.js';
-import { verifyLlms } from './lib/package.js';
+import { verifyLlms } from './lib/llms.js';
 import { DEFAULT_LIBRARY, libraryUrl, createLibrary } from './lib/library.js';
 import { createTelemetry, getInstallId, NOTICE_KEY, errorText, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
 import { isPrivateHost } from './lib/hosts.js';
@@ -105,10 +105,40 @@ let llmsSource = null;
 let llmsPoll = null;
 const PREPARING_POLLS = 40;
 
+// The elapsed time: under the loader while /v1/llms answers, then in the meta
+// line while a scoop.md llms.txt is prepared ("Preparing… 3.4s"), and the final
+// time stays in the meta ("found in 1.2s", "prepared in 4.6s"). Every 100 ms,
+// or once a second with reduced motion.
+let timerStart = 0;
+let timerTick = null;
+let foundMs = null;
+let preparedMs = null;
+const seconds = (ms) => `${(ms / 1000).toFixed(1)}s`;
+function startTimer() {
+  stopTimer();
+  timerStart = Date.now();
+  foundMs = null;
+  preparedMs = null;
+  const tick = () => {
+    const text = seconds(Date.now() - timerStart);
+    $('elapsed').textContent = text;
+    if (llmsData?.llms?.status === 'preparing' && !$('llms-block').hidden) $('llms-meta').textContent = `Preparing… ${text}`;
+  };
+  tick();
+  timerTick = setInterval(tick, reducedMotion() ? 1_000 : 100);
+}
+function stopTimer() {
+  clearInterval(timerTick);
+  timerTick = null;
+  return Date.now() - timerStart;
+}
+
 async function runMain() {
   clearTimeout(llmsPoll);
+  llmsData = null;
   setLlms({ state: 'checking' });
   showLoader();
+  startTimer();
   const host = new URL(tab.url).hostname;
   const privateHost = isPrivateHost(host);
   let res = null;
@@ -116,6 +146,7 @@ async function runMain() {
   if (res?.ok && res.data && typeof res.data === 'object') return showLlms(res.data, { fallback: false, privateHost });
   const local = await localLlms(tab.url);
   if (local) return showLlms(local, { fallback: true, privateHost });
+  stopTimer();
   setLlms({ state: 'unreachable' });
   await loaderDone();
   reveal();
@@ -125,6 +156,8 @@ async function showLlms(data, { fallback, privateHost }) {
   const llms = data.llms;
   const docs = Boolean(data.docs?.found && llms?.url && data.prompt && /^https?:\/\//i.test(llms.url));
   if (!fallback && !privateHost) learnBadge(data, docs);
+  // Still preparing: the clock keeps running, in the meta line.
+  if (!(docs && llms.status === 'preparing' && !fallback)) foundMs = stopTimer();
   if (!docs) {
     setLlms({ state: 'no' });
     await loaderDone();
@@ -160,7 +193,10 @@ function learnBadge(data, docs) {
 // A scoop.md-built llms.txt still being built: its URL already works; asked
 // again every retryAfterMs until it is ready.
 function pollPreparing(retryAfterMs, n) {
-  if (n >= PREPARING_POLLS) return;
+  if (n >= PREPARING_POLLS) {
+    stopTimer();
+    return;
+  }
   llmsPoll = setTimeout(async () => {
     const res = await library.llms(llmsQueryUrl(tab.url));
     if (!res.ok || !res.data?.llms) return pollPreparing(retryAfterMs, n + 1);
@@ -168,6 +204,7 @@ function pollPreparing(retryAfterMs, n) {
       llmsData = res.data;
       llmsPrompt = res.data.prompt;
     }
+    if (res.data.llms.status === 'ready') preparedMs = stopTimer();
     setLlms({ state: 'yes', data: res.data });
     if (res.data.llms.status === 'ready') learnBadge(res.data, true);
     if (res.data.llms.status === 'preparing') pollPreparing(res.data.retryAfterMs ?? retryAfterMs, n + 1);
@@ -229,9 +266,10 @@ function setLlms({ state, data = null }) {
   if (state !== 'yes') return;
   const llms = data.llms;
   $('llms-badge').hidden = llms.source !== 'scoop';
+  const took = preparedMs != null ? `prepared in ${seconds(preparedMs)}` : foundMs != null ? `found in ${seconds(foundMs)}` : '';
   $('llms-meta').textContent = llms.status === 'preparing'
-    ? 'Preparing…'
-    : [llms.pages > 0 ? plural(llms.pages, 'page') : '', checkedText(llms.checkedAt)].filter(Boolean).join(' · ');
+    ? `Preparing… ${seconds(Date.now() - timerStart)}`
+    : [llms.pages > 0 ? plural(llms.pages, 'page') : '', checkedText(llms.checkedAt), took].filter(Boolean).join(' · ');
   $('llms-field-text').textContent = middle(llms.url.replace(/^https?:\/\//, ''), 36);
   $('llms-field-text').title = llms.url;
   $('llms-field-text').setAttribute('aria-label', `llms.txt: ${llms.url}`);
@@ -323,6 +361,7 @@ async function pinHint() {
 }
 
 function fail(e) {
+  stopTimer();
   setLlms({ state: 'unreachable' });
   $('llms-status').textContent = e?.message || String(e);
   reveal();

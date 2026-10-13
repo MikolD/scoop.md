@@ -77,17 +77,15 @@ Certifications to tick:
 
 ## Store artwork
 
-In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real extension and composed with the popup at the top right:
-
-Screenshots 1–5 predate 0.6.0 (one view: the llms.txt and its instructions for agents, and the "1"/"2" badge) and are to be replaced with ones from the 0.6.0 build (scratchpad/ux-evidence/060/).
+In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real 0.6.0 extension against the library and composed with the popup at the top right (1280×800, light theme). Sources: scratchpad/ux-evidence/060/store/.
 
 | File | Size | Shows |
 |---|---|---|
-| `1-stripe-webhooks-copied.png` | 1280×800 | docs.stripe.com/webhooks rebuilt from the page ("Rebuild from this page", since the live library already serves a Stripe skill): "Copied. Paste it into your agent.", 2 sources (the page's `.md` and `llms.txt`), "Shared with the library" (api.scoop.md) |
-| `2-stripe-library-hit.png` | 1280×800 | docs.stripe.com/payments/checkout served from the live library (api.scoop.md): "shared, worked for 2 people", vote buttons, "Rebuild from this page" |
-| `3-python-html-converted.png` | 1280×800 | docs.python.org/3/library/json.html (no Markdown published) converted from HTML, the preview scrolled to a converted code block, "Shared with the library" (api.scoop.md) |
-| `4-settings.png` | 1280×800 | Settings (0.3.0): sharing toggle, "Send usage statistics" toggle with the install ID, theme, keyboard shortcut, version |
-| `5-first-run-notice.png` | 1280×800 | The first popup after install, on react.dev/learn against the live library: the usage statistics notice ("Turn off" / "OK") and the sharing note above the copied result |
+| `1-stripe.png` | 1280×800 | stripe.com: the llms.txt field (docs.stripe.com/llms.txt, "513 pages · checked today · found in 0.3s"), Instructions for agents (Stripe's, collapsed with "Show all ⌄") and "Copied ✓"; the toolbar shows "2" |
+| `2-twilio.png` | 1280×800 | twilio.com: www.twilio.com/docs/llms.txt with Twilio's instructions for agents, copied |
+| `3-python.png` | 1280×800 | docs.python.org: an llms.txt prepared by scoop.md ("by scoop.md" badge) with install instructions, copied |
+| `4-hono.png` | 1280×800 | hono.dev: an llms.txt only (no instructions): "Copy llms.txt", copied; the toolbar shows "1" |
+| `5-not-developer.png` | 1280×800 | example.com: "This isn't a developer website. scoop.md is for developer docs." and nothing else |
+| `6-badge.png` | 1280×800 | The toolbar badge close-up: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
 | `promo-small-440x280.png` | 440×280 | Small promo tile: icon, "scoop.md", "Scoop any doc into your coding agent" on #ffeee0 |
-| `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 2 |
-
+| `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 1 |

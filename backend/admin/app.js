@@ -886,7 +886,7 @@ async function skillDetail(r) {
       h('dt', {}, 'Shared'), h('dd', {}, s.createdAt),
       s.removedAt ? [h('dt', {}, 'Removed'), h('dd', { class: 'err' }, s.removedAt)] : null,
       h('dt', {}, 'Sources'), h('dd', {}, s.sources.map((x) => h('div', {}, h('span', { class: 'meta' }, `${x.kind} · ${x.label} `), ext(x.url)))))),
-    card(h('span', {}, 'Package the extension copies ', h('span', { class: 'meta small' }, '(on the skill\'s own page; built by extension/lib/package.js)')),
+    card(h('span', {}, 'Package the extension copies ', h('span', { class: 'meta small' }, '(on the skill\'s own page; built by shared/package.js)')),
       d.package === null ? h('p', { class: 'empty' }, 'Content removed.') : markdownBlock(d.package, { label: 'Copy package' })),
     s.relatedLinks?.length ? card(`Related links (${s.relatedLinks.length})`, h('ul', { class: 'plain' }, s.relatedLinks.map((l) => h('li', {}, ext(l.url, l.text || l.url))))) : null,
     card(`Reports (${d.reports.length})`, table([

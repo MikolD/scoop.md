@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node server.js",
     "crawl": "node cli.js",
-    "sync": "cp ../extension/lib/extract.js vendor/extract.js && cp ../backend/src/crawl/robots.ts vendor/robots.ts && cp ../backend/src/crawl/skip.ts vendor/skip.ts && cp ../backend/src/lib/urls.ts vendor/urls.ts",
+    "sync": "cp ../shared/extract.js vendor/extract.js && cp ../backend/src/crawl/robots.ts vendor/robots.ts && cp ../backend/src/crawl/skip.ts vendor/skip.ts && cp ../backend/src/lib/urls.ts vendor/urls.ts",
     "template:build": "npm run sync && e2b template create scoop-crawler --dockerfile e2b.Dockerfile --cmd 'cd /home/user/crawler && node server.js' --ready-cmd 'curl -sf http://localhost:8080/health' --cpu-count 2 --memory-mb 2048"
   },
   "dependencies": {

@@ -102,3 +102,6 @@ main { display: grid; gap: var(--gap); padding: 0 var(--pad) var(--pad); }
 /* "Show all ⌄": a quiet text button, like the chips. */
 .more { justify-self: start; padding: 2px 8px; border: 0; border-radius: 999px; background: none; color: var(--muted); font-size: var(--text-sm); cursor: pointer; }
 .more:hover, .more:focus-visible { background: var(--accent-soft); color: var(--fg); }
+
+/* The elapsed time under the loader and while an llms.txt is being prepared */
+.elapsed { color: var(--muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }

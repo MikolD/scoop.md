@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { DOMParser } from 'linkedom';
-import { pickMain, htmlToMarkdown, relatedLinks, stripTracking } from '../extension/lib/extract.js';
+import { pickMain, htmlToMarkdown, relatedLinks, stripTracking } from '../shared/extract.js';
 import { containment } from '../server/verify.js';
 
 const fixture = (name) => readFileSync(new URL(`./fixtures/${name}`, import.meta.url), 'utf8');
@@ -133,4 +133,11 @@ test('docsify heading anchors are the route, not more related links', () => {
     'https://ex.com/#/quickstart',
     'https://ex.com/#/configuration',
   ]);
+});
+
+test('the extension\'s own stripTracking (lib/privacy.js) matches the shared one', async () => {
+  const { stripTracking: inExtension } = await import('../extension/lib/privacy.js');
+  for (const u of ['https://ex.com/a?utm_source=x&id=7&gclid=1#h', 'https://ex.com/?q=a%20b&fbclid=z', 'https://ex.com/p?ref_src=tw', 'https://ex.com/']) {
+    assert.equal(inExtension(u), stripTracking(u), u);
+  }
 });

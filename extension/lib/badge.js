@@ -27,15 +27,6 @@ export const BADGE = {
 };
 const DEFAULT_TITLE = 'Scoop to agent';
 
-// 14, 230, 1.2k, 12k, 1.2m: at most four characters, as the badge allows.
-export function compactCount(n) {
-  if (!(n > 0)) return '';
-  if (n < 1000) return String(Math.floor(n));
-  const unit = n < 1_000_000 ? ['k', 1000] : ['m', 1_000_000];
-  const v = n / unit[1];
-  return `${v < 10 ? Math.floor(v * 10) / 10 : Math.floor(v)}${unit[0]}`;
-}
-
 export async function loadSites(chromeApi) {
   try {
     const { [SITES_KEY]: index } = await chromeApi.storage.local.get(SITES_KEY);

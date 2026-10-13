@@ -35,10 +35,12 @@ async function activePing(t) {
 async function ensureAlarms() {
   if (!(await chrome.alarms.get(HOURLY_ALARM))) chrome.alarms.create(HOURLY_ALARM, { delayInMinutes: 1, periodInMinutes: 60 });
   if (!(await chrome.alarms.get(SITES_ALARM))) chrome.alarms.create(SITES_ALARM, { periodInMinutes: SITES_PERIOD_MINUTES });
-  // 0.5.x followed crawl requests: their state and alarm are no longer used.
+  // State 0.5.x kept and 0.6.0 doesn't use: crawl following, the views, the
+  // docs-verdict icon and its counts, and the sharing setting.
   try {
     await chrome.alarms.clear('crawl-poll');
-    await chrome.storage.local.remove(['crawlPending', 'popupView', 'introSeen']);
+    await chrome.storage.local.remove(['crawlPending', 'popupView', 'introSeen', 'docsVerdicts', 'badgeVerdictsShown']);
+    await chrome.storage.sync.remove('share');
   } catch {}
   await refreshTabs(chrome);
 }

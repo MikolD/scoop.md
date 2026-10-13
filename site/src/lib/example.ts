@@ -1,5 +1,5 @@
 // What a click on docs.stripe.com/webhooks puts on the clipboard, in the exact
-// layout of extension/lib/package.js (header, preamble, Sources, sections).
+// layout of shared/package.js (header, preamble, Sources, sections).
 // Section bodies are the opening lines of the real files, cut for the page.
 
 const PAGE_URL = 'https://docs.stripe.com/webhooks';
