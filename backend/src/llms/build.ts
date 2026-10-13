@@ -437,7 +437,7 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
   // (already checked) follow in their path sections, a section of the same
   // name taking them in, up to MAX_FULL_LINKS.
   const pageOf = (u: string) => u.replace(/(\/index)?\.md$/i, '').replace(/\/(index\.html?)?$/i, '');
-  const covered = new Set(rows.flatMap((r) => [pageOf(r.url), ...(r.source_url ? [pageOf(r.source_url)] : [])]));
+  const covered = new Set(ok.map((l) => pageOf(l.url)));
   let room = MAX_FULL_LINKS - ok.length;
   for (const s of o.instant?.sections ?? []) {
     const extra = s.links.filter((l) => !covered.has(pageOf(l.url))).slice(0, Math.max(0, room)).map(({ title: t, url }) => ({ title: t, url }));
