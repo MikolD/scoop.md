@@ -520,7 +520,8 @@ const routes: Route[] = [
     // downloaded now and then and checked locally, so visits stay in the browser.
     handler: async ({ req, env }) => {
       const cache = edgeCache();
-      const key = new Request('https://sites-index.scoop.md/v1');
+      // v2: the body gained `llms`; a new key, so no edge serves the old body for its last hour.
+      const key = new Request('https://sites-index.scoop.md/v2');
       const cached = await cache?.match(key).catch(() => undefined);
       let body: string;
       let etag: string;
