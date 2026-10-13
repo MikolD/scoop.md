@@ -271,6 +271,9 @@ async function llmsCrawl(env: Env, ip: string, root: string, host: string): Prom
     .bind(host, week)
     .first();
   if (recent) return;
+  // Never a site an admin rejected.
+  const rejected = await env.DB.prepare(`SELECT 1 AS x FROM site_profiles WHERE site = ? AND status = 'not_devtool' AND gate_method = 'admin'`).bind(host).first();
+  if (rejected) return;
   const subject = ipSubject(ip);
   const [mine, all] = await Promise.all([
     dailyCount(env.DB, env.RATE_KEY, 'llms-crawl:ip', subject),

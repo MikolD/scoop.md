@@ -316,6 +316,16 @@ test('recordGate: a rejection ends the run and makes the site not_devtool; the p
   await store.recordGate('cr_3', 'acme.dev', { decision: 'crawl', category: 'devtool-docs', confidence: 0.9, reason: 'developer docs', method: 'signals', costUsd: 0 }, t);
   assert.equal((await store.getRun('cr_3'))!.status, 'queued');
   assert.equal((await store.getProfile('acme.dev'))!.status, 'new');
+
+  // A pass after an earlier gate's rejection (its home page; now its docs root)
+  // lifts not_devtool, so the run's pages are indexed. An admin's rejection stays.
+  await store.createRun('cr_4', 'sheepish.example', 'https://sheepish.example/docs', t);
+  await store.recordGate('cr_4', 'sheepish.example', { decision: 'crawl', category: 'devtool-docs', confidence: 0.98, reason: 'developer docs', method: 'ai', costUsd: 0 }, t);
+  assert.equal((await store.getProfile('sheepish.example'))!.status, 'new');
+  await store.rejectSite('sheepish.example', t);
+  await store.createRun('cr_5', 'sheepish.example', 'https://sheepish.example/docs', t);
+  await store.recordGate('cr_5', 'sheepish.example', { decision: 'crawl', category: 'devtool-docs', confidence: 0.98, reason: 'developer docs', method: 'ai', costUsd: 0 }, t);
+  assert.equal((await store.getProfile('sheepish.example'))!.status, 'not_devtool');
 });
 
 test('POST /v1/admin/crawl: force skips the gate and is recorded on the run', async () => {

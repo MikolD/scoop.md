@@ -274,7 +274,9 @@ export class CrawlStore {
 
   // The devtool gate's verdict, on the run and the site. A rejection ends the
   // run ('rejected', the reason in `error`) and the crawl: the site becomes
-  // 'not_devtool', whatever it was before. One D1 batch, safe to repeat.
+  // 'not_devtool', whatever it was before. A pass lifts an earlier gate's
+  // 'not_devtool' (its home page was judged; now its docs root passes), so
+  // the run's pages are indexed; an admin's rejection stays. One D1 batch, safe to repeat.
   async recordGate(runId: string, site: string, v: GateVerdict, now = new Date()): Promise<void> {
     const at = now.toISOString();
     const reject = v.decision === 'reject';
@@ -293,7 +295,8 @@ export class CrawlStore {
         .prepare(
           `UPDATE site_profiles SET gate_category = ?2, gate_confidence = ?3, gate_reason = ?4, gate_method = ?5, gate_checked_at = ?6,
              last_run_id = ?7, updated_at = ?6,
-             status = CASE WHEN ?8 THEN 'not_devtool' ELSE status END,
+             status = CASE WHEN ?8 THEN 'not_devtool'
+                           WHEN status = 'not_devtool' AND COALESCE(gate_method, '') != 'admin' THEN 'new' ELSE status END,
              crawl_state = CASE WHEN ?8 THEN 'idle' ELSE crawl_state END,
              last_crawled_at = CASE WHEN ?8 THEN ?6 ELSE last_crawled_at END
            WHERE site = ?1`,
