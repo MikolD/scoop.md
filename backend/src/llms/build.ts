@@ -128,7 +128,9 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
   const versions = new Map<string | null, T[]>();
   for (const l of links) {
     const v = versionOf(l.url, root);
-    versions.set(v, [...(versions.get(v) ?? []), l]);
+    const group = versions.get(v);
+    if (group) group.push(l);
+    else versions.set(v, [l]);
   }
   if (versions.size <= 1) return links;
   // Only versions with at least half the pages of the largest one count
@@ -151,21 +153,29 @@ export function oneVersion<T extends { url: string }>(links: T[], root: string):
 const GENERIC_TEXT = /^(next|previous|prev|index|modules|home|back|more|read more|here|link|edit|edit this page|top|stable|latest|docs|documentation|\W*|v?\d+(\.\d+)*)$/i;
 export const linkTitle = (text: string, url: string) => {
   // Without decoration: "¶" after, a logo glyph before ("</> htmx" → "htmx").
-  const t = decodeHTML(text).replace(/\s+/g, ' ').replace(/[¶#§]+$/, '').replace(/^[<>/{}[\]|]+\s+(?=\p{L})/u, '').trim();
+  const t = decodeHTML(text.slice(0, 2000)).replace(/\s+/g, ' ').replace(/[¶#§]+$/, '').replace(/^[<>/{}[\]|]+\s+(?=\p{L})/u, '').trim();
   return t && t.length <= 120 && !GENERIC_TEXT.test(t) ? t : humanize(new URL(url).pathname.split('/').filter(Boolean).pop() ?? '');
 };
 
 // A page's own name for its site: og:site_name, else its <title>.
+// Read from the parsed page, not by regular expression (a page of unclosed
+// tags must cost linear time).
 function pageName(html: string): string | null {
   if (!html) return null;
-  const og = /<meta[^>]+property=["']og:site_name["'][^>]+content=["']([^"']{1,100})["']/i.exec(html)?.[1]
-    ?? /<meta[^>]+content=["']([^"']{1,100})["'][^>]+property=["']og:site_name["']/i.exec(html)?.[1];
-  return og ?? /<title[^>]*>([^<]{1,300})<\/title>/i.exec(html)?.[1] ?? null;
+  let doc: { querySelector(s: string): { getAttribute(n: string): string | null; textContent: string | null } | null };
+  try {
+    doc = new DOMParser().parseFromString(/<html[\s>]/i.test(html) ? html : `<!doctype html><html><head>${html}</head></html>`, 'text/html') as never;
+  } catch {
+    return null;
+  }
+  const og = doc.querySelector('meta[property="og:site_name"]')?.getAttribute('content')?.trim().slice(0, 100);
+  const title = doc.querySelector('title')?.textContent?.replace(/\s+/g, ' ').trim().slice(0, 300);
+  return og || title || null;
 }
 
 // A site name from a page title: "Hono - Web framework" → "Hono", "Stripe Documentation" → "Stripe".
 export function siteName(title: string | null, host: string): string {
-  const parts = decodeHTML(title ?? '').split(/\s+[|·–—~-]\s+|\s*::\s*/).map((p) => p.replace(/[<>/~]+/g, ' ').trim()).filter(Boolean);
+  const parts = decodeHTML((title ?? '').slice(0, 300)).split(/\s+[|·–—~-]\s+|\s*::\s*/).map((p) => p.replace(/[<>/~]+/g, ' ').trim()).filter(Boolean);
   const pick = parts.length > 1 ? parts.sort((a, b) => a.length - b.length)[0] : parts[0] ?? '';
   const name = pick.replace(/\b(developer\s+)?(documentation|docs|developer docs|api reference|reference|developers|guides?)\b/gi, '').replace(/\s+/g, ' ').trim();
   if (name && name.length <= 40) return name;
@@ -273,12 +283,16 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
   // Little in the navigation and sitemap: the page's own table of contents
   // (docs.python.org/3/ lists its docs in the page, its sidebar has versions).
   if (html && oneVersion([...allNav, ...maps.map((url) => ({ title: '', url }))].filter((l) => inScope(l.url)), root).length < MIN_INDEX) {
-    allNav = [...allNav, ...navLinks(html, pageUrl, true).filter((l) => !allNav.some((n) => n.url === l.url))];
+    const seen = new Set(allNav.map((l) => l.url));
+    allNav = [...allNav, ...navLinks(html, pageUrl, true).filter((l) => !seen.has(l.url))];
   }
   // A Sphinx site's full table of contents (contents.html, linked from the
   // docs root): every page in the docs' own order (docs.python.org: 21 → ~490).
   const toc = html ? await sphinxContents(html, pageUrl, get, allowed) : [];
-  if (toc.length) allNav = [...allNav, ...toc.filter((l) => !allNav.some((n) => n.url === l.url))];
+  if (toc.length) {
+    const seen = new Set(allNav.map((l) => l.url));
+    allNav = [...allNav, ...toc.filter((l) => !seen.has(l.url))];
+  }
   if (scope && [...allNav.map((l) => l.url), ...maps].filter(inScope).length < MIN_SCOPED) scope = '';
   // Widened to the whole host: its writing (blog, essays, posts, news) is not docs.
   const docsOnly = (u: string) => !!scope || !WRITING.test(new URL(u).pathname);
@@ -307,13 +321,17 @@ export async function buildInstant(root: string, o: BuildOptions = {}): Promise<
 type Get = (url: string, cap: number, accept?: string) => ReturnType<typeof crawlFetch>;
 
 // Sphinx's table of contents: <li class="toctree-l1"><a class="reference internal" href="tutorial/index.html">The Python Tutorial</a>.
-const TOC_ENTRY = /<li\b[^>]*\bclass="toctree-l\d[^"]*"[^>]*>\s*<a\b[^>]*\bhref="([^"]+)"[^>]*>([\s\S]{0,500}?)<\/a>/gi;
+// No [^>]* that can run across '<': a page of unclosed tags stays linear.
+const TOC_ENTRY = /<li\b[^<>]*\bclass="toctree-l\d[^"<>]*"[^<>]*>\s*<a\b[^<>]*\bhref="([^"<>]+)"[^<>]*>([\s\S]{0,500}?)<\/a>/gi;
+const CONTENTS_LINK = /<a\b[^<>]*\bhref="([^"#?<>]*contents\.html)"/gi;
+// At most this many table-of-contents entries are read (before one version is picked).
+const MAX_TOC = 2000;
 
 // The pages listed in a Sphinx site's contents.html, when the docs root links
 // to one: each page once (anchors dropped), titled by its first entry.
 async function sphinxContents(html: string, pageUrl: string, get: Get, allowed: (u: string) => boolean): Promise<LlmsLink[]> {
   let url: string | null = null;
-  for (const m of html.matchAll(/<a\b[^>]*\bhref="([^"#?]*contents\.html)"/gi)) {
+  for (const m of html.matchAll(CONTENTS_LINK)) {
     try {
       const u = new URL(decodeHTML(m[1]), pageUrl);
       if (u.host === new URL(pageUrl).host && /(^|\/)contents\.html$/i.test(u.pathname)) { url = u.href; break; }
@@ -324,11 +342,12 @@ async function sphinxContents(html: string, pageUrl: string, get: Get, allowed: 
   if (!r.ok || r.notModified) return [];
   const out = new Map<string, LlmsLink>();
   for (const m of r.text.matchAll(TOC_ENTRY)) {
+    if (out.size >= MAX_TOC) break;
     let u: URL;
     try { u = new URL(decodeHTML(m[1]), r.url); } catch { continue; }
     if (u.protocol !== 'https:' && u.protocol !== 'http:') continue;
     u.hash = '';
-    if (!out.has(u.href)) out.set(u.href, { title: decodeHTML(m[2].replace(/<[^>]+>/g, '')).replace(/\s+/g, ' ').trim(), url: u.href });
+    if (!out.has(u.href)) out.set(u.href, { title: decodeHTML(m[2].replace(/<[^<>]*>/g, '')).replace(/\s+/g, ' ').trim(), url: u.href });
   }
   return [...out.values()];
 }
@@ -502,6 +521,7 @@ export async function buildFull(db: D1Database, root: string, title: string, o: 
 // What a llms.txt says about itself: its H1, its number of links, its size in tokens.
 export function describeLlms(text: string): { title: string | null; pages: number; tokens: number } {
   const title = /^#[ \t]+(.+)$/m.exec(text.slice(0, 20_000))?.[1]?.trim() ?? null;
-  const pages = (text.match(/\]\(\s*[^)\s]+\)/g) ?? []).length;
+  // A link target holds no bracket or parenthesis: the scan stays linear on any text.
+  const pages = (text.match(/\]\(\s*[^()[\]\s]+\)/g) ?? []).length;
   return { title, pages, tokens: Math.ceil(text.length / 4) };
 }

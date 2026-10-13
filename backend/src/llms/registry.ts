@@ -21,7 +21,7 @@ import type { QuickOptions } from '../search/quick.ts';
 import type { JevOptions } from '../lib/jev.ts';
 import { buildFull, buildInstant, describeLlms, siteName } from './build.ts';
 import type { BuiltLlms } from './build.ts';
-import { agentExcerpt, asksForSecrets, cleanText, ExcerptUnscreened, MAX_EXCERPT, scoopExcerpt } from './excerpt.ts';
+import { agentExcerpt, blockedLine, cleanText, ExcerptUnscreened, MAX_EXCERPT, scoopExcerpt } from './excerpt.ts';
 import type { AgentExcerpt } from './excerpt.ts';
 
 export interface RegistryRow {
@@ -111,10 +111,10 @@ export function promptFor(name: string, url: string, source: 'site' | 'scoop', e
 }
 
 // The stored instructions, served only when they passed Jev's risk question;
-// screened again line by line (cleanText, asksForSecrets) as they are served.
+// screened again line by line (cleanText, blockedLine) as they are served.
 const excerptOf = (row: RegistryRow): AgentExcerpt | null => {
   if (!row.agent_text || !row.agent_checked) return null;
-  const text = cleanText(row.agent_text).split('\n').filter((l) => !asksForSecrets(l)).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_EXCERPT);
+  const text = cleanText(row.agent_text).split('\n').filter((l) => !blockedLine(l, row.agent_source ?? row.llms_url)).join('\n').replace(/\n{3,}/g, '\n\n').trim().slice(0, MAX_EXCERPT);
   return /[\p{L}\p{N}]/u.test(text.replace(/^#.*$/gm, '')) ? { text, source: row.agent_source ?? row.llms_url, method: row.agent_method ?? 'section' } : null;
 };
 
