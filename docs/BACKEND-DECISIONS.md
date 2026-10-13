@@ -1519,8 +1519,8 @@ docs site, fast, and never anything for a site that isn't docs.
 - **Every quoted line is screened, and none is served unscreened.** A
   deterministic pre-filter first (secrets, sending data, dotfiles, `sudo`,
   `rm -r`, shell pipes, base64 blobs, other domains and IP literals), then
-  Jev's risk question for every line, headings included unless they are a
-  short plain title; fences are reduced to a bare fence. No Jev, no
+  Jev's risk question for every line, every heading included; fences are
+  reduced to a bare fence. No Jev, no
   excerpt. Stored text is served only at the current screening version
   (`agent_checked` ≥ 2), filtered again as it is served.
 - **The install carve-out.** The owner wants "how agents should install
