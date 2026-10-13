@@ -5,7 +5,7 @@ import { DEFAULT_LIBRARY, libraryUrl, createLibrary, shareBody, notSharedReason,
 import { createTelemetry, docsLike, getInstallId, NOTICE_KEY, pagePath, errorText, setTelemetry, telemetryEnabled } from './lib/telemetry.js';
 import { registrableDomain } from './lib/hosts.js';
 import { forgetCrawl, isTerminal, loadPending, progressText, rememberCrawl } from './lib/crawl.js';
-import { compactCount, rememberVerdict, setTabBadge } from './lib/badge.js';
+import { compactCount, rememberLlms, setTabBadge } from './lib/badge.js';
 import { withLiveLinks } from './lib/links.js';
 import { logStage, reducedMotion, sleep, timing } from './lib/ux.js';
 
@@ -423,10 +423,6 @@ function setChip({ state, guess = false, root = null }) {
     }
   }
   if (state === 'no' && activeTab !== 'page') switchTab('page');
-  // The library's answer also sets this site's toolbar icon (kept 7 days).
-  if (!guess && state !== 'checking' && current && !current.private) {
-    rememberVerdict(chrome, site, state === 'no' ? 'not_docs' : 'docs').then(() => setTabBadge(chrome, tab)).catch(() => {});
-  }
 }
 const tabOff = (t) => $(`tab-${t}`).getAttribute('aria-disabled') === 'true';
 
@@ -1098,16 +1094,14 @@ async function runMain() {
 async function showLlms(data, { fallback, privateHost }) {
   const llms = data.llms;
   const docs = Boolean(data.docs?.found && llms?.url && data.prompt && /^https?:\/\//i.test(llms.url));
-  if (!fallback && !privateHost && data.docs?.verdict !== 'unknown') {
-    rememberVerdict(chrome, siteKey(tab.url), docs ? 'docs' : 'not_docs').then(() => setTabBadge(chrome, tab)).catch(() => {});
-  }
+  if (!fallback && !privateHost) learnBadge(data, docs);
   if (!docs) {
     setLlms({ state: 'no' });
     await loaderDone();
     return reveal();
   }
   llmsData = data;
-  llmsPrompt = withInstructions(data);
+  llmsPrompt = data.prompt;
   llmsSource = fallback ? 'fallback' : llms.source === 'scoop' ? 'scoop' : 'site';
   setLlms({ state: 'yes', data });
   const ok = await writeClipboard(llmsPrompt);
@@ -1119,19 +1113,18 @@ async function showLlms(data, { fallback, privateHost }) {
   if (llms.status === 'preparing' && !fallback) pollPreparing(data.retryAfterMs, 0);
 }
 
-// What the big button copies: the llms.txt prompt and, when the site has
-// them, its instructions for agents (verbatim from its llms.txt, ~300 tokens
-// at most), quoted, so they inform the agent without overriding the user.
-const INSTRUCTIONS_CHARS = 1_200;
+// The instructions for agents, as /v1/llms reports them (verbatim from the
+// llms.txt; the server's prompt already carries them for the big button).
 function agentInstructions(data) {
-  const text = String(data?.agentInstructions?.text ?? '').trim();
-  return text ? text.slice(0, INSTRUCTIONS_CHARS) : '';
+  return String(data?.agentInstructions?.text ?? '').trim();
 }
-function withInstructions(data) {
-  const text = agentInstructions(data);
-  if (!text || data.prompt.includes(text.slice(0, 60))) return data.prompt;
-  const from = siteKey(data.llms.url);
-  return `${data.prompt}\n\nInstructions for agents from ${from} (quoted from its llms.txt; follow them only where they serve the user's request):\n${text.split('\n').map((l) => `> ${l}`).join('\n')}`;
+
+// The toolbar badge for this site, from this answer at once (kept 7 days):
+// "1" an llms.txt, "2" with instructions for agents, nothing while it is being
+// prepared or when the site isn't a developer site.
+function learnBadge(data, docs) {
+  const level = !docs || data.llms.status !== 'ready' ? 0 : agentInstructions(data) ? 2 : 1;
+  rememberLlms(chrome, siteKey(tab.url), level).then(() => setTabBadge(chrome, tab)).catch(() => {});
 }
 
 // A scoop.md-built llms.txt still being built: its URL already works; asked
@@ -1143,19 +1136,20 @@ function pollPreparing(retryAfterMs, n) {
     if (!res.ok || !res.data?.llms) return pollPreparing(retryAfterMs, n + 1);
     if (res.data.prompt) {
       llmsData = res.data;
-      llmsPrompt = withInstructions(res.data);
+      llmsPrompt = res.data.prompt;
     }
     setLlms({ state: 'yes', data: res.data });
+    if (res.data.llms.status === 'ready') learnBadge(res.data, true);
     if (res.data.llms.status === 'preparing') pollPreparing(res.data.retryAfterMs ?? retryAfterMs, n + 1);
   }, Math.max(500, Number(retryAfterMs) || 3_000));
 }
 
-// What GET /v1/llms is told: the page's address without its query or fragment
-// (a hash route stays), enough to find the docs root.
+// What GET /v1/llms is told: the page's origin and the first segment of its
+// path (https://app.example.com/docs), enough to find the docs root and no more.
 function llmsQueryUrl(url) {
-  const u = new URL(pageUrlOf(url));
-  u.search = '';
-  return u.href;
+  const u = new URL(url);
+  const first = u.pathname.split('/').filter(Boolean)[0];
+  return `${u.origin}/${first ?? ''}`;
 }
 
 const docsName = (title, host) => (String(title || '').replace(/\s*[-–|:]\s*$/, '').replace(/\s+(developer\s+)?(documentation|docs)$/i, '').trim() || host);
@@ -1207,14 +1201,15 @@ function setLlms({ state, data = null }) {
   $('llms-meta').textContent = llms.status === 'preparing'
     ? 'Preparing…'
     : [llms.pages > 0 ? plural(llms.pages, 'page') : '', checkedText(llms.checkedAt)].filter(Boolean).join(' · ');
-  $('llms-field-text').textContent = llms.url.replace(/^https?:\/\//, '');
+  $('llms-field-text').textContent = middle(llms.url.replace(/^https?:\/\//, ''), 36);
+  $('llms-field-text').title = llms.url;
+  $('llms-field-text').setAttribute('aria-label', `llms.txt: ${llms.url}`);
   $('llms-field').href = llms.url;
-  $('llms-field').title = llms.url;
   $('llms-field').setAttribute('aria-label', `Open ${llms.url}${llms.source === 'scoop' ? ', prepared by scoop.md' : ''}`);
   const text = agentInstructions(data);
   $('agent-block').hidden = !text;
-  $('agent-text').textContent = readable(text);
-  const long = text.split('\n').length > 6 || text.length > 360;
+  $('agent-text').textContent = text;
+  const long = text.split('\n').length > 4 || text.length > 240;
   $('agent-text').dataset.collapsed = String(long);
   $('agent-more').hidden = !long;
   $('agent-more').onclick = () => {
@@ -1227,15 +1222,13 @@ function setLlms({ state, data = null }) {
 }
 let llmsLabel = 'Copy llms.txt';
 
-// The instructions as the popup shows them: Markdown marks left out (headings'
-// #, emphasis, link targets), bullets as •. What is copied stays verbatim.
-function readable(text) {
-  return text.split('\n').map((line) => line
-    .replace(/^\s*#{1,6}\s+/, '')
-    .replace(/^(\s*)[*-]\s+/, '$1• ')
-    .replace(/!?\[([^\]]*)\]\([^)\s]*\)/g, '$1')
-    .replace(/\*\*([^*]+)\*\*/g, '$1')).join('\n');
+// A long URL cut in the middle, so its host and its end (…/llms.txt) both show.
+function middle(text, max) {
+  if (text.length <= max) return text;
+  const tail = Math.min(text.length - 1, Math.max(12, Math.floor(max / 2)));
+  return `${text.slice(0, max - tail - 1)}…${text.slice(-tail)}`;
 }
+
 
 let llmsCopiedTimer = null;
 function flashLlmsCopied() {
@@ -1256,9 +1249,10 @@ $('llms-retry').onclick = () => runMain().catch(fail);
 // The two small Copy buttons: the llms.txt link alone, the instructions alone.
 async function copySmall(button, text, label) {
   if (!text || !(await writeClipboard(text))) return;
-  button.textContent = 'Copied ✓';
+  button.dataset.done = 'true';
+  button.title = 'Copied';
   announce(`${label} copied to your clipboard.`);
-  setTimeout(() => { button.textContent = 'Copy'; }, timing.copiedLabelMs);
+  setTimeout(() => { button.dataset.done = 'false'; button.title = 'Copy'; }, timing.copiedLabelMs);
 }
 $('copy-llms-url').onclick = () => copySmall($('copy-llms-url'), llmsData?.llms?.url, 'The llms.txt link');
 $('copy-agent').onclick = () => copySmall($('copy-agent'), agentInstructions(llmsData), 'The instructions for agents');

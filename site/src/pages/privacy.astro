@@ -18,7 +18,7 @@ const events = [
   ['tab_switch', 'You switched between the Quick Copy, Overview and Search tabs: which tab.'],
   ['llms_copy', "You copied a site's llms.txt prompt: the hostname, whether the llms.txt was the site's own or prepared by scoop.md, and whether it was copied on opening or with the button."],
   ['search, copy_overview, copy_search', "On an indexed site: that you searched (the hostname, how long the query was and how many results came back, never the query itself), copied the overview, or copied search results (how many)."],
-  ['badge_verdict_shown', 'Once an hour at most: how many times the toolbar icon showed "developer docs" and "not developer docs". Two numbers, no sites or pages.'],
+  ['badge_llms_shown', 'Once an hour at most: how many times the toolbar badge showed "1" (the site has an llms.txt) and "2" (an llms.txt and instructions for agents). Two numbers, no sites or pages.'],
   ['share_result', 'Whether the scoop was shared, already in the library, or not shared and why (sharing off, not developer docs, signed-in page, the library refused it).'],
   ['vote, report', "You voted or reported: the hostname and path (public docs pages only), the scoop's ID, your vote or reason."],
   ['settings_change, options_open', 'You changed sharing, the theme or usage statistics, or opened the settings page.'],
@@ -41,9 +41,9 @@ const events = [
 
     <h2>The short version</h2>
     <ul>
-      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show on its icon whether a site is developer docs (a check, a "!" or nothing), it compares each tab's site with lists downloaded to your device and with the verdicts for sites you scooped (kept on your device for 7 days); that check never leaves your device.</li>
+      <li>The extension reads a page's content only from the tab you're on, and only when you click the button or press its shortcut. To show on its icon whether a site has an llms.txt ("1", or "2" with instructions for agents), it compares each tab's site with a list downloaded to your device and with what the library told it for sites you opened scoop.md on (kept on your device for 7 days); that check never leaves your device.</li>
       <li>Anything that needs you signed in stays on your device. Only documentation fetched without your cookies can be shared.</li>
-      <li>Opening scoop.md asks the library at <code>api.scoop.md</code> for the site's llms.txt, with the page's address (without its query or fragment), never for a page on your computer or a private network. The page itself isn't read for this.</li>
+      <li>Opening scoop.md asks the library at <code>api.scoop.md</code> for the site's llms.txt, with the page's origin and the first segment of its path only (for example <code>https://app.example.com/docs</code>), never for a page on your computer or a private network. The page itself isn't read for this.</li>
       <li>In Advanced, every scoop asks the library for a shared version of the site, by hostname. For a public page on a site whose docs are indexed, the page's address is sent too, to look it up in the index, whatever the sharing setting. Page content is sent only when sharing is on, the page is public and it is recognised as developer docs. Sharing can be turned off.</li>
       <li>
         Usage statistics are on by default: anonymous events about how you use the extension, including the hostname and
@@ -83,8 +83,9 @@ const events = [
     <h2>What leaves your device</h2>
     <h3>Opening scoop.md: the site's llms.txt</h3>
     <p>
-      When you open scoop.md on a web page, the extension sends the page's address without its query or fragment (for
-      example <code>https://docs.stripe.com/webhooks</code>) to <code>api.scoop.md/v1/llms</code>, which answers with the
+      When you open scoop.md on a web page, the extension sends only the page's origin and the first segment of its path
+      (on <code>https://docs.stripe.com/webhooks/quickstart?lang=node</code>, that's <code>https://docs.stripe.com/webhooks</code>)
+      to <code>api.scoop.md/v1/llms</code>, which answers with the
       site's llms.txt (or one scoop.md prepared for it) as a short prompt to copy. Whatever the sharing setting. Never for
       pages on your computer or a private network. If the library doesn't answer, the extension looks for the site's
       llms.txt itself, without your cookies.
@@ -121,12 +122,12 @@ const events = [
       in the search box, to search its docs (<code>/v1/search</code>, and <code>/v1/packages</code> for "Copy all
       results"). The library's request log keeps the query, as described under Library requests below.
     </p>
-    <h3>The docs check on the icon</h3>
+    <h3>The "1" and "2" on the icon</h3>
     <p>
-      Every 6 hours the extension downloads the list of indexed docs sites, and of sites known not to be developer docs,
-      from <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The site you're on
-      is looked up in those lists on your device, along with the verdicts the library gave for sites you scooped in the
-      last 7 days. Pages on your computer or a private network are never looked up.
+      Every 6 hours the extension downloads the list of sites with an llms.txt (and which of them also have instructions
+      for agents) from <code>api.scoop.md/v1/sites/index</code> (the request says nothing about you or your tabs). The
+      site you're on is looked up in that list on your device, along with what the library answered for sites you opened
+      scoop.md on in the last 7 days. Pages on your computer or a private network are never looked up.
     </p>
     <h3>When a docs site isn't indexed yet, sharing is on and the page is public developer docs</h3>
     <p>

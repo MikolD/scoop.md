@@ -45,7 +45,7 @@ The website sends `{ "source": "site", "sessionId": "<random per page load>", "e
 | `llms_copy` | popup | `site` (hostname), `source` (`site`: the site's own llms.txt / `scoop`: prepared by scoop.md / `fallback`: found by the extension when the library didn't answer), `trigger` (`auto` on opening / `button`) |
 | `copy_overview` | popup | `site` |
 | `copy_search` | popup | `site`, `count` (results copied) |
-| `badge_verdict_shown` | extension (service worker, hourly) | `verdict` (`docs` / `not_docs`), `count`: how many times the toolbar icon showed that verdict in the hour (once per tab per site); no sites |
+| `badge_llms_shown` | extension (service worker, hourly) | `level` (`1`: the site has an llms.txt / `2`: llms.txt and instructions for agents), `count`: how many times the toolbar badge showed it in the hour (once per tab per site); no sites |
 | `crawl_request` | popup | `site`, `state` (`queued` / `running` / `indexing` / `complete` / `rejected` / `failed`, or `rate_limited` / `error` when the request itself failed) |
 | `crawl_wait` | popup | `durationMs`, `outcome` (`complete` / `rejected` / `failed` / `copied_page` ("Copy this page now") / `closed` (popup closed; the service worker keeps following it) / `timeout` (gave up after 10 minutes and copied the page; the service worker keeps following it) / `stalled_index` (indexing stopped making progress, so the pages already indexed were delivered)) |
 | `share_result` | popup | `site`, `path`, `outcome` (`shared` / `duplicate` / `not_shared`), `reason` (`sharing_off`, `not_devdocs`, `private_host`, `signed_in`, or the library's error code) |

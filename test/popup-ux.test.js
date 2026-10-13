@@ -13,7 +13,7 @@ import { parseHTML, DOMParser } from 'linkedom';
 import { startMockLibrary, packageFor } from './helpers/mock-library.js';
 import { sleep, stageLog, timing } from '../extension/lib/ux.js';
 import { PENDING_KEY, CRAWL_ALARM, READY_TTL_MS, live, progressText, pollPending, rememberCrawl, forgetCrawl } from '../extension/lib/crawl.js';
-import { SITES_KEY, SITES_ALARM, VERDICT_TTL_MS, badgeFor, compactCount, refreshSites, rememberVerdict, setTabBadge, verdictFor } from '../extension/lib/badge.js';
+import { SITES_KEY, SITES_ALARM, LEARNED_TTL_MS, badgeFor, compactCount, llmsLevelFor, refreshSites, rememberLlms, setTabBadge } from '../extension/lib/badge.js';
 import { createLibrary } from '../extension/lib/library.js';
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), 'utf8');
@@ -537,34 +537,34 @@ test('Search: Copy all results uses the library package for the query', () => wi
 
 // The badge
 
-test('verdictFor: indexed docs sites ✓, not-docs hosts !, the popup’s recent verdict, docs.* on the same domain, private hosts never', () => {
+test('llmsLevelFor: "1" llms.txt, "2" with instructions, from the list or what the popup learned (newer, 7 days); private hosts never; an old list shows nothing', () => {
   assert.deepEqual([0, 14, 230, 999, 1000, 1234, 9999, 12_345, 1_500_000].map(compactCount), ['', '14', '230', '999', '1k', '1.2k', '9.9k', '12k', '1.5m'], 'still used for topic counts');
-  const sites = { 'hono.dev': 230, 'docs.stripe.com': 1234 };
-  const notDocs = ['amazon.com', 'www.allbirds.com'];
+  const llms = { 'docs.stripe.com': 2, 'stripe.com': 2, 'hono.dev': 1 };
   const now = Date.now();
-  assert.equal(verdictFor('https://hono.dev/docs/', { sites }), 'docs');
-  assert.equal(verdictFor('https://www.hono.dev/x', { sites }), 'docs', 'www. is the same site');
-  assert.equal(verdictFor('https://stripe.com/', { sites }), 'docs', 'its docs are on docs.stripe.com');
-  assert.equal(verdictFor('https://www.amazon.com/dp/1', { sites, notDocs }), 'not_docs', 'the registrable domain is listed');
-  assert.equal(verdictFor('https://example.com/', { sites, notDocs }), null, 'unknown: nothing');
-  assert.equal(verdictFor('https://example.com/', { verdicts: { 'example.com': { v: 'not_docs', at: now } } }), 'not_docs', 'the popup said so');
-  assert.equal(verdictFor('https://example.com/', { verdicts: { 'example.com': { v: 'not_docs', at: now - VERDICT_TTL_MS - 1 } } }), null, 'kept 7 days');
-  assert.equal(verdictFor('https://hono.dev/', { sites, verdicts: { 'hono.dev': { v: 'not_docs', at: now } } }), 'docs', 'the index wins');
-  assert.equal(verdictFor('http://localhost:3000/', { sites: { localhost: 5 } }), null, 'private hosts are never looked up');
-  assert.equal(verdictFor('chrome://extensions', { sites }), null);
-  assert.deepEqual(badgeFor('https://hono.dev/', { sites }), { verdict: 'docs', text: '✓', color: '#2e7d32', title: 'scoop.md: developer docs' });
-  assert.deepEqual(badgeFor('https://amazon.com/', { notDocs }), { verdict: 'not_docs', text: '!', color: '#d97706', title: 'scoop.md: not developer docs' });
+  assert.equal(llmsLevelFor('https://docs.stripe.com/webhooks', { llms }), 2);
+  assert.equal(llmsLevelFor('https://stripe.com/', { llms }), 2, 'aliases are listed too');
+  assert.equal(llmsLevelFor('https://www.hono.dev/docs/', { llms }), 1, 'www. is the same site');
+  assert.equal(llmsLevelFor('https://example.com/', { llms }), 0, 'unknown: nothing');
+  assert.equal(llmsLevelFor('https://hono.dev/', { llms, learned: { 'hono.dev': { level: 2, at: now } } }), 2, 'the popup knows better');
+  assert.equal(llmsLevelFor('https://hono.dev/', { llms, learned: { 'hono.dev': { level: 0, at: now } } }), 0, 'still preparing or not docs: nothing');
+  assert.equal(llmsLevelFor('https://example.com/', { learned: { 'example.com': { level: 1, at: now - LEARNED_TTL_MS - 1 } } }), 0, 'kept 7 days');
+  assert.equal(llmsLevelFor('http://localhost:3000/', { llms: { localhost: 1 } }), 0, 'private hosts are never looked up');
+  assert.equal(llmsLevelFor('https://docs.stripe.com/', {}), 0, 'an old list without llms: nothing');
+  assert.deepEqual(badgeFor('https://hono.dev/', { llms }), { level: 1, text: '1', title: 'scoop.md: llms.txt available' });
+  assert.deepEqual(badgeFor('https://stripe.com/', { llms }), { level: 2, text: '2', title: 'scoop.md: llms.txt + instructions for agents' });
+  assert.ok(!read('../extension/lib/badge.js').includes('OffscreenCanvas'), 'no icon overlays');
 });
 
-test('service worker: downloads the sites index with notDocs (then 304), sets ✓ / ! / nothing per tab, no request per visit, counts verdicts once per tab per site', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 230 }, [SITE]: { indexed: true, pages: 14 }, 'amazon.com': { notDocs: true } } }, async () => {
+test('service worker: downloads the sites index with llms levels (then 304), sets "1" / "2" / nothing per tab in the brand colour with white text, no request per visit, counts once per tab per site', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 230, llmsLevel: 1 }, [SITE]: { indexed: true, pages: 14, llmsLevel: 2 }, 'amazon.com': { notDocs: true } } }, async () => {
   const local = { devLibraryUrl: mock.url };
   const badges = {};
   const colors = {};
+  const textColors = {};
   const titles = {};
   const alarms = {};
   const listeners = {};
   const on = (name) => ({ addListener: (fn) => { listeners[name] = fn; } });
-  const tabs = { 7: { id: 7, url: 'https://hono.dev/docs/' }, 8: { id: 8, url: 'http://localhost:5173/' }, 9: { id: 9, url: 'https://www.amazon.com/' }, 10: { id: 10, url: 'https://example.net/' } };
+  const tabs = { 7: { id: 7, url: 'https://hono.dev/docs/' }, 8: { id: 8, url: 'http://localhost:5173/' }, 9: { id: 9, url: 'https://www.amazon.com/' }, 10: { id: 10, url: PAGE } };
   globalThis.chrome = {
     storage: {
       local: { get: async (k) => (typeof k === 'string' ? (k in local ? { [k]: structuredClone(local[k]) } : {}) : { ...local }), set: async (o) => { Object.assign(local, structuredClone(o)); }, remove: async (ks) => { for (const k of [ks].flat()) delete local[k]; } },
@@ -578,58 +578,58 @@ test('service worker: downloads the sites index with notDocs (then 304), sets �
     action: {
       setBadgeText: async ({ tabId, text }) => { badges[tabId] = text; },
       setBadgeBackgroundColor: async ({ tabId, color }) => { colors[tabId] = color; },
+      setBadgeTextColor: async ({ tabId, color }) => { textColors[tabId] = color; },
       setTitle: async ({ tabId, title }) => { titles[tabId] = title; },
     },
   };
   await import(`../extension/background.js?${Math.random()}`);
   listeners.installed({ reason: 'install' });
   await waitFor(() => local[SITES_KEY]?.etag);
-  assert.deepEqual(local[SITES_KEY].sites, { 'hono.dev': 230, [SITE]: 14 });
-  assert.deepEqual(local[SITES_KEY].notDocs, ['amazon.com']);
+  assert.deepEqual(local[SITES_KEY].llms, { 'hono.dev': 1, [SITE]: 2 });
   assert.equal(alarms[SITES_ALARM].periodInMinutes, 360, 'every 6 hours');
   const before = mock.log.length;
   listeners.activated({ tabId: 7 });
   for (const id of [8, 9, 10]) listeners.updated(id, { status: 'complete' }, tabs[id]);
   await waitFor(() => [7, 8, 9, 10].every((id) => badges[id] !== undefined));
-  assert.equal(badges[7], '✓');
-  assert.equal(colors[7], '#2e7d32');
-  assert.equal(titles[7], 'scoop.md: developer docs');
-  assert.equal(badges[9], '!');
-  assert.equal(colors[9], '#d97706');
-  assert.equal(titles[9], 'scoop.md: not developer docs');
+  assert.equal(badges[7], '1');
+  assert.equal(titles[7], 'scoop.md: llms.txt available');
+  assert.equal(colors[7], '#c2410c', 'the scoop orange, not green');
+  assert.equal(textColors[7], '#ffffff');
+  assert.equal(badges[10], '2');
+  assert.equal(titles[10], 'scoop.md: llms.txt + instructions for agents');
+  assert.equal(badges[9], '', 'not a developer site: nothing (no "!")');
   assert.equal(badges[8], '', 'localhost: nothing');
-  assert.equal(badges[10], '', 'unknown: nothing');
+  assert.equal(titles[9], 'Scoop to agent');
   assert.equal(mock.log.length, before, 'no network request per visit');
   listeners.alarm({ name: SITES_ALARM });
   await waitFor(() => mock.log.filter((e) => e.path === '/v1/sites/index').length === 2);
   await sleep(20);
-  assert.deepEqual(local[SITES_KEY].sites, { 'hono.dev': 230, [SITE]: 14 }, '304 keeps the copy');
-  // Each verdict shown is counted once per tab per site, and sent hourly per verdict.
-  await waitFor(() => local.badgeVerdictsShown?.docs === 1 && local.badgeVerdictsShown?.not_docs === 1);
+  assert.deepEqual(local[SITES_KEY].llms, { 'hono.dev': 1, [SITE]: 2 }, '304 keeps the copy');
+  await waitFor(() => local.badgeLlmsShown?.[1] === 1 && local.badgeLlmsShown?.[2] === 1);
   listeners.updated(7, { status: 'complete' }, tabs[7]);
-  listeners.activated({ tabId: 9 });
+  listeners.activated({ tabId: 10 });
   await sleep(30);
-  assert.deepEqual(local.badgeVerdictsShown, { docs: 1, not_docs: 1 }, 'same tab, same site: not counted again');
+  assert.deepEqual(local.badgeLlmsShown, { 1: 1, 2: 1 }, 'same tab, same site: not counted again');
   tabs[7] = { id: 7, url: PAGE };
   listeners.updated(7, { status: 'complete' }, tabs[7]);
-  await waitFor(() => local.badgeVerdictsShown?.docs === 2);
+  await waitFor(() => local.badgeLlmsShown?.[2] === 2);
 }));
 
-test('setTabBadge reads what is stored now: a verdict the popup just saved shows at once; a crawl never shows on the icon', async () => {
+test('setTabBadge reads what is stored now: what the popup just learned shows at once; a crawl never shows on the badge', async () => {
   const local = { [PENDING_KEY]: { [SITE]: { requestId: 'cr_1', site: SITE, state: 'running', startedAt: Date.now() } } };
   const badges = {};
   const chromeApi = {
     storage: { local: { get: async (k) => (k in local ? { [k]: structuredClone(local[k]) } : {}), set: async (o) => Object.assign(local, structuredClone(o)) } },
     action: { setBadgeText: async ({ tabId, text }) => { badges[tabId] = text; }, setBadgeBackgroundColor: async () => {}, setTitle: async () => {} },
   };
-  assert.equal(await setTabBadge(chromeApi, { id: 3, url: PAGE }), null);
-  assert.equal(badges[3], '', 'a running crawl: no "…" on the icon');
-  await rememberVerdict(chromeApi, SITE, 'docs');
-  assert.equal(await setTabBadge(chromeApi, { id: 3, url: PAGE }), 'docs');
-  assert.equal(badges[3], '✓');
-  await rememberVerdict(chromeApi, 'example.com', 'not_docs');
-  assert.equal(await setTabBadge(chromeApi, { id: 4, url: 'https://example.com/' }), 'not_docs');
-  assert.equal(badges[4], '!');
+  assert.equal(await setTabBadge(chromeApi, { id: 3, url: PAGE }), 0);
+  assert.equal(badges[3], '', 'a running crawl: nothing');
+  await rememberLlms(chromeApi, SITE, 2);
+  assert.equal(await setTabBadge(chromeApi, { id: 3, url: PAGE }), 2);
+  assert.equal(badges[3], '2');
+  await rememberLlms(chromeApi, 'example.com', 0);
+  assert.equal(await setTabBadge(chromeApi, { id: 4, url: 'https://example.com/' }), 0);
+  assert.equal(badges[4], '');
 });
 
 test('refreshSites: an unchanged list (304) keeps the copy; a new one replaces it', () => withMock({ sites: { 'hono.dev': { indexed: true, pages: 4 } } }, async () => {
@@ -908,7 +908,7 @@ test('pin hint: one line until dismissed, only while scoop.md is not pinned', ()
   const p = await openPopup(PAGE, { pinned: false });
   await p.ready;
   assert.equal(p.$('pin-hint').hidden, false);
-  assert.match(p.$('pin-hint').textContent, /Pin scoop\.md to see which sites have docs/);
+  assert.match(p.$('pin-hint').textContent, /Pin scoop\.md to see which sites have an llms\.txt/);
   p.$('pin-ok').onclick();
   assert.equal(p.$('pin-hint').hidden, true);
   assert.equal(p.local.pinHintSeen, true);
@@ -1286,29 +1286,13 @@ test('a page judged not developer docs has no path in telemetry, even when the s
   assert.equal(result.path, undefined);
 }));
 
-test('the popup’s library verdict sets this site’s toolbar icon at once (kept 7 days); a guess does not', async () => {
-  await withMock({ sites: { [SITE]: { quickDevDocs: { verdict: 'no', method: 'jev', score: 0.03 } } } }, async () => {
-    const p = await openPopup(PAGE);
-    await p.ready;
-    await waitFor(() => p.local.docsVerdicts?.[SITE]);
-    assert.equal(p.local.docsVerdicts[SITE].v, 'not_docs');
-    await waitFor(() => p.badge.text === '!');
-  });
-  await withMock({ sites: {} }, async () => {
-    const p = await openPopup(PAGE, { local: { devLibraryUrl: 'http://localhost:9/v1' } });
-    await p.ready;
-    await sleep(30);
-    assert.equal(p.local.docsVerdicts, undefined, 'a local guess is not remembered');
-  });
-});
-
-test('service worker: badge_verdict_shown per verdict, hourly, no sites', async () => {
-  const local = { badgeVerdictsShown: { docs: 3, not_docs: 1 }, telemetryNoticeShown: true };
+test('service worker: badge_llms_shown per level, hourly, no sites', async () => {
+  const local = { badgeLlmsShown: { 1: 3, 2: 1 }, telemetryNoticeShown: true };
   const chromeApi = { storage: { local: { get: async (k) => (k in local ? { [k]: structuredClone(local[k]) } : {}), set: async (o) => Object.assign(local, o), remove: async (k) => { delete local[k]; } } } };
   const { takeShownCounts } = await import('../extension/lib/badge.js');
-  assert.deepEqual(await takeShownCounts(chromeApi), { docs: 3, not_docs: 1 });
-  assert.equal(local.badgeVerdictsShown, undefined);
-  assert.match(read('../extension/background.js'), /t\.track\('badge_verdict_shown', \{ verdict, count \}\)/);
+  assert.deepEqual(await takeShownCounts(chromeApi), { 1: 3, 2: 1 });
+  assert.equal(local.badgeLlmsShown, undefined);
+  assert.match(read('../extension/background.js'), /t\.track\('badge_llms_shown', \{ level: Number\(level\), count \}\)/);
 });
 
 test('the local guess: a marketing page with an llms.txt at the root is not developer docs (the library unreachable or slow)', () => withMock({ sites: {} }, async () => {
@@ -1378,38 +1362,56 @@ test('main view, the site’s own llms.txt: the llms.txt field (opens the file),
   assert.equal(p.$('main').hidden, false);
   assert.equal(p.$('tabs').hidden, true, 'Advanced is behind its link');
   assert.equal(p.$('advanced-open').hidden, false);
-  assert.deepEqual(gets('/v1/llms')[0].query, { url: PAGE });
+  assert.deepEqual(gets('/v1/llms')[0].query, { url: `https://${SITE}/docs` }, 'only the origin and the first path segment');
   assert.equal(gets('/v1/packages').length + gets('/v1/quick').length + posts('/v1/skills').length + posts('/v1/crawl-requests').length, 0, 'no page scoop, no share, no crawl');
   assert.deepEqual(queued(p.local, 'llms_copy'), [{ site: SITE, source: 'site', trigger: 'auto' }]);
-  await waitFor(() => p.local.docsVerdicts?.[SITE]?.v === 'docs');
+  await waitFor(() => p.local.llmsLevels?.[SITE]?.level === 1);
+  await waitFor(() => p.badge.text === '1');
   await p.$('copy-llms').onclick();
   await waitFor(() => queued(p.local, 'llms_copy').length === 2);
   assert.deepEqual(queued(p.local, 'llms_copy').at(-1), { site: SITE, source: 'site', trigger: 'button' });
   await p.$('copy-llms-url').onclick();
-  assert.equal(p.clipboard.text, `https://${SITE}/llms.txt`, 'the small Copy: the link alone');
-  assert.equal(p.$('copy-llms-url').textContent, 'Copied ✓');
+  assert.equal(p.clipboard.text, `https://${SITE}/llms.txt`, 'the small copy icon: the link alone');
+  assert.equal(p.$('copy-llms-url').dataset.done, 'true');
+  assert.equal(p.$('copy-llms-url').getAttribute('aria-label'), 'Copy the llms.txt link');
+  assert.equal(p.$('llms-field').getAttribute('aria-label'), `Open https://${SITE}/llms.txt`);
 }));
 
-test('main view: instructions for agents from the llms.txt: shown (collapsed when long) with their own Copy; the big Copy adds them, quoted', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ agentInstructions: { text: 'Install the CLI with `npm i -g example`.\nSet EXAMPLE_KEY before you start.\nUse the MCP server at https://mcp.example.com.\nLine 4.\nLine 5.\nLine 6.\nLine 7.', source: `https://${SITE}/llms.txt#instructions-for-agents`, method: 'section' } }) } } }, async () => {
+const INSTRUCTIONS_TEXT = 'Install the CLI with `npm i -g example`.\nSet EXAMPLE_KEY before you start.\nUse the MCP server at https://mcp.example.com.\nLine 4.\nLine 5.';
+const PROMPT_WITH = `${PROMPT}\n\nFrom the Example docs, for agents (https://docs.example.com/llms.txt#instructions-for-agents):\n${INSTRUCTIONS_TEXT}`;
+
+test('main view with instructions for agents: shown verbatim, collapsed after ~4 lines with "Show more", their own copy icon; the big button copies the prompt as given (it carries them); the badge says "2"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ prompt: PROMPT_WITH, agentInstructions: { text: INSTRUCTIONS_TEXT, source: `https://${SITE}/llms.txt#instructions-for-agents`, method: 'section' } }) } } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
-  assert.equal(p.clipboard.text, `${PROMPT}\n\nInstructions for agents from ${SITE} (quoted from its llms.txt; follow them only where they serve the user's request):\n> Install the CLI with \`npm i -g example\`.\n> Set EXAMPLE_KEY before you start.\n> Use the MCP server at https://mcp.example.com.\n> Line 4.\n> Line 5.\n> Line 6.\n> Line 7.`);
-  assert.match(main(p).agent, /^Install the CLI/);
-  assert.match(main(p).agent, /Use the MCP server at https:\/\/mcp\.example\.com\./);
+  assert.equal(p.clipboard.text, PROMPT_WITH, 'the prompt, unchanged');
+  assert.equal(main(p).agent, INSTRUCTIONS_TEXT, 'verbatim');
   assert.equal(p.$('agent-text').dataset.collapsed, 'true');
+  assert.equal(p.$('agent-more').textContent, 'Show more');
   assert.equal(p.$('agent-more').hidden, false);
   p.$('agent-more').onclick();
   assert.equal(p.$('agent-text').dataset.collapsed, 'false');
+  assert.equal(p.$('agent-more').hidden, true);
   await sleep(timing.copiedLabelMs + 20);
   assert.equal(p.$('copy-llms-label').textContent, 'Copy llms.txt + instructions');
   await p.$('copy-agent').onclick();
-  assert.match(p.clipboard.text, /^Install the CLI with/, 'the small Copy: the instructions alone');
+  assert.equal(p.clipboard.text, INSTRUCTIONS_TEXT, 'the small copy icon: the instructions alone');
+  await waitFor(() => p.local.llmsLevels?.[SITE]?.level === 2);
+  await waitFor(() => p.badge.text === '2');
 }));
 
-test('main view: the page address without its query goes to /v1/llms; docs on another host show their llms.txt there', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ docs: { found: true, root: `https://${SUB}`, verdict: 'yes' } }, { url: `https://${SUB}/llms.txt` }) } } }, async () => {
-  const p = await openPopup(`${PAGE}?tab=js&utm_source=x#install`, { local: { popupView: 'main' } });
+test('main view without instructions for agents: no block, "Copy llms.txt", the badge says "1"', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ agentInstructions: null }) } } }, async () => {
+  const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
-  assert.deepEqual(gets('/v1/llms')[0].query, { url: PAGE });
+  assert.equal(main(p).agent, null);
+  await sleep(timing.copiedLabelMs + 20);
+  assert.equal(p.$('copy-llms-label').textContent, 'Copy llms.txt');
+  await waitFor(() => p.badge.text === '1');
+}));
+
+test('main view: only the page’s origin and first path segment go to /v1/llms; docs on another host show their llms.txt there', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ docs: { found: true, root: `https://${SUB}`, verdict: 'yes' } }, { url: `https://${SUB}/llms.txt` }) } } }, async () => {
+  const p = await openPopup(`https://${SITE}/docs/guide/deep/page?tab=js&utm_source=x#install`, { local: { popupView: 'main' } });
+  await p.ready;
+  assert.deepEqual(gets('/v1/llms')[0].query, { url: `https://${SITE}/docs` }, 'origin and first path segment only');
   assert.equal(main(p).field, `${SUB}/llms.txt`);
 }));
 
@@ -1445,7 +1447,8 @@ test('main view, not a developer site: one line, nothing else, nothing copied; t
   assert.equal(p.clipboard.text, null);
   assert.deepEqual(stages(), ['loading', 'content'], 'no copied moment');
   assert.deepEqual(queued(p.local, 'llms_copy'), []);
-  await waitFor(() => p.local.docsVerdicts?.[SITE]?.v === 'not_docs');
+  await waitFor(() => p.local.llmsLevels?.[SITE]?.level === 0);
+  assert.equal(p.badge.text, '', 'no "!": nothing');
 }));
 
 test('main view, the library unreachable: the site’s own verified llms.txt gives the same prompt here', () => withMock({ sites: {} }, async () => {
@@ -1455,7 +1458,7 @@ test('main view, the library unreachable: the site’s own verified llms.txt giv
   assert.equal(main(p).field, `${SUB}/llms.txt`);
   assert.equal(main(p).meta, '1 page · checked today');
   assert.deepEqual(queued(p.local, 'llms_copy').map((e) => e.source), ['fallback']);
-  assert.equal(p.local.docsVerdicts, undefined, 'a local find is not a verdict');
+  assert.equal(p.local.llmsLevels, undefined, 'a local find is not learned');
 }));
 
 test('main view, the library unreachable and no llms.txt here: "Couldn’t reach scoop.md" and Retry', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer() } } }, async () => {
@@ -1495,10 +1498,12 @@ test('0.6.0: the version, the main button wording, and no paywall words', () => 
   assert.match(html, /Advanced ›/);
 });
 
-test('main view: the instructions read as text (no Markdown marks) while the copy keeps them verbatim', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({ agentInstructions: { text: '## Building with AI\n* [API keys overview](/docs/iam/api-keys.md): Authenticate your requests.\n- **Always** use the latest SDK.', source: `https://${SITE}/llms.txt`, method: 'jev' } }) } } }, async () => {
+
+
+test('main view: a long llms.txt URL is cut in the middle, so its host and its end show', () => withMock({ sites: { [SITE]: { llmsApi: llmsAnswer({}, { url: 'https://api-staging.scoop.md/v1/llms/docs.python.org/llms.txt', source: 'scoop' }) } } }, async () => {
   const p = await openPopup(PAGE, { local: { popupView: 'main' } });
   await p.ready;
-  assert.equal(main(p).agent, 'Building with AI\n• API keys overview: Authenticate your requests.\n• Always use the latest SDK.');
-  await p.$('copy-agent').onclick();
-  assert.equal(p.clipboard.text, '## Building with AI\n* [API keys overview](/docs/iam/api-keys.md): Authenticate your requests.\n- **Always** use the latest SDK.');
+  assert.equal(main(p).field, 'api-staging.scoop…ython.org/llms.txt');
+  assert.equal(p.$('llms-field-text').title, 'https://api-staging.scoop.md/v1/llms/docs.python.org/llms.txt');
+  assert.equal(main(p).badge, true);
 }));

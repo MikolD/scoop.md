@@ -8,7 +8,7 @@
 //   quick: [{ kind, url, label, bytes }], overview, topics: [...], hits: [...],
 //   isDevDocs: { verdict, method, score }, quickDevDocs, agentInstructions: [{ text, url }],
 //   docs: { found, root, via, verdict } (/quick's docs field), llms: { url, verified, fullUrl, fullVerified },
-//   notDocs: true (listed in /sites/index notDocs),
+//   notDocs: true (listed in /sites/index notDocs), llmsLevel: 1 | 2 (listed in /sites/index llms),
 //   llmsApi: the GET /v1/llms answer, or a list of answers given in turn (the last one repeats); llmsDelayMs } }
 // GET /sites/index lists indexed sites and notDocs hosts with an ETag (304 for If-None-Match).
 // A crawl request moves one step per GET /crawl-requests/:id; at "complete"
@@ -139,9 +139,10 @@ export async function startMockLibrary({ sites = {}, skill = null, requests = {}
     if (req.method === 'GET' && u.pathname === '/v1/sites/index') {
       const list = Object.entries(sites).filter(([, s]) => s.indexed).map(([name, s]) => ({ site: name, pages: s.pages ?? 12 }));
       const notDocs = Object.entries(sites).filter(([, s]) => s.notDocs).map(([name]) => name);
-      const etag = `"${list.map((x) => `${x.site}:${x.pages}`).join(',')}|${notDocs.join(',')}"`;
+      const llms = Object.fromEntries(Object.entries(sites).filter(([, s]) => s.llmsLevel).map(([name, s]) => [name, s.llmsLevel]));
+      const etag = `"${list.map((x) => `${x.site}:${x.pages}`).join(',')}|${notDocs.join(',')}|${JSON.stringify(llms)}"`;
       if (req.headers['if-none-match'] === etag) { res.writeHead(304, { etag }); return res.end(); }
-      return json(200, { sites: list, notDocs }, { etag });
+      return json(200, Object.keys(llms).length ? { sites: list, notDocs, llms } : { sites: list, notDocs }, { etag });
     }
     if (req.method === 'GET' && (m = u.pathname.match(/^\/v1\/sites\/([^/]+)\/topics$/))) {
       const s = site(decodeURIComponent(m[1]));

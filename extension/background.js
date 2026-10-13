@@ -108,9 +108,9 @@ chrome.alarms.onAlarm.addListener(({ name }) => {
       await activePing(t);
       // Expires finished crawls nobody picked up, so their ✓ clears.
       await ensureAlarms();
-      // How often each docs verdict was shown this hour: two numbers, no sites.
-      for (const [verdict, count] of Object.entries(await takeShownCounts(chrome))) {
-        if (count > 0) t.track('badge_verdict_shown', { verdict, count });
+      // How often each badge ("1", "2") was shown this hour: two numbers, no sites.
+      for (const [level, count] of Object.entries(await takeShownCounts(chrome))) {
+        if (count > 0 && (level === '1' || level === '2')) t.track('badge_llms_shown', { level: Number(level), count });
       }
     }
     await t.flush();
@@ -125,18 +125,18 @@ chrome.storage.onChanged.addListener((changes, area) => {
   setUninstallUrl();
 });
 
-// The icon follows the tab: on switching tabs and when a page finishes loading.
-// A verdict is counted as shown once per tab per site, not on every load.
+// The badge follows the tab: on switching tabs and when a page finishes loading.
+// A badge is counted as shown once per tab per site, not on every load.
 const countedSite = new Map();
 async function badgeTab(tab) {
-  const verdict = await setTabBadge(chrome, tab);
+  const level = await setTabBadge(chrome, tab);
   let site = null;
   try { site = siteKey(tab.url); } catch {}
-  if (!verdict) return countedSite.delete(tab.id);
-  const key = `${site} ${verdict}`;
+  if (!level) return countedSite.delete(tab.id);
+  const key = `${site} ${level}`;
   if (countedSite.get(tab.id) === key) return;
   countedSite.set(tab.id, key);
-  await countShown(chrome, verdict);
+  await countShown(chrome, level);
 }
 chrome.tabs.onRemoved?.addListener((tabId) => countedSite.delete(tabId));
 
