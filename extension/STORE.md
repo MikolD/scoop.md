@@ -81,11 +81,11 @@ In `store-assets/` (copies in `dist/store/`), taken in Chrome with the real 0.6.
 
 | File | Size | Shows |
 |---|---|---|
-| `1-stripe.png` | 1280×800 | stripe.com: the llms.txt field (docs.stripe.com/llms.txt, "513 pages · checked today · found in 0.3s"), Instructions for agents (Stripe's, collapsed with "Show all ⌄") and "Copied ✓"; the toolbar shows "2" |
+| `1-stripe.png` | 1280×800 | stripe.com: the llms.txt field (docs.stripe.com/llms.txt, "513 pages · checked today · found in 0.2s"), Instructions for agents (Stripe's, collapsed with "Show all ⌄") and "Copied ✓"; the toolbar shows "2" |
 | `2-twilio.png` | 1280×800 | twilio.com: www.twilio.com/docs/llms.txt with Twilio's instructions for agents, copied |
 | `3-python.png` | 1280×800 | docs.python.org: an llms.txt prepared by scoop.md ("by scoop.md" badge) with install instructions, copied |
 | `4-hono.png` | 1280×800 | hono.dev: an llms.txt only (no instructions): "Copy llms.txt", copied; the toolbar shows "1" |
 | `5-not-developer.png` | 1280×800 | example.com: "This isn't a developer website. scoop.md is for developer docs." and nothing else |
-| `6-badge.png` | 1280×800 | The toolbar badge close-up: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
+| `6-badge.png` | 1280×800 | The toolbar badge close-ups: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
 | `promo-small-440x280.png` | 440×280 | Small promo tile: icon, "scoop.md", "Scoop any doc into your coding agent" on #ffeee0 |
 | `promo-marquee-1400x560.png` | 1400×560 | Marquee: the same, with the popup from screenshot 1 |
