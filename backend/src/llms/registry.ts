@@ -446,8 +446,8 @@ export async function resolveLlms(pageUrl: string, d: LlmsDeps): Promise<LlmsAns
 
   const q = await quickDiscover(pageUrl, { ...d.quick, fetchImpl: d.fetchImpl, allowLocalhost: d.allowLocalhost, instructions: false });
   if (q.jevTokens) await d.recordJev?.(pageHost, q.jevTokens).catch(() => {});
-  if (!q.docs.found || !q.docs.root) return notDocsAnswer(site, q.docs.verdict === 'no' ? 'no' : 'unknown');
-  const root = q.docs.root;
+  // scoop.md is not limited to developer docs: a site that isn't judged to be docs is prepared from its own origin.
+  const root = q.docs.found && q.docs.root ? q.docs.root : new URL(pageUrl).origin;
   const host = normalizeSite(new URL(root).hostname);
   if (host !== pageHost && (await knownNotDocs(d.db, host, root))) return notDocsAnswer(site);
 

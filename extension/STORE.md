@@ -1,6 +1,6 @@
 # Chrome Web Store listing: scoop.md
 
-Everything the Web Store dashboard asks for, matching what the code in this folder does (version 0.6.0). Build the upload with `npm run pack:extension` → `dist/scoop.md-extension-<version>.zip`. This file and the artwork in `store-assets/` aren't included in the zip.
+Everything the Web Store dashboard asks for, matching what the code in this folder does (version 0.6.1). Build the upload with `npm run pack:extension` → `dist/scoop.md-extension-<version>.zip`. This file and the artwork in `store-assets/` aren't included in the zip.
 
 ## Store listing
 
@@ -21,7 +21,7 @@ Scoop any doc. One click copies the site's llms.txt and its instructions for age
 >
 > • The site's llms.txt and its instructions for agents (how to install, set up and use it), with one button to copy both. The site's own llms.txt when it has one; when it doesn't, scoop.md prepares one, getting-started first, and hosts it at scoop.md/<site>/llms.txt.
 > • Works from anywhere on the site: on stripe.com it finds the docs at docs.stripe.com.
-> • Not a developer website? It says so, and copies nothing.
+> • A site scoop.md can't help with (a shop, a search engine)? It says so, and copies nothing.
 > • The toolbar icon shows "1" on sites with an llms.txt and "2" when they also have instructions for agents, looked up in a list kept on your device.
 >
 > scoop.md never reads the page you're on: it asks for the site's llms.txt by the site's address.
@@ -85,7 +85,7 @@ In `store-assets/` (copies in `dist/store/`), taken in Chrome with the released 
 | `2-twilio.png` | 1280×800 | twilio.com: www.twilio.com/docs/llms.txt with Twilio's instructions for agents, copied |
 | `3-python.png` | 1280×800 | docs.python.org: scoop.md/docs.python.org/llms.txt, prepared by scoop.md ("by scoop.md" badge, 322 pages) with install instructions, copied |
 | `4-hono.png` | 1280×800 | hono.dev: an llms.txt only (no instructions): "Copy llms.txt", copied; the toolbar shows "1" |
-| `5-not-developer.png` | 1280×800 | example.com: "This isn't a developer website. scoop.md is for developer docs." and nothing else |
+| `5-not-developer.png` | 1280×800 | a site on the denylist (amazon.com): "scoop.md has nothing to copy for this site." and nothing else |
 | `6-badge.png` | 1280×800 | The toolbar badge close-ups: "2" on docs.stripe.com, "1" on hono.dev, nothing on example.com |
 | `promo-small-440x280.png` | 440×280 | Small promo tile: the icon with the "2" badge, "scoop.md", "Scoop any doc's llms.txt" and the "Copy llms.txt + instructions" button on #ffeee0 |
 | `promo-marquee-1400x560.png` | 1400×560 | Marquee: "Scoop any doc's llms.txt" with the docs.stripe.com popup (llms.txt field, instructions for agents, "Copied ✓") and the toolbar icon showing "2" |

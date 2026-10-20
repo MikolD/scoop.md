@@ -184,7 +184,7 @@ function agentInstructions(data) {
 
 // The toolbar badge for this site, from this answer at once (kept 7 days):
 // "1" an llms.txt, "2" with instructions for agents, nothing while it is being
-// prepared or when the site isn't a developer site.
+// prepared or when the site is one scoop.md has nothing for.
 function learnBadge(data, docs) {
   const level = !docs || data.llms.status !== 'ready' ? 0 : agentInstructions(data) ? 2 : 1;
   rememberLlms(chrome, siteKey(tab.url), level).then(() => setTabBadge(chrome, tab)).catch(() => {});
@@ -259,7 +259,7 @@ function setLlms({ state, data = null }) {
   $('llms-status').textContent = state === 'unreachable' ? "Couldn't reach scoop.md" : '';
   $('main').setAttribute('aria-label', {
     checking: "Checking this site's llms.txt",
-    no: `${site} isn't a developer website`,
+    no: `scoop.md has nothing to copy for ${site}`,
     unreachable: "Couldn't reach scoop.md",
     yes: `${site}: llms.txt`,
   }[state]);

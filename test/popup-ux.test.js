@@ -449,7 +449,7 @@ test('main view, preparing: copied at once, "Preparing…", then asked again unt
 test('main view, not a developer site: one line, nothing else, nothing copied; the toolbar learns it', () => withMock({ sites: { [SITE]: {} } }, async () => {
   const p = await openPopup(PAGE, {});
   await p.ready;
-  assert.deepEqual(main(p), { field: null, meta: null, badge: false, agent: null, button: null, notDev: "This isn't a developer website. scoop.md is for developer docs." });
+  assert.deepEqual(main(p), { field: null, meta: null, badge: false, agent: null, button: null, notDev: "scoop.md has nothing to copy for this site." });
   assert.equal(p.clipboard.text, null);
   assert.deepEqual(stages(), ['loading', 'content'], 'no copied moment');
   assert.deepEqual(queued(p.local, 'llms_copy'), []);
@@ -477,11 +477,11 @@ test('main view, the library unreachable and no llms.txt here: "Couldn’t reach
   assert.equal(p.clipboard.text, null);
 }));
 
-test('0.6.0: the version, the button wording, one view only, and only the permissions it needs', () => {
-  assert.equal(MANIFEST.version, '0.6.0');
+test('0.6.0: the version (0.6.1), the button wording, one view only, and only the permissions it needs', () => {
+  assert.equal(MANIFEST.version, '0.6.1');
   const html = read('../extension/popup.html');
   assert.match(html, /<span id="copy-llms-label">Copy llms\.txt<\/span>/);
-  assert.match(html, /This isn't a developer website\. scoop\.md is for developer docs\./);
+  assert.match(html, /scoop.md has nothing to copy for this site./);
   assert.ok(!/Advanced|Overview|Search|tab-page|This page/.test(html), 'no Advanced, no tabs');
   assert.deepEqual(MANIFEST.permissions, ['clipboardWrite', 'storage', 'alarms'], 'no scripting or activeTab: the page itself is never read');
 });

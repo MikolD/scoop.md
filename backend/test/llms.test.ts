@@ -281,7 +281,7 @@ test('the hosted file answers while preparing: the instant stage is built on dem
   assert.deepEqual(await serveLlms('docs.stripe.example', d), { status: 302, location: 'https://docs.stripe.example/llms.txt' });
 });
 
-test('/v1/llms, not docs: the lists and verdicts answer nothing, and nothing is stored', async () => {
+test('/v1/llms, not docs: the denylist answers nothing; any other site is prepared from its own origin, whatever it is', async () => {
   const { d, raw, w } = deps({
     'https://example.com/': html('<html><head><title>Example Domain</title></head><body><p>This domain is for use in examples.</p></body></html>'),
   });
@@ -290,14 +290,13 @@ test('/v1/llms, not docs: the lists and verdicts answer nothing, and nothing is 
   });
   assert.equal(w.fetched.length, 0, 'the denylist answers without a request');
   const ex = await resolveLlms('https://example.com/', d);
-  assert.deepEqual([ex.docs.found, ex.llms, ex.prompt], [false, null, null]);
-  // A crawl's not_devtool verdict (about the page it started from) doesn't stop discovery: here it finds nothing either.
+  assert.deepEqual([ex.docs.found, ex.docs.root, ex.llms?.source], [true, 'https://example.com', 'scoop']);
+  // A crawl's not_devtool verdict (about the page it started from) doesn't stop discovery.
   raw.prepare(`INSERT INTO site_profiles (site, status, updated_at) VALUES ('shop.example', 'not_devtool', 'x')`).run();
   assert.equal(await knownNotDocs(d.db, 'shop.example'), false);
   assert.equal(await knownNotDocs(d.db, 'amazon.com'), true);
-  assert.equal((await resolveLlms('https://shop.example/p', d)).docs.found, false);
-  assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM llms_registry').get()!.n, 0);
-  assert.equal(raw.prepare('SELECT COUNT(*) AS n FROM llms_aliases').get()!.n, 0);
+  assert.equal((await resolveLlms('https://shop.example/p', d)).docs.found, true);
+  assert.deepEqual(raw.prepare('SELECT host FROM llms_registry ORDER BY host').all().map((r) => r.host), ['example.com', 'shop.example']);
 });
 
 test('registry: aliases, the public list (docs only, ready only), answers from rows, and the daily refresh', async () => {
