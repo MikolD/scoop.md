@@ -21,7 +21,7 @@ interface Props {
 const {
   noReferrer = false,
   title,
-  description = 'Scoop any doc. One click on any documentation site copies agent-ready Markdown for Claude Code, Codex, Cursor or any coding agent.',
+  description = 'Scoop any doc. One click on any site copies its llms.txt for Claude Code, Codex, Cursor or any coding agent.',
 } = Astro.props;
 const fullTitle = title ? `${title} · scoop.md` : 'scoop.md: Scoop any doc';
 const path = Astro.url.pathname.replace(/\/$/, '') || '/';
