@@ -495,9 +495,10 @@ export async function quickDiscover(pageUrl: string, o: QuickOptions = {}): Prom
   } else if (cachedDocs?.found) {
     docs = cachedDocs;
     rootElsewhere = true;
-  } else if (llmsHit?.verified && llmsHit.source.url === `${page.origin}/llms.txt` && isDevDocs.verdict !== 'no') {
-    // The host's own llms.txt, unless the page was judged not to be a developer
-    // tool's (every Shopify store serves an llms.txt: allbirds.com is no docs).
+  } else if (llmsHit?.verified && llmsHit.source.url === `${page.origin}/llms.txt`) {
+    // The host's own llms.txt, whatever kind of site it is: scoop.md is not
+    // limited to developer docs. (The denylist and shared hosts are answered
+    // before discovery runs.)
     docs = { found: true, root: page.origin, via: 'llms', verdict: 'yes', method: 'llms' };
   } else {
     docs = { found: false, root: null, via: 'none', verdict: isDevDocs.verdict, method: isDevDocs.method };

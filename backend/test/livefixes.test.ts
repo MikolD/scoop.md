@@ -60,7 +60,7 @@ test('page titles: front matter title first (docs.deno.com\'s "Writing an HTTP S
   assert.equal(frontMatterTitle("---\ntitle: 'Single quoted'\n---\n"), 'Single quoted');
 });
 
-test('allbirds.com: a store\'s llms.txt (Shopify serves one for every store) is not docs', async () => {
+test('allbirds.com: a store\'s own llms.txt is served too (scoop.md is not limited to developer docs), though the page is judged not to be docs', async () => {
   const llms = '# Allbirds\n\n> Sustainable shoes.\n\n- [Men\'s shoes](https://www.allbirds.example/collections/mens.md)\n';
   const fetchImpl = async (url: string) => {
     if (url === 'https://allbirds.example/llms.txt') return text(llms)();
@@ -69,9 +69,8 @@ test('allbirds.com: a store\'s llms.txt (Shopify serves one for every store) is 
   };
   const d = await quickDiscover('https://allbirds.example/', { fetchImpl });
   assert.equal(d.isDevDocs.verdict, 'no');
-  assert.equal(d.docs.found, false);
-  assert.equal(d.docs.via, 'none');
-  // Its llms.txt is still reported as what it is.
+  assert.equal(d.docs.found, true);
+  assert.equal(d.docs.via, 'llms');
   assert.equal(d.llms?.url, 'https://allbirds.example/llms.txt');
 });
 
