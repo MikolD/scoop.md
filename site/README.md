@@ -41,7 +41,7 @@ Shell variables reach the dev server directly; `site/.env` (gitignored) works to
 | Variable | When it's read | Default | Purpose |
 |---|---|---|---|
 | `PUBLIC_API_URL` | Runtime, else build time | `https://api.scoop.md` | Library API base URL. Set it in the Vercel project's environment variables to point at staging. |
-| `PUBLIC_CHROME_STORE_URL` | Build time | unset | Chrome Web Store listing. When unset, the hero button reads "Coming soon to the Chrome Web Store" and links to GitHub. Set it in the Vercel project's environment variables and redeploy. |
+| `PUBLIC_CHROME_STORE_URL` | Build time | the live listing (`chromewebstore.google.com/detail/ccfbndgiomnmpanklpmadpapkocihfpd`) | Chrome Web Store listing behind the hero "Add to Chrome" button. Set it to override the default; set it to nothing special otherwise. |
 
 ## Domain
 
