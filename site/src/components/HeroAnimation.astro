@@ -1,12 +1,12 @@
 ---
-// Pure CSS / vanilla-JS looping demo of the Quick Copy flow.
+// Pure CSS / vanilla-JS looping demo of the copy flow: the site\u2019s llms.txt and its instructions for agents.
 // No Lottie dependency. Honors prefers-reduced-motion.
 ---
 
 <div
   class="hero-stage"
   role="img"
-  aria-label="A browser frame on a docs page, the scoop.md toolbar icon lights up, the popup opens showing the Quick Copy panel, the cursor clicks Copy, and a Markdown sheet flies into a terminal."
+  aria-label="A browser frame on a docs page, the scoop.md toolbar icon lights up, the popup opens showing the site\u2019s llms.txt link and its instructions for agents, the cursor clicks Copy llms.txt + instructions, and the prompt lands in a terminal."
 >
   <!-- Browser chrome -->
   <div class="browser">
@@ -62,47 +62,33 @@
             <span>scoop.md</span>
           </div>
         </div>
-        <div class="popup-tabs">
-          <span class="ptab ptab-active">Quick Copy</span>
-          <span class="ptab">Overview</span>
-          <span class="ptab">Search</span>
-        </div>
         <div class="popup-body">
-          <!-- Line 1: docs pill -->
+          <!-- Line 1: the llms.txt chip and its link -->
           <div class="qline qline-1">
-            <span class="chip chip-yes">
-              <span class="chip-dot">✓</span>
-              <span>Docs · docs.stripe.com</span>
-            </span>
+            <span class="label-chip">llms.txt</span>
+            <div class="field"><span class="field-url">docs.stripe.com/llms.txt</span></div>
           </div>
-          <!-- Line 2: llms row -->
+          <!-- Line 2: what it holds -->
           <div class="qline qline-2">
-            <span class="qmeta">llms.txt <span class="qok">✓</span></span>
-            <span class="qdot" aria-hidden="true">·</span>
-            <span class="qmeta">llms-full.txt <span class="qno">✕</span></span>
+            <span class="qmeta">527 pages · checked today</span>
           </div>
-          <!-- Line 3: agent instructions -->
+          <!-- Line 3: instructions for agents -->
           <div class="qline qline-3">
-            <span class="qmeta qexpand">▸ Agent instructions <span class="qbadge">8</span></span>
+            <span class="label-chip">Instructions for agents</span>
           </div>
-          <!-- Line 4: token count -->
+          <!-- Line 4: the instructions, quoted from the llms.txt -->
           <div class="qline qline-4">
-            <span class="tokens-num">~4k</span>
-            <span class="qmeta qsz">tokens &nbsp; 15 KB</span>
-          </div>
-          <!-- Line 5: preview with 3 fading lines -->
-          <div class="qline qline-5">
             <div class="preview-box" aria-hidden="true">
-              <div class="pv-line pv-1"># Receive Stripe events in your webhook endpoint</div>
-              <div class="pv-line pv-2">&gt; Reference from public docs by scoop.md</div>
-              <div class="pv-line pv-3">Docs index: docs.stripe.com/llms.txt</div>
+              <div class="pv-line pv-1">## Best practices for integrating Stripe</div>
+              <div class="pv-line pv-2">- Use the Checkout Sessions API</div>
+              <div class="pv-line pv-3">- Prefer Stripe-hosted payment pages</div>
               <div class="preview-fade"></div>
             </div>
           </div>
           <!-- Copy button: two labels cross-fade -->
           <div class="qline qline-6">
             <button class="copy-btn" tabindex="-1">
-              <span class="lbl lbl-copy">Copy</span>
+              <span class="lbl lbl-copy">Copy llms.txt + instructions</span>
               <span class="lbl lbl-copied">Copied ✓</span>
             </button>
           </div>
@@ -116,7 +102,7 @@
     <div class="terminal-card">
       <span class="term-prompt">claude ›</span>
       <span class="term-idle"><span class="term-caret"></span></span>
-      <span class="term-pasted">pasted 4k tokens of docs <span class="term-ok">✓</span></span>
+      <span class="term-pasted">pasted the llms.txt link + instructions <span class="term-ok">✓</span></span>
     </div>
   </div>
 
@@ -355,13 +341,12 @@
       border-color: #3d3631;
     }
     :root:not([data-theme="light"]) .popup-bar { background: #2b2623 !important; border-color: #3d3631 !important; }
-    :root:not([data-theme="light"]) .popup-tabs { background: #3a2a20 !important; }
-    :root:not([data-theme="light"]) .ptab-active { background: #2b2623 !important; color: #f5ece6 !important; }
-    :root:not([data-theme="light"]) .ptab { color: #b5a397 !important; }
+    :root:not([data-theme="light"]) .label-chip { background: #3a2a20 !important; }
+    :root:not([data-theme="light"]) .field { background: #231f1c !important; border-color: #3d3631 !important; }
+    :root:not([data-theme="light"]) .field-url { color: #f5ece6 !important; }
     :root:not([data-theme="light"]) .copy-btn { background: #c2410c !important; }
     :root:not([data-theme="light"]) .preview-box { background: #231f1c !important; border-color: #3d3631 !important; }
     :root:not([data-theme="light"]) .pv-line { color: #f5ece6 !important; }
-    :root:not([data-theme="light"]) .tokens-num { color: #f5ece6 !important; }
     :root:not([data-theme="light"]) .qmeta { color: #b5a397 !important; }
     :root:not([data-theme="light"]) .popup-brand span { color: #ff9a5c !important; }
   }
@@ -387,40 +372,41 @@
   }
   .popup-brand img { border-radius: 4px; }
 
-  .popup-tabs {
-    display: flex;
-    gap: 3px;
-    margin: 6px 10px;
-    padding: 3px;
+.label-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
     background: #fff4ec;
-    border-radius: 10px;
+    color: #c2410c;
+    font-size: 10.5px;
+    font-weight: 700;
   }
-  .ptab {
-    white-space: nowrap;
-    flex: 1;
-    text-align: center;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 5px 3px;
+  .field {
+    margin-top: 5px;
+    padding: 6px 8px;
+    background: #fff8f3;
+    border: 1px solid #f3dccb;
     border-radius: 7px;
-    color: #7a5a44;
-    cursor: default;
   }
-  .ptab-active {
-    background: #fff;
+  .field-url {
+    display: block;
+    font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+    font-size: 10px;
     color: #2b1b10;
-    box-shadow: 0 1px 3px rgba(122,60,20,.12);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .popup-body {
     display: flex;
     flex-direction: column;
-    padding: 2px 10px 10px;
+    padding: 8px 10px 10px;
     background: #fff;
     border-top: 1px solid #f3dccb;
   }
 
-  /* Quick Copy lines */
+  /* The popup's lines */
   .qline {
     padding: 4px 0;
     opacity: 0;
@@ -438,48 +424,7 @@
   /* Show Copy button once all content is visible */
   .hero-stage.state-line5 .qline-6 { opacity: 1; transform: translateY(0); }
 
-  .chip {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    padding: 4px 10px 4px 6px;
-    border-radius: 999px;
-    font-size: 11px;
-    font-weight: 700;
-  }
-  .chip-yes { background: #2e7d32; color: #fff; }
-  .chip-dot {
-    display: grid; place-items: center;
-    width: 14px; height: 14px;
-    border-radius: 50%;
-    background: rgba(255,255,255,.2);
-    font-size: 8px;
-    flex-shrink: 0;
-  }
-
   .qmeta { font-size: 11px; color: #7a5a44; font-weight: 500; }
-  .qdot { color: #7a5a44; margin: 0 2px; }
-  .qok { color: #2e7d32; font-weight: 700; }
-  .qno { color: #999; }
-  .qexpand { cursor: default; }
-  .qbadge {
-    display: inline-flex; align-items: center; justify-content: center;
-    width: 15px; height: 15px;
-    border-radius: 50%;
-    background: #fff4ec;
-    color: #c2410c;
-    font-size: 9px;
-    font-weight: 700;
-  }
-
-  .tokens-num {
-    font-size: 15px;
-    font-weight: 700;
-    color: #2b1b10;
-    margin-right: 3px;
-  }
-  .qsz { font-size: 10.5px; }
-
   /* Preview box: 3 monospace lines with a bottom fade */
   .preview-box {
     position: relative;
@@ -507,9 +452,9 @@
   }
 
   /* Stagger pv-line reveals when qline-5 becomes visible */
-  .hero-stage.state-line5 .pv-line { opacity: 1; transform: translateY(0); }
-  .hero-stage.state-line5 .pv-2 { transition-delay: .12s; }
-  .hero-stage.state-line5 .pv-3 { transition-delay: .24s; }
+  .hero-stage.state-line4 .pv-line { opacity: 1; transform: translateY(0); }
+  .hero-stage.state-line4 .pv-2 { transition-delay: .12s; }
+  .hero-stage.state-line4 .pv-3 { transition-delay: .24s; }
 
   /* Fade the bottom of the preview box */
   .preview-fade {
@@ -530,7 +475,7 @@
     border-radius: 9px;
     background: #c2410c;
     color: #fff;
-    font-size: 12.5px;
+    font-size: 11.5px;
     font-weight: 700;
     cursor: pointer;
     overflow: hidden;
@@ -625,9 +570,9 @@
                 opacity .3s ease;
   }
   .hero-stage.state-popup-open .cursor { opacity: 1; }
-  .hero-stage.state-cursor-copy .cursor { top: 350px; right: 23px; }
+  .hero-stage.state-cursor-copy .cursor { top: 275px; right: 23px; }
   .hero-stage.state-copied .cursor {
-    top: 350px; right: 23px;
+    top: 275px; right: 23px;
     transform: scale(.85);
     transition: transform .1s ease, top .55s cubic-bezier(.4,0,.2,1), right .55s cubic-bezier(.4,0,.2,1);
   }
